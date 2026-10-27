@@ -14,7 +14,8 @@ fake: carrier webhooks were simulated, provider keys were placeholders, and mode
 - Reuse Dograh as it is. The Synchronize backend is the only client of the Dograh API and authenticates with one
   org-scoped `X-API-Key` per workspace; the browser never sees it. Dograh source changes need a reason written next to
   the change. Everything added so far lives in `synchronize/`.
-- Customers never see or edit prompts, greeting or tone. The agent definition is code in the Synchronize repo.
+- Customers never see or edit prompts, greeting or tone. The agent is content, not code: `synchronize/workflows/*.json`
+  (load instructions in its README); the STT/LLM/TTS choice is `synchronize/model-configuration.md`.
 
 ## Syncing upstream
 

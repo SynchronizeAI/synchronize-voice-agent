@@ -1,0 +1,15 @@
+{
+  "workflow_configurations": {
+    "max_call_duration": 900,
+    "call_dispositions": [
+      {
+        "code": "follow_up",
+        "description": "담당자가 확인하거나 고객에게 다시 연락해야 할 일이 남았어요. 고객이 가격, 가능 여부, 시기를 물었거나 다시 연락해 달라고 했어요."
+      },
+      {
+        "code": "done",
+        "description": "담당자가 할 일이 없는 통화예요. 확인할 것도 다시 연락할 것도 없어요. 잘못 건 전화나 인사만 남긴 전화가 그래요."
+      }
+    ]
+  }
+}

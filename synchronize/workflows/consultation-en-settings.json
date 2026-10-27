@@ -1,0 +1,15 @@
+{
+  "workflow_configurations": {
+    "max_call_duration": 900,
+    "call_dispositions": [
+      {
+        "code": "follow_up",
+        "description": "The owner still has to confirm something or get back to the caller: the caller asked about price, availability, timing or whether something is possible, or asked to be called back."
+      },
+      {
+        "code": "done",
+        "description": "The call needed nothing from the owner: nothing to confirm, nothing to return, such as a wrong number or a caller who only wanted to leave a thank-you."
+      }
+    ]
+  }
+}
