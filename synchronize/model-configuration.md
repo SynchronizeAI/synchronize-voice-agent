@@ -94,8 +94,11 @@ All under `/api/v1/model-connections`, authenticated with the organization's `X-
   name no languages. Which voice sounds natural in Korean on a phone line is a listening decision.
 * **The greeting is not guaranteed word for word in realtime mode.** This code tells the model to say it "exactly as written"
   (`api/services/pipecat/realtime/static_greeting.py`); OpenAI's GPT-Live guide says "the model may paraphrase the greeting".
-  The AI disclosure is a legal gate: beyond the first test use a pre-recorded greeting (`greeting_type: "audio"` on the start
-  node) or a separate STT/TTS setup, where TTS speaks the text verbatim. The workflows here use a text greeting.
+  If the exact words ever matter, use a pre-recorded greeting (`greeting_type: "audio"` on the start node) or a separate
+  STT/TTS setup, where TTS speaks the text verbatim. The workflows here use a text greeting.
+* **`allow_greeting_interrupt: false` mutes the caller for 35 s in realtime mode.** Dograh mutes the caller until the greeting
+  is reported as played, and in realtime mode that report never arrives (`first_output_at=None`, outcome `timed_out`/`closed`),
+  so the caller was silent for the whole timeout (seen in four test runs). The workflows set it to `true`.
 * **Caller quotes** come from the session's input transcription (default `gpt-realtime-whisper`), not from what the model
   heard; check the Korean quotes in the first test.
 * **Deepgram cannot be the only vendor for Korean:** Flux and Aura-2 TTS list no Korean; Nova-3 STT does. There is no Nova-3

@@ -96,8 +96,8 @@ SSH forwarding forward the same port numbers (`ssh -L 56300:127.0.0.1:56300 -L 5
 agent, "Test Audio" > "Run Test". `next dev` fetches the Geist font from fonts.googleapis.com when `layout.tsx` first compiles
 (`next/font/google`); nothing else in the UI or API contacts a third party while telemetry keys are unset.
 
-First-test caveat (not a blocker): in OpenAI Realtime mode the greeting is only a prompt to the model, so the AI-disclosure sentence is not guaranteed
-word for word (it came out verbatim in the two realtime test runs, but nothing enforces it); a legal gate needs a pre-recorded greeting or separate STT/TTS.
+First-test caveat (not a blocker): in OpenAI Realtime mode the greeting is only a prompt to the model, so the greeting is not guaranteed
+word for word (it came out verbatim in the realtime test runs); if the exact words ever matter, use a pre-recorded greeting (`greeting_type: audio`).
 `gpt-live-1` did not start a session with the dev key (greeting never spoken, run ended in `pipeline_error`).
 
 WebRTC: signaling is a WebSocket on the API port (forwarded); **media is UDP and is not carried by SSH forwarding.** The server

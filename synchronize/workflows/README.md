@@ -4,8 +4,13 @@ The AI phone consultation, ready to load: `consultation-ko.json` and `consultati
 `POST /api/v1/workflow/create/definition`; `*-settings.json` is the body of `PUT /api/v1/workflow/{id}` (call limit
 900 s and the two dispositions). Use the pair that matches the customer's language. Customers never see this text.
 
-Per customer, change one thing: replace every `YOUR BUSINESS NAME` (workflow name, greeting, persona, closing) with the
-business name. It must not contain `{{`, `}}`, `"`, `\`, `/` or `&`.
+Both are an office front desk, not only a consultation line: the caller may be a new inquiry, an existing customer, a partner or
+vendor, or a sales call. The AI says it is an AI and that the call is recorded in its greeting, takes the message, and promises nothing
+about price, schedule, feasibility or the status of existing work. Sections follow OpenAI's voice prompting guide (role, tone,
+unclear audio, escalation; one question at a time; vary wording). `consultation-ko.json` is 영훈솔루션's line;
+`consultation-en.json` is generic: replace every `YOUR BUSINESS NAME` (workflow name, greeting, persona, closing) with the business
+name. A prompt must not contain `{{`, `}}`, `"`, `\`, `/` or `&`. Who the caller is goes in the first line of `facts` (`구분:` or
+`Caller type:`), so the Synchronize page needs no extra field.
 
 ```bash
 sed -i 's/YOUR BUSINESS NAME/Acme Plumbing/g' consultation-en.json
