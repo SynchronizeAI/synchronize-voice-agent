@@ -14,13 +14,18 @@ vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act A
 one also says the call is recorded (all-party-consent US states; a Korean recording notice is not required by 통신비밀보호법, only by PIPA if
 the legal basis is consent; the customer's privacy policy must name the processors and the cross-border transfer). It takes the message, and promises nothing
 about price, schedule, feasibility or the status of existing work. Sections follow OpenAI's voice prompting guide (role, tone,
-unclear audio, escalation; one question at a time; vary wording). `consultation-ko.json` is 영훈솔루션's line;
-`consultation-en.json` is generic: replace every `YOUR BUSINESS NAME` (workflow name, greeting, persona, closing) with the business
-name. A prompt must not contain `{{`, `}}`, `"`, `\`, `/` or `&`. Who the caller is goes in the first line of `facts` (`구분:` or
+unclear audio, escalation; one question at a time; vary wording). `consultation-ko.json` and `consultation-en.json` are the same product prompt in two languages; neither names a business or an
+industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
+in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
+context variables apply to test calls only), so there are two ways to supply it. For the first customers, copy the workflow and replace
+the expression with the literal name (`sed`, below). For many customers, set Pre-Call Data Fetch on the start node: Dograh POSTs the
+called number to a Synchronize endpoint and merges the returned `initial_context` (`business_name`) into the call; that endpoint is not
+built yet. Keep the name before a noun (`... AI 비서예요`), never before a Korean particle. A prompt must not contain `{{` or `}}` other than
+that variable, nor `"`, `\`, `/` or `&`. Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
 ```bash
-sed -i 's/YOUR BUSINESS NAME/Acme Plumbing/g' consultation-en.json
+sed -i 's/{{business_name | fallback:[^}]*}}/Acme Plumbing/g' consultation-en.json
 H='Content-Type: application/json'; K="X-API-Key: $DOGRAH_API_KEY"   # the customer organization's key
 ID=$(curl -fsS -X POST "$DOGRAH_URL/api/v1/workflow/create/definition" -H "$K" -H "$H" -d @consultation-en.json | jq .id)
 curl -fsS -X PUT  "$DOGRAH_URL/api/v1/workflow/$ID" -H "$K" -H "$H" -d @consultation-en-settings.json
