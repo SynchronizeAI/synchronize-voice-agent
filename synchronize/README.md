@@ -4,16 +4,15 @@ This is Synchronize's fork of [dograh-hq/dograh](https://github.com/dograh-hq/do
 phone-consultation feature: a carrier forwards a customer's calls to a connection number, Dograh answers with a Pipecat
 agent, and the Synchronize web app reads call history from Dograh's HTTP API.
 
-Nothing in this fork has been verified with a real call. Every telephony and model provider used while developing it was a
-fake: carrier webhooks were simulated, provider keys were placeholders, and model calls went to nothing. Treat
-"connectivity works" as unproven until someone places a real call.
+**No real phone call has been placed.** Carrier webhooks were simulated. The local test organization talks to OpenAI with a
+dev key that lives outside the repo (browser calls with a synthetic caller, see "Checks without a microphone").
 
 ## Rules for this fork
 
 - `main` stays equal to `upstream/main`. Synchronize work lives on `synchronize/voice-agent-v1` (local, not pushed).
-- Reuse Dograh as it is. The Synchronize backend is the only client of the Dograh API and authenticates with one
-  org-scoped `X-API-Key` per workspace; the browser never sees it. Dograh source changes need a reason written next to
-  the change. Everything added so far lives in `synchronize/`.
+- Reuse Dograh as it is. The Synchronize backend is the only client of the Dograh API and authenticates with an org-scoped
+  `X-API-Key`; the browser never sees it. Dograh source changes need a reason written next to the change. Everything added
+  so far lives in `synchronize/`, and each glue file says in its first lines what Dograh cannot do.
 - Customers never see or edit prompts, greeting or tone. The agent is content, not code: `synchronize/workflows/*.json`
   (load instructions in its README); the STT/LLM/TTS choice is `synchronize/model-configuration.md`.
 
@@ -28,86 +27,96 @@ git checkout synchronize/voice-agent-v1 && git rebase main
 git submodule update --init --recursive      # pipecat is pinned by the commit recorded in main
 ```
 
-After a rebase, re-run `synchronize/dev-up.sh` (it applies new Alembic migrations) and replay the recorded fixtures against
-the new build to see what drifted.
-
 ## Run it locally
 
-Needs Docker, Python 3.13 with `uv`, and the `pipecat` submodule initialised (`git submodule update --init --recursive`).
-Everything heavy (venv, logs, pid files, env file) lives in one directory outside the repo; call it `$SYNC_VOICE_DEV_DIR`.
+Dograh's own flow is `docs/contribution/setup.mdx` (`scripts/start_services_dev.sh`, `cd ui && npm run dev`). Differences used
+here: loopback ports, and venv / env file / logs outside the repo in one directory, `$SYNC_VOICE_DEV_DIR`.
 
 ```bash
-export SYNC_VOICE_DEV_DIR=/home/enoch/sync-merge-work/.agent-tmp/dograh-up   # any directory outside the repo
-
-# 1. Infra: Postgres, Redis, MinIO on loopback ports (skip if the shared sync-voice-dograh project is already up).
+export SYNC_VOICE_DEV_DIR=/home/enoch/sync-merge-work/.agent-tmp/dograh-up
+# 1. Postgres, Redis, MinIO on loopback ports (the shared sync-voice-dograh project already runs them)
 docker compose -p sync-voice-dograh -f docker-compose-local.yaml -f synchronize/compose.dev-ports.yaml up -d postgres redis minio
-
-# 2. venv with Dograh's requirements (the script installs into the active interpreter and
-#    installs pipecat editable from the submodule).
+# 2. venv: Dograh's stock script installs into the active interpreter (pipecat editable from the submodule)
 uv venv --python 3.13 "$SYNC_VOICE_DEV_DIR/venv"
 VIRTUAL_ENV="$SYNC_VOICE_DEV_DIR/venv" PATH="$SYNC_VOICE_DEV_DIR/venv/bin:$PATH" bash scripts/setup_requirements.sh
-
-# 3. Env file.
-cp synchronize/dev.env.example "$SYNC_VOICE_DEV_DIR/api.env"   # then replace OSS_JWT_SECRET and DOGRAH_DEVOPS_SECRET
-
-# 4. Start / stop. dev-up.sh runs `alembic upgrade head`, starts uvicorn and the arq worker, waits for /api/v1/health.
+# 3. $SYNC_VOICE_DEV_DIR/api.env = api/.env.example with these keys changed
+# 4. API + arq worker on 127.0.0.1 (applies migrations first)
 synchronize/dev-up.sh
-synchronize/dev-down.sh
 ```
 
-`dev-up.sh` restarts a previous run of itself. It refuses to start when its port is held by something else, and
-`dev-down.sh` stops only the processes recorded in `$SYNC_VOICE_DEV_DIR/run/*.pid`; it never touches containers.
-Logs are in `$SYNC_VOICE_DEV_DIR/logs/` (`uvicorn.log`, `arq.log`, plus the raw `*.out` files).
-
-What runs: `uvicorn api.app:app` (127.0.0.1, one worker, no reload) and the arq worker (`api.tasks.arq.WorkerSettings`),
-which runs the post-call completion job (final extraction, integrations, billing step) and the sweepers. Not started:
-`ari_manager`, `campaign_orchestrator` (no Asterisk, no campaigns) and the Next.js UI.
-
-### Ports
-
-| Port | What |
-| --- | --- |
-| 56800 | Dograh API (`/api/v1/...`, OpenAPI at `/openapi.json`) |
-| 56432 / 56379 | Postgres / Redis |
-| 56900 / 56901 | MinIO S3 API / console |
-| 56801 | second API process in S3 (presigned URL) mode, only when started by hand, see below |
-
-### Hosted services off
-
-- **MPS (services.dograh.com)** has no disable flag. The only knob is `MPS_API_URL`; `dev.env.example` points it at the
-  closed loopback port `http://127.0.0.1:1`, so any MPS call fails immediately and nothing leaves the host. Consequences,
-  observed: signup still succeeds, but org bootstrap cannot create a default model configuration, so
-  `GET /model-connections/default` returns `{"model_configuration_uuid": null}` until a BYO provider connection and model
-  configuration are created and set as default. Bootstrap is not retried on the API-key path.
-- **Telemetry.** Sentry starts only when `SENTRY_DSN` is set (and in OSS mode only with `ENABLE_TELEMETRY=true`), PostHog only
-  when `POSTHOG_API_KEY` is set, Langfuse only when `LANGFUSE_*` are set. Leave them unset and keep
-  `ENABLE_TELEMETRY="false"`. With the env above, the open sockets of both processes are loopback only (Postgres, Redis,
-  MinIO). The log line `Error connecting to cloudflared: ... name resolution` is the tunnel probe failing on its DNS name;
-  it is harmless and `/health` reports `tunnel_url: null`.
-- **Signup** stays enabled (`ENABLE_SIGNUP=true`): `POST /api/v1/auth/signup` is the only way Dograh creates an organization.
-  Use an e-mail domain that is not special-use; `.invalid` and `.local` are rejected, `*.example` is accepted.
-
-### Storage
-
-The bundled MinIO bucket is public and its URLs are unsigned and never expire. That is acceptable for local development
-only. For presigned URLs run an API process with the S3 backend pointed at MinIO (or real S3) by adding to the environment:
+`api.env` keys that differ from `api/.env.example`:
 
 ```
-ENABLE_AWS_S3=true AWS_ACCESS_KEY_ID=<minio key> AWS_SECRET_ACCESS_KEY=<minio secret> S3_BUCKET=voice-audio
-S3_REGION=us-east-1 S3_ENDPOINT_URL=http://127.0.0.1:56900 S3_SIGNATURE_VERSION=s3v4 S3_ADDRESSING_STYLE=path
+UVICORN_BASE_PORT=56800
+BACKEND_API_ENDPOINT=http://127.0.0.1:56800
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:56432/postgres
+REDIS_URL=redis://:redissecret@127.0.0.1:56379
+OSS_JWT_SECRET=<random>            DOGRAH_DEVOPS_SECRET=<random>
+MPS_API_URL=http://127.0.0.1:1     # Dograh's hosted MPS has no off switch, only this URL: calls fail at once
+ENABLE_TELEMETRY=false             # and leave SENTRY_DSN, POSTHOG_API_KEY, LANGFUSE_* unset
+MINIO_ENDPOINT=127.0.0.1:56900     MINIO_PUBLIC_ENDPOINT=http://127.0.0.1:56900
 ```
 
-and calling `GET /api/v1/s3/signed-url?key=...&storage_backend=s3` on it.
+Ports: API `56800` (`/api/v1/...`, `/openapi.json`), UI `56300`, Postgres `56432`, Redis `56379`, MinIO `56900`/`56901`. Not
+started: `ari_manager`, `campaign_orchestrator` (no Asterisk, no campaigns). With this env both processes hold loopback
+sockets only. MPS off means: signup works, org bootstrap cannot create a default model configuration, so
+`GET /model-connections/default` is `{"model_configuration_uuid": null}` until a provider connection and model configuration
+are created and set as default (bootstrap is not retried on the API-key path). `POST /auth/signup` is the only way Dograh
+creates an organization; e-mail domains `.invalid`/`.local` are rejected, `*.example` works.
 
-### Providers
+Creating a provider connection makes Dograh call the provider's `GET {base_url}/models` to validate the key. Creating or
+updating a telephony phone number makes Dograh call the carrier (ownership check, webhook push); with fake credentials that
+fails, so development phone-number rows are inserted with `db_client.create_phone_number`.
 
-Creating a provider connection makes Dograh call `GET {base_url}/models` to validate the key. For local work use a fake key
-with a `connection_settings.base_url` that points at a loopback stub, not at a real provider. Creating or updating a
-telephony phone number makes Dograh call the carrier (ownership check, webhook push), which cannot succeed with fake
-credentials; a phone-number row for development has to be inserted through `db_client.create_phone_number`.
+## Public URL for inbound telephony (not set; no tunnel approved)
 
-## Seeded data
+A carrier must reach the API, and the media WebSocket it is told to dial. These are the settings that carry the public address
+(`api/utils/common.py:get_backend_endpoints`, `api/utils/tunnel.py`):
 
-The shared dev database holds clearly synthetic data (caller `+1415555xxxx`, run name `WR-TEL-IN-SEED0001`, a 6 s tone as
-the "recording", `extra.synthetic.synthetic = true` on the run). It is not a call. Recorded request/response pairs and the
-list of what is real versus seeded are in `/home/enoch/sync-merge-work/.agent-tmp/voice-fixtures/README.md`.
+- **`BACKEND_API_ENDPOINT`** (or `PUBLIC_BASE_URL`, from which it derives): the origin Dograh pushes to the carrier as the inbound
+  webhook (`<origin>/api/v1/telephony/inbound/run`), puts in the `<Stream url=...>` / WebSocket address of every call
+  (`https` gives `wss`, `http` gives `ws`) and in status callbacks. Set it to the public `https://` origin. While it is a
+  local or private address Dograh first looks for a cloudflared sidecar at `http://cloudflared:2000/metrics` (a docker
+  service name) and only then uses the configured value; a public hostname or IP is used as is.
+- **`FORWARDED_ALLOW_IPS`**: the address of the proxy or tunnel in front of uvicorn. Without it `request.url` stays `http://` and
+  Twilio's URL-signature check rejects real calls (comment in `scripts/run_web.sh`).
+- **`MINIO_PUBLIC_ENDPOINT`** (derives from `PUBLIC_BASE_URL`): base of the recording and transcript URLs handed to clients.
+- **`TELEPHONY_WS_TOKEN_SECRET`** (+ `TELEPHONY_WS_TOKEN_ENFORCE=true`): signs the media WebSocket URL; without it the id triple in
+  the URL is the only protection once the port is public.
+
+The webhook URL reaches the carrier only when a phone number is created or updated in Dograh (or is typed into the carrier
+console), so re-save the number after the address changes.
+
+## Browser test (UI) and WebRTC
+
+Stock UI flow, loopback only: in `ui/`, `.env` with `BACKEND_URL=http://127.0.0.1:56800`, `NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:56800`,
+`UI_PORT=56300`, then `npm ci && npm run dev -- --hostname 127.0.0.1`. The browser calls the API at `NEXT_PUBLIC_BACKEND_URL`, so with
+SSH forwarding forward the same port numbers (`ssh -L 56300:127.0.0.1:56300 -L 56800:127.0.0.1:56800 <host>`) and open
+`http://localhost:56300` (`localhost` counts as a secure context, which the microphone needs). Sign up or sign in, open the
+agent, "Test Audio" > "Run Test". `next dev` fetches the Geist font from fonts.googleapis.com when `layout.tsx` first compiles
+(`next/font/google`); nothing else in the UI or API contacts a third party while telemetry keys are unset.
+
+WebRTC: signaling is a WebSocket on the API port (forwarded); **media is UDP and is not carried by SSH forwarding.** The server
+offers its non-loopback IPv4 addresses on ephemeral UDP ports (aioice never offers 127.0.0.1; `ENVIRONMENT=local` filters
+nothing), and both browser and server also use the hard-coded `stun:stun.l.google.com:19302` unless `FORCE_TURN_RELAY=true`
+(`api/routes/webrtc_signaling.py:get_ice_servers`, `ui/.../useWebSocketRTC.tsx`). So media flows only if the laptop can reach the
+host's address over UDP. The alternative that needs nothing but TCP forwarding is Dograh's TURN: `ENABLE_COTURN=true`,
+`TURN_HOST`, `TURN_SECRET`, `FORCE_TURN_RELAY=true` and the `coturn` service of `docker-compose.yaml` (config template
+`deploy/templates/turnserver.remote.conf.template`), with the TURN port forwarded too. Not tried.
+
+## Checks without a microphone
+
+- **Text chat**: UI "Test Chat" tab, or `POST /api/v1/workflow/{id}/text-chat/sessions`, `.../sessions/{run_id}/messages`, `.../end`.
+  Runs the real LLM, node transitions and the post-call extraction of the node active at the end. It does not run the call
+  disposition classifier (`call_disposition` stays `end_call`) and records no audio.
+- **Draft or published**: text chat and the browser "Run Test" both create runs with `use_draft=true`: they run the draft when one
+  exists, else the published version. Phone calls always run the published version.
+- **Headless browser call**: Chromium in the local `mcr.microsoft.com/playwright` image with `--use-fake-device-for-media-stream
+  --use-file-for-fake-audio-capture=<wav>` signs in, clicks "Run Test" and speaks a recorded caller. It exercises signaling,
+  WebRTC, STT, LLM, TTS, recording and extraction. Scripts: `/home/enoch/sync-merge-work/.agent-tmp/dograh-up/tools/`.
+
+## Seeded data and fixtures
+
+The shared dev database holds synthetic data (caller `+1415555xxxx`, run `WR-TEL-IN-SEED0001`, `extra.synthetic.synthetic = true`).
+Recorded requests and responses, and what is real versus seeded, are in
+`/home/enoch/sync-merge-work/.agent-tmp/voice-fixtures/README.md`.
