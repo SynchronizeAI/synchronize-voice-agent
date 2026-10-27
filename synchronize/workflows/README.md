@@ -4,11 +4,10 @@ The AI phone consultation, ready to load: `consultation-ko.json` and `consultati
 `POST /api/v1/workflow/create/definition`; `*-settings.json` is the body of `PUT /api/v1/workflow/{id}` (call limit
 900 s and the two dispositions). Use the pair that matches the customer's language. Customers never see this text.
 
-One working node: the start node carries the whole brief and the extraction (a caller can hang up in it), and two edges lead to the closing node.
-The first Railway call (2026-10-27) never left a separate Consultation node, so no summary was extracted; a post-call QA node reviews every call.
-Latency measured on that call, per turn 2.7 to 3.3 s: ElevenLabs Scribe realtime waits about 1.7 s of silence before it commits a transcript (its
-default; Dograh does not expose `vad_silence_threshold_secs`), the LLM takes about 0.5 s to the first token on any OpenAI model tried, TTS about 0.4 s.
-Speech-to-speech (`gpt-realtime-2.1`) removes the commit wait; the greeting may then be paraphrased, so check that the AI notice is still spoken.
+Three nodes follow Dograh's roles: the start node plays the greeting and routes, the agent node takes the message, the end node closes; the
+global node holds persona, tone and rules. Each of the three extracts what it has so far, because a caller can hang up in any of them (the
+first Railway call hung up in the start node and left no summary). A post-call QA node reviews every call. The prompts follow OpenAI's
+voice prompting guide (role, tone and length, language, unclear audio, what never to do, hand-off; goal and exit per step).
 
 Both are an office front desk, not only a consultation line: the caller may be a new inquiry, an existing customer, a partner or
 vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act Art. 31 and MSIT guideline, for a voice that can pass as human); the English
