@@ -1,6 +1,6 @@
 {
   "workflow_configurations": {
-    "max_call_duration": 900,
+    "max_call_duration": 300,
     "call_dispositions": [
       {
         "code": "follow_up",

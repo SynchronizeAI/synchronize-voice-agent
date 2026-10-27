@@ -22,14 +22,21 @@ rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL`, `DO
 
 ## Measured
 
-First real call, ElevenLabs Scribe v2 realtime + gpt-5-mini + Flash v2.5 (Han), 2.7 to 3.3 s per turn: Scribe commits a transcript after
-about 1.7 s of silence (its default; Dograh does not expose `vad_silence_threshold_secs`), the language model needs about 0.5 s to its first
-token (gpt-5-mini, gpt-4.1-mini, gpt-4.1 and gpt-5-nano all measured the same from the server), speech about 0.4 s. Speech-to-speech
-(`gpt-realtime-2.1`) has no commit wait; the greeting may then be paraphrased, so listen for the AI notice. gpt-4.1 follows the prompt
-better than gpt-5-mini: on the same prompts and 25 Korean turns scripted through the text-chat API (`POST /workflow/{id}/text-chat/sessions`),
-13 turns broke a rule against 19; the final prompts on gpt-4.1 broke a rule in 10 of 25 Korean and 6 of 21 English turns (rules: more than two
-sentences, polite-formal endings, restating the caller, asking for the phone number, leaking the instruction). gpt-4.1 is the language model
-of both configurations. Not measured yet: Korean voice quality of OpenAI voices, realtime latency, any real call with these prompts.
+End of the caller's speech to the first sound, Korean sentences at 8 kHz from a US server (clean synthetic callers, so network and noise are not included):
+`gpt-realtime-2.1` 1.66 s median (its server VAD waits 0.5 s; 1.30 s with reasoning effort `minimal`, a setting Dograh does not pass); ElevenLabs
+Scribe v2 realtime + gpt-4.1 + Flash v2.5 about 2.7 s (Scribe commits after 1.83 s, its default; Dograh does not expose `vad_silence_threshold_secs`;
+gpt-4.1 first sentence 0.62 to 0.70 s; speech 0.14 s); Deepgram Nova-3 `ko` returns the final text 0.3 to 0.5 s after the end of speech, and with
+Dograh's default turn stop (0.2 s VAD + 0.6 s) the cascade comes to about 1.6 s (calculated). A real Deepgram call logged STT 0.3 to 0.4 s, LLM 0.6 to 1.0 s,
+speech 0.11 to 0.13 s; a real realtime call logged 0.8 to 1.4 s to the first sound. The bot speaks 6.2 syllables per second, which is not slow,
+so a slow feel comes from long replies and the wait before them. `gpt-4.1` ends 2027-01-14 and its replacement `gpt-6-luna` took 1.3 s to a first
+sentence in the same probe, so plan the swap.
+
+Conversation quality is judged with a simulated caller that talks like a real one (fillers, corrections, details nobody asked for) through the
+text-chat API (`POST /workflow/{id}/text-chat/sessions`), each reply graded for restating the caller, asking about the substance of the matter, and
+length. The first real Deepgram call showed the failure the scripted checks missed (restating every turn, interrogating the caller's subject); after the
+step-per-job rewrite, 12 Korean calls gave restating in 13 of 40 replies against 46 of 54 before, and questions about the matter 0 against 16. What
+remains is mostly the three short sentences of the goodbye. Not measured: how the OpenAI and ElevenLabs Korean voices sound compared by ear, and any
+real call with the new structure.
 
 ## Upstream
 
