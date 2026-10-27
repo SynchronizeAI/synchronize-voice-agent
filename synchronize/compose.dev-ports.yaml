@@ -1,0 +1,13 @@
+# Remaps the host ports of docker-compose-local.yaml off the defaults and binds them to loopback.
+#   docker compose -p sync-voice-dograh -f docker-compose-local.yaml -f synchronize/compose.dev-ports.yaml up -d postgres redis minio
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:56432:5432"
+  redis:
+    ports: !override
+      - "127.0.0.1:56379:6379"
+  minio:
+    ports: !override
+      - "127.0.0.1:56900:9000"
+      - "127.0.0.1:56901:9001"
