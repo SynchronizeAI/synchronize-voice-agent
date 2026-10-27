@@ -5,7 +5,9 @@ The AI phone consultation, ready to load: `consultation-ko.json` and `consultati
 900 s and the two dispositions). Use the pair that matches the customer's language. Customers never see this text.
 
 Both are an office front desk, not only a consultation line: the caller may be a new inquiry, an existing customer, a partner or
-vendor, or a sales call. The AI says it is an AI and that the call is recorded in its greeting, takes the message, and promises nothing
+vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act Art. 31 and MSIT guideline, for a voice that can pass as human); the English
+one also says the call is recorded (all-party-consent US states; a Korean recording notice is not required by 통신비밀보호법, only by PIPA if
+the legal basis is consent; the customer's privacy policy must name the processors and the cross-border transfer). It takes the message, and promises nothing
 about price, schedule, feasibility or the status of existing work. Sections follow OpenAI's voice prompting guide (role, tone,
 unclear audio, escalation; one question at a time; vary wording). `consultation-ko.json` is 영훈솔루션's line;
 `consultation-en.json` is generic: replace every `YOUR BUSINESS NAME` (workflow name, greeting, persona, closing) with the business
