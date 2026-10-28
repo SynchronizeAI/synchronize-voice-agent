@@ -14,7 +14,7 @@
           "greeting_type": "text",
           "greeting": "Hello, you've reached {{business_name | fallback:our office}}. An AI assistant is answering for the team, and the call is recorded. What can I help you with?",
           "allow_greeting_interrupt": true,
-          "prompt": "Your greeting has just asked what the caller is calling about.\n- As soon as they state a reason, a person they want, or a message, ask only for their name and nothing about what they said. If they already gave their name, do not ask; move on.\n- Once they give a name or decline, move on. If they give only a title or a company name, ask for their name once more.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, wish them well and end the call.",
+          "prompt": "Your greeting has just asked what the caller is calling about.\n- As soon as they state a reason, a person they want, or a message, say \"Okay,\" and ask only for their name and nothing about what they said. If they already gave their name, do not ask; move on.\n- Once they give a name or decline, move on. If they give only a title or a company name, ask for their name once more.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, wish them well and end the call.",
           "allow_interrupt": true,
           "add_global_prompt": true,
           "extraction_enabled": true,
@@ -236,7 +236,7 @@
         "data": {
           "label": "all_done",
           "condition": "The caller answered the question or said they would rather not say more.",
-          "transition_speech": "Okay, thanks for telling me.",
+          "transition_speech": "Okay, got it.",
           "transition_speech_type": "text"
         }
       }
