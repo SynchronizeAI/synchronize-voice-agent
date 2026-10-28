@@ -12,7 +12,6 @@
       }
     ],
     "turn_start_min_words": 3,
-    "turn_stop_strategy": "turn_analyzer",
-    "smart_turn_stop_secs": 1.0
+    "turn_stop_strategy": "turn_analyzer"
   }
 }
