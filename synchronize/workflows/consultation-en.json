@@ -14,65 +14,7 @@
           "greeting_type": "text",
           "greeting": "Hello, you've reached {{business_name | fallback:our office}}. An AI assistant is answering for the team, and the call is recorded. What can I help you with?",
           "allow_greeting_interrupt": true,
-          "prompt": "Your greeting has just asked what the caller is calling about.\n- As soon as they state a reason, a person they want, or a message, say \"Okay,\" and ask only for their name and nothing about what they said. If they already gave their name, do not ask; move on.\n- Once they give a name or decline, move on. If they give only a title or a company name, ask for their name once more.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, wish them well and end the call.",
-          "allow_interrupt": true,
-          "add_global_prompt": true,
-          "extraction_enabled": true,
-          "extraction_prompt": "This is for the owner, who will read it after the call. Base every value on what the caller actually said in this conversation, and leave a value empty rather than guess. Write in plain, brief English.",
-          "extraction_variables": [
-            {
-              "name": "customer_name",
-              "type": "string",
-              "prompt": "The caller's name as they said it. Empty if they never gave one."
-            },
-            {
-              "name": "topic",
-              "type": "string",
-              "prompt": "Why they called, as a short title of at most six words."
-            },
-            {
-              "name": "summary",
-              "type": "string",
-              "prompt": "Two or three plain sentences for the owner: what the caller wants and what was said."
-            },
-            {
-              "name": "facts",
-              "type": "string",
-              "prompt": "The concrete details the caller gave, one per line as 'label: value'. Take each label from what the caller talked about, in their terms; do not add a line for something that was not discussed. If the call shows who the caller is (new inquiry, existing customer, partner and so on), put it first as Caller type: followed by the value."
-            },
-            {
-              "name": "quotes",
-              "type": "string",
-              "prompt": "Up to three of the caller's own sentences that show best what they want, one per line, copied word for word from the conversation. Do not correct, translate or shorten them, and quote only the caller. Empty if there is nothing worth quoting."
-            },
-            {
-              "name": "follow_up",
-              "type": "string",
-              "prompt": "What the owner has to confirm or do for this caller, in one sentence. Empty if nothing is left."
-            },
-            {
-              "name": "follow_up_label",
-              "type": "string",
-              "prompt": "A label of at most 8 characters naming what to confirm, in the caller's terms. Empty if nothing is left."
-            },
-            {
-              "name": "needs_owner_follow_up",
-              "type": "boolean",
-              "prompt": "True when the owner has to confirm something or get back to the caller; false when the call settled everything."
-            }
-          ]
-        }
-      },
-      {
-        "id": "2",
-        "type": "agentNode",
-        "position": {
-          "x": 0,
-          "y": 200
-        },
-        "data": {
-          "name": "Details",
-          "prompt": "You have the name. Ask exactly one open question that follows from what the caller said, inviting them to tell you more of what the owner needs to know. Listen to the answer, ask nothing more, and move on to the close. If they would rather not say more, move on at once. Do not ask for what they already said, and promise no price or date.",
+          "prompt": "Your greeting has just asked what the caller is calling about. Go in this order, one thing at a time.\n1. As soon as they state a reason, a person they want, or a message, say \"Okay,\" and ask only for their name and nothing about what they said. If they already gave their name, do not ask; go to step 3. If they give only a title or a company name, ask for their name once more.\n2. Once they give a name or decline, go to step 3.\n3. Ask exactly one open question that follows from what the caller said, inviting them to tell you more of what the owner needs to know. Do not ask for what they already said, and promise no price or date. Listen to the answer, ask nothing more, and move on to the close. If they would rather not say more, move on at once.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, wish them well and end the call.",
           "allow_interrupt": true,
           "add_global_prompt": true,
           "extraction_enabled": true,
@@ -126,7 +68,7 @@
         "type": "endCall",
         "position": {
           "x": 0,
-          "y": 400
+          "y": 200
         },
         "data": {
           "name": "Closing",
@@ -210,34 +152,12 @@
     ],
     "edges": [
       {
-        "id": "1-2",
-        "source": "1",
-        "target": "2",
-        "data": {
-          "label": "name_given",
-          "condition": "The caller gave a name, declined to give one, or already gave their name while stating the reason.",
-          "transition_speech": "Okay, got it.",
-          "transition_speech_type": "text"
-        }
-      },
-      {
         "id": "1-3",
         "source": "1",
         "target": "3",
         "data": {
-          "label": "nothing_to_ask",
-          "condition": "The caller says it was a wrong number or that they have nothing to ask."
-        }
-      },
-      {
-        "id": "2-3",
-        "source": "2",
-        "target": "3",
-        "data": {
-          "label": "all_done",
-          "condition": "The caller answered the question or said they would rather not say more.",
-          "transition_speech": "Okay, got it.",
-          "transition_speech_type": "text"
+          "label": "done",
+          "condition": "The caller answered the question you asked after giving their name, said they would rather not say more, or said it was a wrong number with nothing to pass on."
         }
       }
     ],
