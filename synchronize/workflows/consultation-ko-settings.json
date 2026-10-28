@@ -11,6 +11,8 @@
         "description": "담당자가 할 일이 없는 통화예요. 확인할 것도 다시 연락할 것도 없어요. 잘못 건 전화나 인사만 남긴 전화가 그래요."
       }
     ],
-    "turn_start_min_words": 3
+    "turn_start_min_words": 3,
+    "turn_stop_strategy": "turn_analyzer",
+    "smart_turn_stop_secs": 1.0
   }
 }

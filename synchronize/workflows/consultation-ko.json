@@ -215,7 +215,9 @@
         "target": "2",
         "data": {
           "label": "name_given",
-          "condition": "전화한 분이 성함을 말했거나, 말하고 싶지 않다고 했거나, 용건을 말하면서 이미 이름을 밝혔어요."
+          "condition": "전화한 분이 성함을 말했거나, 말하고 싶지 않다고 했거나, 용건을 말하면서 이미 이름을 밝혔어요.",
+          "transition_speech": "네.",
+          "transition_speech_type": "text"
         }
       },
       {
@@ -233,7 +235,9 @@
         "target": "3",
         "data": {
           "label": "all_done",
-          "condition": "전화한 분이 질문에 대답했거나 더 말하고 싶지 않다고 했어요."
+          "condition": "전화한 분이 질문에 대답했거나 더 말하고 싶지 않다고 했어요.",
+          "transition_speech": "네, 알겠습니다.",
+          "transition_speech_type": "text"
         }
       }
     ],

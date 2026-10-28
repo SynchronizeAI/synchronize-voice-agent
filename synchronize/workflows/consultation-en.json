@@ -215,7 +215,9 @@
         "target": "2",
         "data": {
           "label": "name_given",
-          "condition": "The caller gave a name, declined to give one, or already gave their name while stating the reason."
+          "condition": "The caller gave a name, declined to give one, or already gave their name while stating the reason.",
+          "transition_speech": "Okay.",
+          "transition_speech_type": "text"
         }
       },
       {
@@ -233,7 +235,9 @@
         "target": "3",
         "data": {
           "label": "all_done",
-          "condition": "The caller answered the question or said they would rather not say more."
+          "condition": "The caller answered the question or said they would rather not say more.",
+          "transition_speech": "Okay, got it.",
+          "transition_speech_type": "text"
         }
       }
     ],
