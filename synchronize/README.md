@@ -42,5 +42,3 @@ real call with the new structure.
 
 `origin` = `SynchronizeAI/synchronize-voice-agent`, `upstream` = `dograh-hq/dograh`: `git fetch upstream && git merge --ff-only upstream/main`
 on `main`, then rebase `synchronize/voice-agent-v1`.
-
-`compose.dev-ports.yaml` and `dev-up.sh` run a local stack on loopback ports for development only.
