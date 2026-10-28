@@ -5,11 +5,11 @@ The AI phone consultation, ready to load: `consultation-ko.json` and `consultati
 300 s and the two dispositions; add `"dictionary": "<business name>"` per customer, see below). Use the pair that matches the customer's language. Customers never see this text.
 
 Three steps follow Dograh's roles, each with one job and an exit that depends only on what the caller says (the pattern of pipecat-flows
-and LiveKit's AgentTask): the start node plays the greeting, takes the reason without asking about it, and asks the name; the agent node asks once
-whether there is anything else; the end node closes. The global node holds persona, tone and rules, and leaves no slot for an acknowledgement:
-the next question is the reply, and the persona never asks about the substance of the caller's matter, because the owner will. A text-chat
-check with a simulated caller (12 calls, judged per reply) took restating from 46 of 54 replies to 13 of 40 and questions about the matter
-from 16 to 0; the earlier wording (an acknowledgement slot, an open "ask what the owner needs" step) was the cause, not the model. Each of the
+and LiveKit's AgentTask): the start node plays the greeting, takes the reason without asking about it, and asks the name; the agent node asks one open question that continues from what the caller said (a bare "anything else?" ended new inquiries with no
+detail in real calls); the end node closes. The global node holds persona, tone and rules, and leaves no slot for an acknowledgement:
+the next question is the reply, and the persona asks about the caller's matter only in the agent node, once, and never repeats what the caller
+said. A text-chat check with a simulated caller (12 calls, judged per reply) showed the earlier wording (an acknowledgement slot, an open "ask what
+the owner needs" step) was the cause of the restating, not the model; with one open question the model still sometimes asks two or three, so real calls decide. Each of the
 three extracts what it has so far, because a caller can hang up in any of them. A post-call QA node reviews every call. The prompts follow
 OpenAI's voice prompting guide (role, tone and length, language, unclear audio, what never to do, hand-off).
 
