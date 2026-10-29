@@ -17,7 +17,7 @@ and a variable set from a pipe must not also redirect stdin.
 
 One-time operator setup, all through Dograh's own UI and API (no code): sign up the first user and create an API key; add the OpenAI and
 ElevenLabs provider connections and a model configuration (`POST /api/v1/model-connections/...`), set it as the default; load the
-workflow; add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
+workflow and enter its settings (`workflows/README.md`); add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 
 ## Measured
@@ -25,8 +25,7 @@ rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and 
 End of the caller's speech to the first sound, Korean sentences at 8 kHz from a US server (clean synthetic callers, so network and noise are not included):
 `gpt-realtime-2.1` 1.66 s median (its server VAD waits 0.5 s; 1.30 s with reasoning effort `minimal`, a setting Dograh does not pass); ElevenLabs
 Scribe v2 realtime + gpt-4.1 + Flash v2.5 about 2.7 s (Scribe commits after 1.83 s, its default; Dograh does not expose `vad_silence_threshold_secs`;
-gpt-4.1 first sentence 0.62 to 0.70 s; speech 0.14 s); Deepgram Nova-3 `ko` returns the final text 0.3 to 0.5 s after the end of speech, and with
-Dograh's default turn stop (0.2 s VAD + 0.6 s) the cascade comes to about 1.6 s (calculated). A real Deepgram call logged STT 0.3 to 0.4 s, LLM 0.6 to 1.0 s,
+gpt-4.1 first sentence 0.62 to 0.70 s; speech 0.14 s); Deepgram Nova-3 `ko` returns the final text 0.3 to 0.5 s after the end of speech,. A real Deepgram call logged STT 0.3 to 0.4 s, LLM 0.6 to 1.0 s,
 speech 0.11 to 0.13 s; a real realtime call logged 0.8 to 1.4 s to the first sound. The bot speaks 6.2 syllables per second, which is not slow,
 so a slow feel comes from long replies and the wait before them. `gpt-4.1` ends 2027-01-14 and its replacement `gpt-6-luna` took 1.3 s to a first
 sentence in the same probe, so plan the swap.
