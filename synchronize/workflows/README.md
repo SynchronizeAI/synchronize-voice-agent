@@ -26,24 +26,14 @@ unclear audio, escalation; one question at a time; vary wording). `consultation-
 industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
 in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
 context variables apply to test calls only), so there are two ways to supply it. For the first customers, copy the workflow and replace
-the expression with the literal name (`sed`, below). For many customers, set Pre-Call Data Fetch on the start node: Dograh POSTs the
+the expression with the literal name in Dograh's workflow editor. For many customers, set Pre-Call Data Fetch on the start node: Dograh POSTs the
 called number to a Synchronize endpoint and merges the returned `initial_context` (`business_name`) into the call; that endpoint is not
 built yet. Keep the name before a noun (`... AI 비서예요`), never before a Korean particle. A prompt must not contain `{{` or `}}` other than
-that variable, nor `"`, `\`, `/` or `&`. Who the caller is goes in the first line of `facts` (`구분:` or
+that variable. Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
-
-```bash
-sed -i 's/{{business_name | fallback:[^}]*}}/Acme Plumbing/g' consultation-en.json
-H='Content-Type: application/json'; K="X-API-Key: $DOGRAH_API_KEY"   # the customer organization's key
-ID=$(curl -fsS -X POST "$DOGRAH_URL/api/v1/workflow/create/definition" -H "$K" -H "$H" -d @consultation-en.json | jq .id)
-curl -fsS -X PUT  "$DOGRAH_URL/api/v1/workflow/$ID" -H "$K" -H "$H" -d @consultation-en-settings.json
-curl -fsS -X POST "$DOGRAH_URL/api/v1/workflow/$ID/publish" -H "$K" -H "$H" -d '{}'
-```
 
 The Synchronize reader expects, in the run's `gathered_context`: `customer_name`, `topic`, `summary`, `facts` (one
 `label: value` per line), `quotes` (one verbatim caller sentence per line), `follow_up`, `follow_up_label` (at most 8
 characters), `needs_owner_follow_up` (boolean), and `mapped_call_disposition` of `follow_up` or `done` (anything else,
 such as `user_hangup`, means the call was not classified). The extraction sits on both the start and the Closing
 node because the caller can hang up in either. Edge labels stay ASCII: Dograh names the LLM function from them.
-
-The model configuration (STT / LLM / TTS) is separate: see `../model-configuration.md`.

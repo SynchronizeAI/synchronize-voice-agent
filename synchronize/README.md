@@ -18,7 +18,7 @@ and a variable set from a pipe must not also redirect stdin.
 One-time operator setup, all through Dograh's own UI and API (no code): sign up the first user and create an API key; add the OpenAI and
 ElevenLabs provider connections and a model configuration (`POST /api/v1/model-connections/...`), set it as the default; load the
 workflow; add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
-rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL`, `DOGRAH_API_KEY`, `DOGRAH_CONNECTION_NUMBERS`.
+rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 
 ## Measured
 
