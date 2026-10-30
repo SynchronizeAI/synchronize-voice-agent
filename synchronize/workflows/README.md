@@ -3,14 +3,17 @@
 The AI phone consultation, ready to load: `consultation-ko.json` and `consultation-en.json` are the body of
 `POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the two dispositions and the turn strategy; add `"dictionary": "<business name>"` per customer, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or every call shows as needing follow-up. Use the pair that matches the customer's language. Customers never see this text.
 
-Two steps, because every change of step costs a second model call (0.45-0.93 s on real calls: one call decides to move, one speaks) and a
-spoken filler at the change only moves the answer later, since the answer queues behind it. The start node plays the greeting, takes the reason with a short
-"네,", asks the name, then asks one open question that continues from what the caller said (a bare "anything else?" ended new inquiries with no detail in
-real calls); its exit depends only on what the caller says (the pattern of pipecat-flows and LiveKit's AgentTask). The end node closes. The global node holds
-persona, tone and rules, and leaves no slot for an acknowledgement. The earlier wording (an acknowledgement slot, an
-open "ask what the owner needs" step) caused the restating, not the model (`../README.md`, Measured); with one open question the model still sometimes asks two or three, so real
-calls decide. Both nodes extract what they have so far, because a caller can hang up in either. A post-call QA node reviews every call. The prompts follow
-OpenAI's voice prompting guide (role, tone and length, language, unclear audio, what never to do, hand-off).
+Three steps, the shape Dograh's own guide gives (one phase per node, a specific edge condition per exit). The start node plays the greeting, takes the
+reason with a short "네,", and asks the name. The Detail node asks one open question that continues from what the caller said (a bare "anything else?" ended
+new inquiries with no detail in real calls). The end node closes. Each exit depends only on what the caller says (the pattern of pipecat-flows and LiveKit's
+AgentTask). The global node holds persona, tone and rules, and leaves no slot for an acknowledgement. Every change of step costs a second model call (0.45-0.93 s on
+real calls: one call decides to move, one speaks), and a spoken filler at the change only moves the answer later, so a step has to earn its place. This one does: with the
+question and the close in one start node, gpt-4.1 asked the question and handed over in the same turn in 5 to 8 of 40 bot turns (text-chat runs, 15 call types), so the caller heard a
+goodbye with no room to answer. A prompt sentence, a more descriptive edge name, Dograh's "a turn is speech or the move, never both" and a skip clause did not remove it
+(the clause cut it to 1 or 2 of 40); the separate node did (0 of 117). The earlier wording (an acknowledgement slot, an open "ask what the owner needs" step) caused the
+restating, not the model (`../README.md`, Measured); with one open question the model still sometimes asks two or three, so real calls decide. Every node extracts what it has so
+far, because a caller can hang up in any of them. A post-call QA node reviews every call. The prompts follow OpenAI's voice prompting guide (role, tone and length,
+language, unclear audio, what never to do, hand-off).
 
 Speech recognition mishears the business name unless it is given as a keyterm: on a recorded call Deepgram heard `영혼솔루션` without it and
 `영훈솔루션` with it. Dograh reads the workflow field `dictionary` (comma-separated, once per workflow, no call variables), so set it to the
