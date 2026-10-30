@@ -12,7 +12,7 @@
         "data": {
           "name": "Greeting",
           "greeting": "Hello, you've reached {{business_name | fallback:our office}}. An AI assistant is answering for the team, and the call is recorded. What can I help you with?",
-          "prompt": "Your greeting has just asked what the caller is calling about. Go in this order, one thing at a time.\n1. As soon as they state a reason or a message, say \"Okay,\" and ask only for their name and nothing about what they said. If they already gave their name, do not ask; go to step 3. If they give only a title or a company name, ask for their name once more.\n2. Once they give a name or decline, go to step 3.\n3. Ask exactly one open question that follows from what the caller said, inviting them to tell you more of what the owner needs to know. Keep it to one short sentence and do not repeat what they said. Do not ask for what they already said, and promise no price or date. Listen to the answer, ask nothing more, and move on to the close. If they would rather not say more, move on at once.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, move straight to the close.",
+          "prompt": "Your greeting has just asked what the caller is calling about. Go in this order, one thing at a time.\n1. As soon as they state a reason or a message, say \"Okay,\" and ask only for their name and nothing about what they said. If they already gave their name, do not ask; go to step 3. If they give only a title or a company name, ask for their name once more.\n2. Once they give a name or decline, go to step 3.\n3. If they have already asked for a call back or said they have nothing more to add, ask nothing and move straight to the close. Otherwise ask exactly one open question that follows from what the caller said, inviting them to tell you more of what the owner needs to know. Keep it to one short sentence and do not repeat what they said. Do not ask for what they already said, and promise no price or date. Ask only that question in that turn. When they have answered, listen, ask nothing more, and then move on to the close. If they would rather not say more, move on at once.\n- If you could not make it out, or they only said hello, ask once more what they are calling about.\n- If it was a wrong number or they have nothing to say, move straight to the close.",
           "allow_interrupt": true,
           "add_global_prompt": true,
           "extraction_enabled": true,
@@ -52,11 +52,6 @@
               "name": "follow_up_label",
               "type": "string",
               "prompt": "A label of at most 8 characters naming what to confirm, in the caller's terms. Empty if nothing is left."
-            },
-            {
-              "name": "needs_owner_follow_up",
-              "type": "boolean",
-              "prompt": "True when the owner has to confirm something or get back to the caller; false when the call settled everything."
             }
           ]
         }
@@ -109,11 +104,6 @@
               "name": "follow_up_label",
               "type": "string",
               "prompt": "A label of at most 8 characters naming what to confirm, in the caller's terms. Empty if nothing is left."
-            },
-            {
-              "name": "needs_owner_follow_up",
-              "type": "boolean",
-              "prompt": "True when the owner has to confirm something or get back to the caller; false when the call settled everything."
             }
           ]
         }
