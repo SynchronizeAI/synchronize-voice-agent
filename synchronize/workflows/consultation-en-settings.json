@@ -10,6 +10,7 @@
         "description": "The call needed nothing from the owner: nothing to confirm, nothing to return, such as a wrong number or a caller who only wanted to leave a thank-you."
       }
     ],
-    "turn_stop_strategy": "turn_analyzer"
+    "turn_stop_strategy": "turn_analyzer",
+    "smart_turn_stop_secs": 1.0
   }
 }
