@@ -24,10 +24,12 @@ requests, "I'm sorry" at the same moments, and no thanks after answers, because 
 (mirror the caller's formality) are for other roles and are not copied. The Closing node does not inherit the global node (`add_global_prompt` off) and the register examples are endings, not
 sentences: with the global node on, the closing turn asked the caller a question and the call ended in 12 of 75 scripted calls (28 with the courtesy rule added), and a full closing sentence
 used as an example made the Detail step close early when a caller declined to give a name. A `DISCOURTEOUS` tag in the QA node reviews calls over 15 s.
-Measured on the production model through the text-chat API (same caller lines for both versions, 75 Korean and 22 English scripted calls each): the closing turn ended on a question in 0 of 75 (was 12);
-calls thanking more than once 20% (was 47%); cushion or apology wording 0.67 times per call (was 0.16); bot characters per call 191 against 182. Blinded pairwise judges (Codex and Grok, positions balanced,
-canaries passed) preferred the new Korean 38-7 and 40-5 and the new English 20-2 and 22-0. Known and not fixed: a caller who declines to give a name is sometimes pressed for it, `성함이 ○○님이시군요` echoes the caller,
-and a question plus the goodbye can still land in one turn. Not measured: how any of it sounds over 8 kHz TTS, and turn-taking.
+Measured through the text-chat API, same caller lines for both versions. Korean, on the Korean line's configuration (`gpt-4.1`, 75 calls each): the closing turn ended on a question in 0 of 75 (was 12);
+calls thanking more than once 20% (was 47%); cushion or apology wording 0.67 times per call (was 0.16); bot characters per call 191 against 182; blinded pairwise judges (Codex and Grok, positions balanced,
+canaries passed) preferred the new version 38-7 and 40-5. English was first measured on `gpt-4.1` (22 calls each; judges 20-2 and 22-0), which is NOT the live line: the Twilio number runs `gpt-4.1-mini` with
+ElevenLabs Flash v2.5 (voice Sarah). On that configuration (33 calls each): thanks after answers 0.94 to 0.09 per call, turns over two sentences 2 of 101 to 0 of 103, apology wording 0.09 to 1.00 per call, characters per call 395 to 446;
+judges preferred the new version 25-8 (Codex) and 32-1 (Grok). Known and not fixed: a Korean caller who declines to give a name is sometimes pressed for it, `성함이 ○○님이시군요` echoes the caller, and a question plus the goodbye can still land in one turn;
+on `gpt-4.1-mini` the English agent restates the caller a little more (judges flagged it in 15 and 24 of 33 calls, against 8 and 20) and sometimes says "I'm sorry" when answering "are you an AI?" (4 of 33). Not measured: how any of it sounds over 8 kHz TTS, and turn-taking.
 
 English is one agent, not three steps, because every change of step costs a second model call (0.45-0.93 s on real calls). The start node
 `Reception` holds the whole conversation (reason, name, one open question, a short recap, "anything to add?") and the call ends through one of
