@@ -15,11 +15,25 @@ restating, not the model (`../README.md`, Measured); with one open question the 
 far, because a caller can hang up in any of them. A post-call QA node reviews every call. The prompts follow OpenAI's voice prompting guide (role, tone and length,
 language, unclear audio, what never to do, hand-off).
 
+Courtesy is one rule in the global node, written as behaviours and not as an adjective (LiveKit's guide: the model already tries to be friendly, so name the audible
+behaviour). Korean: 합니다체 for greeting, thanks, apology and promises (`감사합니다`, `~드리겠습니다`), the honorific 해요체 for questions and requests, the caller's name followed by
+`님` (not `씨`, never the bare name), and `죄송하지만` / `실례지만` at the front of the same sentence when the agent cannot answer, cannot connect or asks again. English: requests asked as
+requests, "I'm sorry" at the same moments, and no thanks after answers, because the greeting and the fixed goodbye already thank. No OSS voice-agent project or vendor guide
+(Dograh, LiveKit, Pipecat, OpenAI, Retell, ElevenLabs, Vapi, Hume) specifies Korean speech levels or honorifics, so the Korean split is a judgment: 국립국어원 sets no mandatory level, glosses
+하십시오체 with greetings and farewells, and prefers `-시-` in requests; its phone-closing standard is `고맙습니다` or `안녕히 계십시오`. Dograh's own template (imperfect speech, fillers) and LiveKit's frontdesk
+(mirror the caller's formality) are for other roles and are not copied. The Closing node does not inherit the global node (`add_global_prompt` off) and the register examples are endings, not
+sentences: with the global node on, the closing turn asked the caller a question and the call ended in 12 of 75 scripted calls (28 with the courtesy rule added), and a full closing sentence
+used as an example made the Detail step close early when a caller declined to give a name. A `DISCOURTEOUS` tag in the QA node reviews calls over 15 s.
+Measured on the production model through the text-chat API (same caller lines for both versions, 75 Korean and 22 English scripted calls each): the closing turn ended on a question in 0 of 75 (was 12);
+calls thanking more than once 20% (was 47%); cushion or apology wording 0.67 times per call (was 0.16); bot characters per call 191 against 182. Blinded pairwise judges (Codex and Grok, positions balanced,
+canaries passed) preferred the new Korean 38-7 and 40-5 and the new English 20-2 and 22-0. Known and not fixed: a caller who declines to give a name is sometimes pressed for it, `성함이 ○○님이시군요` echoes the caller,
+and a question plus the goodbye can still land in one turn. Not measured: how any of it sounds over 8 kHz TTS, and turn-taking.
+
 English is one agent, not three steps, because every change of step costs a second model call (0.45-0.93 s on real calls). The start node
 `Reception` holds the whole conversation (reason, name, one open question, a short recap, "anything to add?") and the call ends through one of
 two End Call tools, `end_call` and `end_call_wrong_number`, instead of an end node: an End Call tool plays a fixed goodbye and hangs up with no further model call.
-The tools belong to one Dograh organization. Create both first (category End Call, End Message type custom: "Thank you for calling. Goodbye." and
-"No problem. Have a good day. Goodbye.") and put their UUIDs in the start node's `tool_uuids` in `consultation-en.json`; Dograh silently drops an unknown UUID, and the
+The tools belong to one Dograh organization. Create both first (category End Call, End Message type custom: "Thank you for calling. Have a good day. Goodbye." and
+"No problem. Thank you for calling, and have a good day. Goodbye.") and put their UUIDs in the start node's `tool_uuids` in `consultation-en.json`; Dograh silently drops an unknown UUID, and the
 call then ends only when the caller hangs up. `consultation-en-settings.json` also sets `smart_turn_stop_secs` to 1.0 (Dograh's default wait is 2.0 s, which added 3 s or more to short
 answers). The `facts` and `quotes` extraction prompts say plain text because the extraction model sometimes returned a JSON list; the Synchronize page joins a list into
 lines as a safeguard. Real calls of this shape are not measured yet.
@@ -38,7 +52,7 @@ in both, and the fallback fills in when the value is missing). Dograh gives a pr
 context variables apply to test calls only), so there are two ways to supply it. For the first customers, copy the workflow and replace
 the expression with the literal name in Dograh's workflow editor. For many customers, set Pre-Call Data Fetch on the start node: Dograh POSTs the
 called number to a Synchronize endpoint and merges the returned `initial_context` (`business_name`) into the call; that endpoint is not
-built yet. Keep the name before a noun (`... AI 비서예요`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
+built yet. Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
 that variable. Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
