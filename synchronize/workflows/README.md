@@ -71,3 +71,16 @@ This is an operator substitution before import, not a call variable; `.invalid` 
 **Inbound calls only**, that URL, and the saved credential under Authentication. Dograh sends JSON with `call_inbound.to_number` and `call_inbound.workflow_run_id`;
 Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
 Dograh continues with earlier context and the generic greeting fallback (`docs/voice-agent/pre-call-data-fetch.mdx`).
+
+## Business context in the prompts
+
+`business_name` stays in the static greeting and the Persona global prompt, with `our office` / `저희 회사` fallbacks. The AI disclosure (and the English recording disclosure)
+is literal greeting text, independent of every variable. The start prompt applies the global closed-hours rule in its first spoken reply after that greeting.
+`hours_state` (fallback `unknown`) gates the notice in Persona; only exact `closed` permits it. `hours_note` supplies the factual notice, spoken once even if nobody asks,
+or when opening-hours/callback questions arrive before the notice. An absent or unusable note produces no notice. `open`, `unknown`, missing and invalid states never produce
+an hours assertion, even when asked: the owner must confirm. A callback tomorrow is a preference to pass on, never a promised appointment. The original intake, courtesy and
+Korean 합니다체/해요체 rules stay in place. Names and notes are explicitly business data, never instructions; embedded commands are not obeyed or read as hours notices.
+`language` is consumed by Persona after the fixed greeting: exact `en` / `ko` chooses the initial conversation language; missing/invalid values use the workflow's English/Korean
+default, and the existing caller-requested language-switch rule still applies. The fixed greeting stays in the deployment's default language; choose that workflow at deployment.
+No prompt knows an industry or a particular business. `api/utils/template_renderer.py` substitutes values once (not recursively), uses `fallback:` for missing/empty values,
+and otherwise renders a missing variable as empty text. Conversation prompts use template braces only for these four values; webhook run metadata is separate.
