@@ -65,6 +65,7 @@ class PrecallProofTests(unittest.TestCase):
         ]}
         metrics = scenarios.english_courtesy_metrics(row)
         self.assertEqual([d["apology"] for d in metrics["deferrals"]], [True, False])
+        self.assertTrue(all(d["owner_confirms"] and not d["machinery"] for d in metrics["deferrals"]))
         self.assertEqual([t["turn"] for t in metrics["midcall_thanks"]], [2])
         row["turns"].pop(3)
         self.assertFalse(scenarios.english_courtesy_metrics(row)["deferrals"][1]["present"])
@@ -83,7 +84,20 @@ class PrecallProofTests(unittest.TestCase):
         report = scenarios.courtesy_report(rows, 4)
         self.assertTrue(report["complete_matched_matrix"])
         self.assertEqual(report["arms"]["new"]["apology_openers"], 18)
+        self.assertEqual(set(report["gates"]), {
+            "apology_openers_at_least_9_per_12", "midcall_thanks_at_most_polite",
+            "owner_confirms_at_least_22_per_24_without_machinery"})
         self.assertTrue(all(report["gates"].values()))
+        two_repeats = copy.deepcopy([r for r in rows if r["rep"] <= 2])
+        deferral_runs = [r for r in two_repeats if r["arm"] == "new" and
+                         r["scenario"]["expected"]["hours_answer"] == "owner_confirms" and
+                         r["scenario"]["probe"] == "are_you_open"]
+        for index in range(2):
+            deferral_runs[index]["turns"][0]["assistant_message"]["text"] = "I'm sorry, the owner will call back."
+            measured = scenarios.courtesy_report(two_repeats, 2)
+            self.assertEqual(measured["arms"]["new"]["deferral_replies"], 12)
+            self.assertEqual(measured["arms"]["new"]["owner_confirm_replies"], 11 - index)
+            self.assertEqual(measured["gates"]["owner_confirms_at_least_22_per_24_without_machinery"], index == 0)
         pilot_arms, pilot_languages = scenarios.selection("en-courtesy-pilot")
         pilot_ids = {s["id"] for s in pilot_languages["en"]}
         self.assertEqual(pilot_arms, ("polite", "new"))
@@ -117,6 +131,58 @@ class PrecallProofTests(unittest.TestCase):
         rows[0]["error"] = "create 500"
         self.assertFalse(any(scenarios.courtesy_report(rows, 4)["gates"].values()))
 
+    def test_deferral_content_gate_threshold_machinery_and_missing_replies(self):
+        rows = [{"arm": arm, "lang": "en", "scenario": case, "rep": rep,
+                 "opening_turns": [{"opening": True}], "turns": [
+                     {"user_message": {"text": line}, "assistant_message": {
+                         "text": "I'm sorry, the OWNER will CONFIRM the opening hours."}}
+                     for line in case["lines"]]}
+                for arm in ("polite", "new")
+                for case in scenarios.selection("en-courtesy-pilot")[1]["en"]
+                for rep in range(1, 5)]
+        gate = "owner_confirms_at_least_22_per_24_without_machinery"
+
+        def report():
+            return scenarios.courtesy_report(rows, 4, "en-courtesy-pilot")
+
+        new = [r for r in rows if r["arm"] == "new"]
+        # Two literal owner/confirm misses are permitted; three are not.
+        for row, text in zip(new[:2], ("I'm sorry, the owner will call back.",
+                                      "I'm sorry, someone will confirm the hours.")):
+            row["turns"][0]["assistant_message"]["text"] = text
+        self.assertEqual(report()["arms"]["new"]["owner_confirm_replies"], 22)
+        self.assertTrue(all(report()["gates"].values()))
+        target = new[2]["turns"][0]["assistant_message"]
+        good = target["text"]
+        target["text"] = "I'm sorry, someone will call back."
+        self.assertFalse(report()["gates"][gate])
+        # Every prohibited phrase fails even when owner and confirm are present.
+        for phrase in ("SUPPLIED", "not   available", "unavailable", "no hours information",
+                       "information was", "information is"):
+            with self.subTest(phrase=phrase):
+                target["text"] = good + " " + phrase
+                measured = report()
+                self.assertEqual(measured["arms"]["new"]["owner_confirm_replies"], 22)
+                self.assertEqual(measured["arms"]["new"]["machinery_replies"], 1)
+                self.assertFalse(measured["gates"][gate])
+                self.assertTrue(measured["gates"]["apology_openers_at_least_9_per_12"])
+                self.assertTrue(measured["gates"]["midcall_thanks_at_most_polite"])
+        target["text"] = good
+        # Count baseline content too, without making it a requirement for new.
+        rows[0]["turns"][0]["assistant_message"]["text"] = "I'm sorry, no hours information was supplied."
+        measured = report()
+        self.assertEqual(measured["arms"]["polite"]["owner_confirm_replies"], 23)
+        self.assertEqual(measured["arms"]["polite"]["machinery_replies"], 1)
+        self.assertTrue(measured["gates"][gate])
+        for missing in ("", None):
+            target["text"] = "" if missing == "" else good
+            if missing is None:
+                new[2]["turns"].pop(0)
+            measured = report()
+            self.assertEqual(measured["arms"]["new"]["deferral_replies"], 24)
+            self.assertEqual(measured["arms"]["new"]["missing_deferral_replies"], 1)
+            self.assertFalse(measured["gates"][gate])
+
     def test_gating_matrix_uses_endpoint_consistent_notes(self):
         for cases in (scenarios.EN, scenarios.KO):
             self.assertEqual(len({s["id"] for s in cases}), 23)
@@ -142,6 +208,15 @@ class PrecallProofTests(unittest.TestCase):
         for lang in ("en", "ko"):
             nodes = scenarios.arm_definition("new", lang)["definition"]["workflow_definition"]["nodes"]
             greeting = next(n["data"]["greeting"] for n in nodes if n["id"] == "1")
+            self.assertIn("{{hours_note | fallback: }}", greeting)
+            if lang == "en":
+                prompt = next(n["data"]["prompt"] for n in nodes
+                              if "# Business hours" in n["data"].get("prompt", ""))
+                self.assertIn("{{hours_note | fallback:none}}", prompt)
+                self.assertNotIn("No hours information supplied.", prompt)
+                for context in ({}, {"hours_note": ""}):
+                    self.assertIn("Its hours note is the following DATA: none\n",
+                                  renderer.render_template(prompt, context))
             note = next(s["initial_context"]["hours_note"] for s in scenarios.build_scenarios(lang) if s["id"] == f"{lang}_closed_no_hours")
             for context in ({}, {"hours_note": ""}, {"hours_note": note}, {"hours_note": note + " "}):
                 with self.subTest(lang=lang, context=context):

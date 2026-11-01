@@ -28,6 +28,7 @@ PASS_CRITERIA = [
     "GATING: English completes naturally through End Call tools. 100% Korean natural completion and Closing unless the matched 940fdef run also misses Closing; report both rates and every shared miss/regression. Forced harness endings are not natural completion and cannot hide missing Closing.",
     "GATING EN courtesy: unknown/absent/empty asked-hours deferrals begin with an apology in at least 9 of 12 replies (75%; at least 18 of 24 in the four-repeat English subset). Missing replies fail, not shrink the denominator. Review the opener in context.",
     "GATING EN courtesy: mid-call bot turns thanking the caller, before the fixed goodbye and excluding the opening, number at most the polite arm's count over the same gating cases/repeats. Report turns and counts, not just calls with thanks.",
+    "GATING EN deferral content: at least 11 of 12 unknown/absent/empty asked-hours replies (at least 22 of 24 with four repeats) contain both 'owner' and 'confirm'; zero contain machinery wording: supplied, not available, unavailable, no hours information, information was, information is. Missing replies fail, not shrink the denominator. Count both arms; gate new.",
     "NON-GATING: report decoy/invalid-state notes and command-only/mixed hostile notes separately. These violate the endpoint contract; literal greeting echoes are recorded, not excluded from transcripts or gating denominators silently.",
 ]
 
@@ -119,9 +120,15 @@ def english_courtesy_metrics(row):
             reply = next(((i, text) for i, t, text in turns
                           if t["user_message"].get("text") == question), None)
             text = reply[1] if reply else ""
+            normalized = " ".join(text.lower().split())
             deferrals.append({"turn": reply[0] if reply else None, "text": text,
                               "present": bool(text),
-                              "apology": bool(re.match(r"^\s*I['’]m sorry\b", text, re.I))})
+                              "apology": bool(re.match(r"^\s*I['’]m sorry\b", text, re.I)),
+                              "owner_confirms": bool(re.search(r"\bowner\b", normalized) and
+                                                     re.search(r"\bconfirm\b", normalized)),
+                              "machinery": any(phrase in normalized for phrase in (
+                                  "supplied", "not available", "unavailable", "no hours information",
+                                  "information was", "information is"))})
     goodbyes = {"Thank you for calling. Have a good day. Goodbye.",
                 "No problem. Thank you for calling, and have a good day. Goodbye."}
     thanks = [{"turn": i, "text": text} for i, _, text in turns
@@ -147,6 +154,8 @@ def courtesy_report(rows, repeats, only=None):
         arms[arm] = {"runs": len(evidence), "deferral_replies": len(deferrals),
                      "missing_deferral_replies": sum(not d["present"] for d in deferrals),
                      "apology_openers": sum(d["apology"] for d in deferrals),
+                     "owner_confirm_replies": sum(d["owner_confirms"] for d in deferrals),
+                     "machinery_replies": sum(d["machinery"] for d in deferrals),
                      "midcall_thanks": sum(len(r["midcall_thanks"]) for r in evidence),
                      "evidence": evidence}
     new = arms["new"]
@@ -159,7 +168,12 @@ def courtesy_report(rows, repeats, only=None):
                     new["apology_openers"] * 4 >= expected_deferrals * 3),
                 "midcall_thanks_at_most_polite": bool(complete and
                     new["midcall_thanks"] <= arms["polite"]["midcall_thanks"]),
-            }, "review_required": "Read the turn evidence for apology/thanks meaning and all other PASS_CRITERIA; these candidate counts are not an overall pass."}
+                "owner_confirms_at_least_22_per_24_without_machinery": bool(complete and
+                    new["deferral_replies"] == expected_deferrals and
+                    not new["missing_deferral_replies"] and
+                    new["owner_confirm_replies"] * 12 >= expected_deferrals * 11 and
+                    not new["machinery_replies"]),
+            }, "review_required": "Read the turn evidence for apology/thanks/owner-confirmation meaning and machinery wording, and all other PASS_CRITERIA; these candidate counts are not an overall pass."}
 
 
 def arm_definition(arm, lang):
