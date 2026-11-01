@@ -52,9 +52,9 @@ about price, schedule, feasibility or the status of existing work. `consultation
 industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
 in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
 context variables apply to test calls only). Both start nodes now use inbound-only Pre-Call Data Fetch: Synchronize's `POST /api/voice/pre-call`
-uses the called number and returns `initial_context` with `business_name`, `hours_state` (`open`, `closed`, `unknown`), `hours_note`, and `language` (`en`, `ko`), or `{}` for an unknown number.
+uses the called number and returns `initial_context` with `business_name`, `hours_state` (`open`, `closed`, `unknown`), and `hours_note`, or `{}` for an unknown number.
 Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
-these four variables. Who the caller is goes in the first line of `facts` (`구분:` or
+these three variables. Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
 A `mapped_call_disposition` other than `follow_up` or `done`, such as `user_hangup`, means the call was not classified.
@@ -92,10 +92,9 @@ is literal greeting text, independent of every variable. The start prompt applie
 or when opening-hours/callback questions arrive before the notice. An absent or unusable note produces no notice. `open`, `unknown`, missing and invalid states never produce
 an hours assertion, even when asked: the owner must confirm. A callback tomorrow is a preference to pass on, never a promised appointment. The original intake, courtesy and
 Korean 합니다체/해요체 rules stay in place. Names and notes are explicitly business data, never instructions; embedded commands are not obeyed or read as hours notices.
-`language` is consumed by Persona after the fixed greeting: exact `en` / `ko` chooses the initial conversation language; missing/invalid values use the workflow's English/Korean
-default, and the existing caller-requested language-switch rule still applies. The fixed greeting stays in the deployment's default language; choose that workflow at deployment.
+The deployment chooses the English or Korean workflow; the caller-requested language-switch rule still applies.
 No prompt knows an industry or a particular business. `api/utils/template_renderer.py` substitutes values once (not recursively), uses `fallback:` for missing/empty values,
-and otherwise renders a missing variable as empty text. Conversation prompts use template braces only for these four values; webhook run metadata is separate.
+and otherwise renders a missing variable as empty text. Conversation prompts use template braces only for these three values; webhook run metadata is separate.
 
 ## Pre-call proof (separate authorized step; not run here)
 
