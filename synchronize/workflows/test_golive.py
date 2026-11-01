@@ -667,13 +667,13 @@ class GoLiveTests(unittest.TestCase):
             self.run_cli(args, expected=1)
         self.assertFalse(self.backups.exists())
 
-    def test_customised_korean_greeting_becomes_three_lines(self):
+    def test_customised_korean_greeting_becomes_two_lines(self):
         old = golive.nodes(golive.template("940fdef", "ko"))["1"]["data"]["greeting"]
         new = golive.nodes(golive.template("HEAD", "ko"))["1"]["data"]["greeting"]
         live = "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
         self.assertEqual(
             golive.patch_text(old, new, live, "node 1.data.greeting"),
-            "안녕하세요, 영훈솔루션 AI 비서입니다.\n{{hours_note | fallback: }}\n어떤 일로 전화하셨나요?",
+            "안녕하세요, 영훈솔루션 AI 비서입니다.\n어떤 일로 전화하셨나요?",
         )
 
     def test_customised_korean_greeting_apply_is_idempotent(self):
@@ -683,7 +683,7 @@ class GoLiveTests(unittest.TestCase):
             "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
         )
         out, _ = self.run_cli(self.args("--apply", "--accept-merged", "node 1.data.greeting"))
-        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+3 changed lines", out)
+        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+2 changed lines", out)
         first = copy.deepcopy(self.fake.workflow)
         self.fake.calls.clear()
         out, _ = self.run_cli(self.args("--apply"))
@@ -1009,9 +1009,9 @@ class GoLiveTests(unittest.TestCase):
             "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
         )
         out, _ = self.run_cli(self.args(accept_merged=()))
-        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+3 changed lines", out)
+        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+2 changed lines", out)
         self.assertIn("node 4.data.prompt: MERGED-INTO-CUSTOM;", out)
-        self.assertIn("+{{hours_note | fallback: }}", out)
+        self.assertIn("+어떤 일로 전화하셨나요?", out)
         self.assertEqual(self.writes(), [])
         for accepted in ((), ("node 1.data.greeting",), ("node 4.data.prompt",)):
             _, err = self.run_cli(self.args("--apply", accept_merged=accepted), expected=1)
@@ -1028,7 +1028,7 @@ class GoLiveTests(unittest.TestCase):
             golive.nodes(self.fake.old)["4"]["data"]["prompt"]
         )
         out, _ = self.run_cli(self.args("--apply", accept_merged=()))
-        self.assertIn("node 1.data.greeting: template-replaced; -1/+3 changed lines", out)
+        self.assertIn("node 1.data.greeting: template-replaced; -1/+2 changed lines", out)
         self.assertIn("node 4.data.prompt: template-replaced;", out)
         self.assertNotIn("MERGED-INTO-CUSTOM", out)
 
