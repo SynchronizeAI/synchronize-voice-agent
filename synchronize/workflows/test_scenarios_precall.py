@@ -379,7 +379,7 @@ class PrecallProofTests(unittest.TestCase):
                     self.assertNotIn("..", rendered)
                     self.assertNotIn("  ", rendered)
 
-    def test_untargeted_workflow_fields_and_korean_closing_are_unchanged(self):
+    def test_untargeted_workflow_fields_are_unchanged_since_iteration_6(self):
         for lang in ("en", "ko"):
             filename = f"synchronize/workflows/consultation-{lang}.json"
             previous = json.loads(subprocess.check_output(["git", "show", f"3754a26:{filename}"], text=True))
@@ -388,12 +388,40 @@ class PrecallProofTests(unittest.TestCase):
             new_nodes = current["workflow_definition"]["nodes"]
             self.assertEqual(len(old_nodes), len(new_nodes))
             for old, new in zip(old_nodes, new_nodes):
-                if old["id"] == "1" or old["data"]["name"] == "Persona":
+                if (old["id"] == "1" or old["data"]["name"] == "Persona" or
+                        (lang == "ko" and old["data"]["name"] == "Closing")):
                     old, new = copy.deepcopy(old), copy.deepcopy(new)
                     old["data"].pop("prompt")
                     new["data"].pop("prompt")
                 self.assertEqual(old, new)
             self.assertEqual(previous["workflow_definition"]["edges"], current["workflow_definition"]["edges"])
+
+    def test_korean_closing_folds_pending_answer_example_and_is_only_iteration_8_change(self):
+        for lang in ("en", "ko"):
+            for suffix in ("", "-settings"):
+                filename = f"synchronize/workflows/consultation-{lang}{suffix}.json"
+                previous = json.loads(subprocess.check_output([
+                    "git", "-C", str(scenarios.REPO), "show", f"4a84bdb:{filename}"
+                ], text=True))
+                current = json.loads((scenarios.REPO / filename).read_text())
+                if lang == "ko" and not suffix:
+                    closing = next(n for n in current["workflow_definition"]["nodes"]
+                                   if n["data"]["name"] == "Closing")
+                    old_closing = next(n for n in previous["workflow_definition"]["nodes"]
+                                       if n["data"]["name"] == "Closing")
+                    prompt = closing["data"]["prompt"]
+                    example = ('(답변의 끝맺음 예시일 뿐 고정 대본이 아니에요: '
+                               '"죄송하지만 담당자가 영업시간을 확인해서 알려 드리겠습니다.")')
+                    self.assertEqual(prompt.count(example), 1)
+                    self.assertEqual(prompt.count("죄송하지만"), 1)
+                    self.assertIn("마지막 말에 아직 답하지 않은 질문", prompt)
+                    self.assertLess(prompt.index("첫 문장으로 해요"), prompt.index(example))
+                    self.assertLess(prompt.index(example), prompt.index("그 뒤 전화 주셔서 감사"))
+                    self.assertEqual(prompt.count("전할 말이 있었다면 담당자가 확인해서 연락드리겠다고"), 1)
+                    self.assertNotEqual(prompt, old_closing["data"]["prompt"])
+                    # Restoring just this prompt must restore the whole workflow.
+                    closing["data"]["prompt"] = old_closing["data"]["prompt"]
+                self.assertEqual(current, previous)
 
     def test_940fdef_exports_historical_files_instead_of_current_workflow(self):
         for lang in ("en", "ko"):
