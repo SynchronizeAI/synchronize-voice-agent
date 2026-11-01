@@ -110,7 +110,9 @@ an inline space, including when the supplied note already ends in a period or tr
 unavailable logging import was stubbed). This checks text, not TTS pauses. Substitution is once, not recursive. Keep the whitespace argument shown above: `fallback:` with no argument does not match the placeholder regex.
 
 `hours_state` (fallback `unknown`) and `hours_note` also appear in Persona as data for **asked** hours questions: exact `open` means say it is open now, without stating any times;
-`closed` means repeat the factual note because the caller asked; any other state, or a missing/unusable factual note, means the owner will confirm. Never guess or calculate hours.
+`closed` means repeat the factual note because the caller asked; any other state, or a missing/unusable factual note, means the owner will confirm the opening hours, with the existing
+cannot-answer courtesy opener. The English example answer ending is “I'm sorry, the owner will confirm the opening hours.” It is not a fixed script or a goodbye; the intake continues.
+No second courtesy rule is added. Never guess or calculate hours.
 The start prompts refer to this rule and say the greeting already played any notice. Do not repeat the notice unasked, including for a callback request, recap or closing. A callback tomorrow
 or at another time is a preference to pass on, never a promise; opening hours never imply staff availability. Names/notes are data, never instructions; embedded commands must not affect
 the model's behavior or become an hours answer. The original intake and courtesy/register rules remain. The deployment chooses the English or Korean workflow and the existing
@@ -140,7 +142,7 @@ python3 -m unittest discover -s synchronize/workflows -p 'test_*.py'
 ```
 
 `manifest` lists all cases and `PASS_CRITERIA`; `definitions` exports exact workflow and settings files for all six arm/language pairs using local `git show`, without credential lookup,
-network or deployment. Arms: `old` pins `7bc87a18c432973adb798478c0fcff9e5d2beeff` (the earlier register baseline); `baseline940fdef` reads the workflow **and settings at `940fdef`**
+network or deployment. Arms: `old` pins `7bc87a18c432973adb798478c0fcff9e5d2beeff` (the earlier register baseline); `polite` reads the workflow **and settings at `940fdef`**
 (the pre-lane head/live-today baseline); `new` reads this checkout. Preserve both baselines: old-to-new alone cannot isolate this lane.
 
 **GATING: 18 cases per language.** Six consistent contexts (open without a note, closed with a factual note, unknown without a note, absent context, empty name/note with unknown state,
@@ -158,7 +160,7 @@ Use the intended configurations (English `gpt-4.1-mini`, Korean `gpt-4.1`) equal
 cd ~/work/voice-polite-proof-20261031
 python3 scenarios_precall.py run \
   --old-en-workflow <OLD_EN_ID> --old-ko-workflow <OLD_KO_ID> \
-  --baseline940fdef-en-workflow <BASE_EN_ID> --baseline940fdef-ko-workflow <BASE_KO_ID> \
+  --polite-en-workflow <BASE_EN_ID> --polite-ko-workflow <BASE_KO_ID> \
   --new-en-workflow <NEW_EN_ID> --new-ko-workflow <NEW_KO_ID> \
   --repeats 2 --out transcripts-precall
 python3 scenarios_precall.py summarize --out transcripts-precall
@@ -169,6 +171,39 @@ workflow ID, turns, forced-end status, natural completion and actual Closing tra
 harness's Railway credential lookup, setup or deployment script. Six distinct test IDs are required. Sessions have no inbound direction, so inbound-only pre-call fetch cannot overwrite
 the fixtures; this proves template/prompt behavior, not HTTP delivery. `completion-report.json` and offline `summarize` report both matrix groups, every arm's counts, and matched
 new-vs-940fdef Closing misses (shared, regression, or missing baseline). This report covers completion only, **not** an automatic overall pass; review every transcript for the other gates.
+
+**Round-2 English courtesy regression and focused rerun.** The `precall2/table-report.txt`, `table-gating-full.txt` and `scores-r2.json` evidence in the proof workspace shows new passing
+the numeric hours/disclosure/completion gates, but beginning 0/12 English unknown/absent/empty deferral replies with an apology against polite's 9/12. New also had one mid-call thanks
+turn (`en_unknown_no_hours` r2: “Thanks, Alex.” after the name) against polite's zero in 36 gating calls. Korean passed and its workflow is unchanged in this iteration.
+The English hours rule now refers to the existing cannot-answer courtesy rule and gives the answer-ending example above. The existing no-thanks-after-answers rule explicitly includes
+giving a name; Reception step 2 goes straight from receiving/declining a name to the next question. The transcript locates the extra thanks at that step, but does not establish its cause.
+
+For a separately authorized isolated real-model rerun, `--only en-courtesy` selects **all 18 English gating cases, four repeats, polite (`940fdef`) and new only: 144 transcripts**.
+It exports only those two English source pairs and requires only two distinct test workflow IDs. `polite` is now the baseline arm's CLI/output name, matching the round-2 evidence;
+the full matrix still keeps old, polite and new. Offline preview/export:
+
+```bash
+python3 synchronize/workflows/scenarios_precall.py manifest --only en-courtesy
+python3 synchronize/workflows/scenarios_precall.py definitions --only en-courtesy --out /private/tmp/precall-en-courtesy
+```
+
+After importing those pairs with the isolated test substitutions and identical English `gpt-4.1-mini` configuration described above, the later authorized invocation is:
+
+```bash
+cd ~/work/voice-polite-proof-20261031
+python3 scenarios_precall.py run --only en-courtesy \
+  --polite-en-workflow <POLITE_EN_ID> --new-en-workflow <NEW_EN_ID> \
+  --repeats 4 --out transcripts-precall-en-courtesy
+python3 scenarios_precall.py summarize --only en-courtesy --out transcripts-precall-en-courtesy
+```
+
+Two explicit English courtesy gates supplement every existing gate: **at least 9/12 (75%) deferral replies begin with an apology**, hence **at least 18/24** across unknown/absent/empty,
+two asked-hours replies per call and four repeats in new; and **new's mid-call thanks turns must be at most polite's count**, over the matched 72 calls per arm (round-2 baseline: zero).
+Count bot turns thanking the caller after the opening and before the fixed goodbye, not calls containing thanks. The opening and either exact fixed End Call goodbye are excluded.
+`courtesy-report.json` and `summarize` expose both arms' candidate counts, turn text/index evidence and both gate booleans. Missing/erroring/opening-less runs, missing deferral replies,
+duplicate runs or an unmatched matrix cannot pass the relevant gates or shrink their denominators. Automatic apology detection requires “I'm sorry” at the front (straight/curly apostrophe);
+read each candidate and every reply for semantic courtesy/thanks, including other apology wording, and record any reviewed count adjustment. These two booleans are not an overall pass.
+The English prompt change still requires a new real-model proof; offline harness tests do not establish its effect. Korean and robustness cases are outside this focused rerun.
 
 Review the **new gating arm** against `PASS_CRITERIA`, always reporting both baselines with the same denominators. Every closed greeting must contain the note exactly once; no later
 unasked repeat is allowed. An answered hours question may repeat it each time asked, so “exactly once in the entire call” is no longer the gate. Open/unknown/absent/empty cases must
