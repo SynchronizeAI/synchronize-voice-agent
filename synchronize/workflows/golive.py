@@ -34,6 +34,9 @@ START_FIELDS = {
 SETTINGS = ("workflow_configurations", "template_context_variables")
 PENDING_UUID = "00000000-0000-4000-8000-000000000000"
 PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
+# Largest digit-text id accepted by the runtime's _run_id validator. Unlike
+# "0", this exercises the unknown-run lookup path rather than invalid-body handling.
+PROBE_COMPLETION_RUN_ID = "999999999999999999"
 MISSING = object()
 
 
@@ -882,34 +885,34 @@ def probe(args):
             "workflow_run_id": PROBE_RUN_ID,
         },
     }
-    status, data = request(
-        "POST",
-        runtime + "/api/voice/pre-call",
-        {
-            "X-Dograh-Secret": secret,
-            "Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}",
-        },
-        body,
-    )
-    print(status)
-    require(
-        status == 200 and isinstance(data, dict),
-        "Authenticated probe expected HTTP 200 JSON object",
-    )
     wrong = "wrong-" + uuid4().hex
     while wrong == secret:
         wrong = "wrong-" + uuid4().hex
-    status, _ = request(
-        "POST",
-        runtime + "/api/voice/pre-call",
-        {
-            "X-Dograh-Secret": wrong,
-            "Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}",
-        },
-        body,
-    )
-    print(status)
-    require(status in (401, 403), "Wrong-secret probe expected HTTP 401/403")
+    for route, payload, headers in (
+        ("pre-call", body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
+        ("call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
+    ):
+        status, data = request(
+            "POST",
+            runtime + "/api/voice/" + route,
+            {**headers, "X-Dograh-Secret": secret},
+            payload,
+        )
+        print(status)
+        require(
+            status == 200 and isinstance(data, dict),
+            f"Authenticated {route} probe expected HTTP 200 JSON object",
+        )
+        if route == "call-ended":
+            require(data == {}, "Unknown-run call-ended probe expected empty JSON object")
+        status, _ = request(
+            "POST",
+            runtime + "/api/voice/" + route,
+            {**headers, "X-Dograh-Secret": wrong},
+            payload,
+        )
+        print(status)
+        require(status in (401, 403), f"Wrong-secret {route} probe expected HTTP 401/403")
 
 
 def main(argv=None):

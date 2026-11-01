@@ -97,6 +97,8 @@ class FakeDograh(ThreadingHTTPServer):
         self.credentials, self.calls, self.published = [], [], 0
         self.wrong_status = 401
         self.probe_result = {}
+        self.completion_status, self.completion_wrong_status = 200, 401
+        self.completion_result = {}
         self.credential_error = False
         self.drift = None
         self.redirect = False
@@ -189,12 +191,15 @@ class Handler(BaseHTTPRequestHandler):
         if fake.failure and fake.failure(self.command, self.path):
             self.reply(409, {"detail": body})
             return
-        if self.path == "/api/voice/pre-call":
+        if self.path in ("/api/voice/pre-call", "/api/voice/call-ended"):
             fake.probe_headers.append(dict(self.headers))
             valid = self.headers.get("X-Dograh-Secret") == fake.secret
+            completion = self.path == "/api/voice/call-ended"
             self.reply(
-                200 if valid else fake.wrong_status,
-                fake.probe_result if valid else {"echo": fake.secret},
+                (fake.completion_status if valid else fake.completion_wrong_status)
+                if completion else (200 if valid else fake.wrong_status),
+                (fake.completion_result if completion else fake.probe_result)
+                if valid else {"echo": fake.secret},
             )
             return
         if self.headers.get("X-API-Key") != fake.api_key:
@@ -599,8 +604,9 @@ class GoLiveTests(unittest.TestCase):
         ]
         for status in (401, 403):
             self.fake.wrong_status = status
+            self.fake.completion_wrong_status = status
             out, err = self.run_cli(args)
-            self.assertEqual(out, f"200\n{status}\n")
+            self.assertEqual(out, f"200\n{status}\n200\n{status}\n")
             self.assertEqual(err, "")
         for status in (404, 500, 503, 200):
             self.fake.wrong_status = status
@@ -619,13 +625,46 @@ class GoLiveTests(unittest.TestCase):
                 },
             },
         )
-        self.assertTrue(
-            all(path == "/api/voice/pre-call" for _, path, _ in self.fake.calls)
-        )
+        self.assertTrue(all(
+            path in ("/api/voice/pre-call", "/api/voice/call-ended")
+            for _, path, _ in self.fake.calls
+        ))
         self.assertEqual(
             self.fake.probe_headers[0]["Idempotency-Key"],
             f"dograh-pre-call-{golive.PROBE_RUN_ID}",
         )
+        self.assertFalse(self.backups.exists())
+
+    def test_call_ended_probe_uses_digit_text_and_rejects_bad_statuses_or_bodies(self):
+        args = [
+            "probe", "--runtime-origin", self.fake.runtime,
+            "--to-number", "+12025550199", "--workflow-id", "3",
+        ]
+        out, err = self.run_cli(args)
+        self.assertEqual(out, "200\n401\n200\n401\n")
+        self.assertEqual(err, "")
+        self.assertEqual(
+            [path for _, path, _ in self.fake.calls],
+            ["/api/voice/pre-call"] * 2 + ["/api/voice/call-ended"] * 2,
+        )
+        for _, _, body in self.fake.calls[2:]:
+            self.assertEqual(body, {"workflow_run_id": "999999999999999999"})
+        self.assertTrue(self.fake.probe_headers[2]["X-Dograh-Secret"] == self.fake.secret)
+        self.assertTrue(self.fake.probe_headers[3]["X-Dograh-Secret"] != self.fake.secret)
+        self.assertNotIn("Idempotency-Key", self.fake.probe_headers[2])
+        for status in (200, 404, 422, 500, 503):
+            self.fake.completion_wrong_status = status
+            _, err = self.run_cli(args, expected=1)
+            self.assertIn("Wrong-secret call-ended probe", err)
+        self.fake.completion_wrong_status = 401
+        for status in (404, 422, 500, 503):
+            self.fake.completion_status = status
+            _, err = self.run_cli(args, expected=1)
+            self.assertIn("Authenticated call-ended probe", err)
+        self.fake.completion_status = 200
+        for body in (None, [], {"unexpected": True}):
+            self.fake.completion_result = body
+            self.run_cli(args, expected=1)
         self.assertFalse(self.backups.exists())
 
     def test_customised_korean_greeting_becomes_three_lines(self):

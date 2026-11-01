@@ -150,12 +150,19 @@ It can recover a draft left by a failed apply, saves/publishes the backup defini
 A current draft's inspection backup is labelled draft and cannot itself be restored as a release; all backups except format version 2 are refused with an explicit message. Rollback verifies equality against the fetched API representation;
 masked/server-only values cannot be recovered from an API backup. Historical definitions need not have the new wiring.
 
-`probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` accesses only the runtime, never Dograh.
+`probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` sends requests only to the runtime; it makes no direct Dograh requests.
 It mirrors `api/services/pipecat/pre_call_fetch.py:109–123`: `event = call_inbound`, integer `agent_id` from `--workflow-id`, synthetic caller `+12025550100`,
 called E.164 number, integer `workflow_run_id = -2147483647`, and `Idempotency-Key: dograh-pre-call--2147483647`.
-The local receiver source (`/Users/enoch/work/voice-a1/src/synchronize/web/voice_api.py:122–155`) ignores agent/run IDs and uses only the called number;
-the negative ID deliberately cannot name a real Dograh run. Probe expects 200 JSON with the environment secret and 401/403 with a wrong secret, printing status codes only.
-It sends no completion. The test call must verify business context, a saved call and authenticated completion separately.
+The Synchronize runtime source (`src/synchronize/web/voice_api.py` in the main repo) ignores pre-call agent/run IDs and uses only the called number;
+the negative pre-call ID deliberately cannot name a real Dograh run. Probe expects 200 JSON with the environment secret and 401/403 with a wrong secret.
+It also probes `/api/voice/call-ended` with `{"workflow_run_id":"999999999999999999"}` and the same correct/wrong secret headers.
+This is the largest 18-digit plain decimal text accepted by `_run_id` / `_CallEnded`. `"0"` fails validation (the route still answers 200 `{}`),
+so it would not exercise the lookup path. For the deliberately unknown positive ID, `Voice.owning_tenant` (`src/synchronize/voice.py`)
+maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}` without enqueueing a notice**. A lookup failure instead returns 503 and fails the probe.
+Successful probe output is four status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
+call-ended correct secret `200`, call-ended wrong secret `401`/`403`. A 404, 422 or 5xx at either route fails.
+The runtime's completion lookup reads Dograh; it does not create a run. The deployed runtime's behavior and absence of that synthetic ID cannot be established offline.
+The test call must still verify business context, a saved call and authenticated completion separately.
 
 Operator setup in the owner's terminal: set the nonsecret `DOGRAH_PROOF_BASE_URL`, `RUNTIME_ORIGIN`, `CREDENTIAL_NAME`, called `TO_NUMBER`,
 `WORKFLOW_ID=3 LANGUAGE=en`, and `BACKUP_DIR="$HOME/golive-backups"`. Export `DOGRAH_PROOF_BASE_URL`.
