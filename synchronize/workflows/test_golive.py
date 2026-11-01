@@ -511,6 +511,29 @@ class GoLiveTests(unittest.TestCase):
         )
         self.assertFalse(self.backups.exists())
 
+    def test_customised_korean_greeting_becomes_three_lines(self):
+        old = golive.nodes(golive.template("940fdef", "ko"))["1"]["data"]["greeting"]
+        new = golive.nodes(golive.template("HEAD", "ko"))["1"]["data"]["greeting"]
+        live = "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
+        self.assertEqual(golive.patch_text(old, new, live, "node 1.data.greeting"),
+                         "안녕하세요, 영훈솔루션 AI 비서입니다.\n{{hours_note | fallback: }}\n어떤 일로 전화하셨나요?")
+
+    def test_silent_skips_are_conflicts_with_operator_guidance(self):
+        for old, new, live in (
+            ("A\nB\nD", "A\nC\nD", "A\nB-custom\nD\nC"),
+            ("W\nX\nY", "W\nY", "W\nX-custom\nY"),
+            ("Hi. How may I help you?", "Hi. How may I help?",
+             "Hi there. How can I help you today?"),
+        ):
+            with self.subTest(old=old):
+                with self.assertRaisesRegex(golive.GoLiveError, "field.*Dograh UI.*re-plan"):
+                    golive.patch_text(old, new, live, "field")
+        old = golive.nodes(golive.template("940fdef", "ko"))["4"]["data"]["prompt"]
+        new = golive.nodes(golive.template("HEAD", "ko"))["4"]["data"]["prompt"]
+        live = old.replace("{{business_name | fallback:저희 회사}}", "영훈솔루션")
+        with self.assertRaisesRegex(golive.GoLiveError, "node 4.data.prompt.*Dograh UI"):
+            golive.patch_text(old, new, live, "node 4.data.prompt")
+
     def test_original_word_merge_and_multiline_insert_delete_are_exact_once(self):
         self.assertEqual(
             golive.patch_text(

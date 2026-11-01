@@ -169,67 +169,87 @@ def template(ref, lang):
     return json.loads(result.stdout)["workflow_definition"]
 
 
+def conflict(label):
+    return GoLiveError(
+        f"{label}: replacement must match exactly once; edit that field in the "
+        "Dograh UI, publish it, then re-plan and apply. Check LF/CRLF and NFC/NFD "
+        "Unicode differences if the text looks identical."
+    )
+
+
 def replace_once(live, old, new, label):
-    count = live.count(old) if old else 0
-    # A repeated run may already contain the exact new block, plus custom text.
-    if new and live.count(new) == 1 and (count == 0 or (count == 1 and old in new)):
-        return live
-    require(count == 1, f"{label}: replacement must match exactly once")
+    if not old or live.count(old) != 1:
+        raise conflict(label)
     return live.replace(old, new, 1)
 
 
-def replace_line_block(live, old, new, label):
-    # Whole lines prevent an anchor such as A also matching inside LOCAL.
-    lines, before, after = live.split("\n"), old.split("\n"), new.split("\n")
+def character_merge(old, new, live, label):
+    # Trim the common prefix/suffix to locate the changed middle. Retain the
+    # suffix as an anchor: a bare space or '?' is not enough evidence to patch.
+    prefix = 0
+    while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
+        prefix += 1
+    suffix = 0
+    while (suffix < min(len(old), len(new)) - prefix
+           and old[-suffix - 1] == new[-suffix - 1]):
+        suffix += 1
+    old_middle = old[prefix:len(old) - suffix if suffix else len(old)]
+    new_middle = new[prefix:len(new) - suffix if suffix else len(new)]
+    anchor = old[len(old) - suffix:] if suffix else ""
+    if old_middle or anchor:
+        return replace_once(live, old_middle + anchor, new_middle + anchor, label)
+    # Insertion at end requires the full unchanged prefix, exactly once.
+    return replace_once(live, old, new, label)
 
-    def matches(haystack, needle):
-        return [
-            i
-            for i in range(len(haystack) - len(needle) + 1)
-            if haystack[i : i + len(needle)] == needle
-        ]
 
-    found = matches(lines, before)
-    if len(matches(lines, after)) == 1 and (
-        not found or (len(found) == 1 and matches(after, before))
-    ):
-        return live
-    require(len(found) == 1, f"{label}: replacement must match exactly once")
-    start = found[0]
-    return "\n".join(lines[:start] + after + lines[start + len(before) :])
+def line_matches(lines, block):
+    return [i for i in range(len(lines) - len(block) + 1)
+            if block and lines[i:i + len(block)] == block]
 
 
 def patch_text(old, new, live, label):
-    """Preserve deploy_live's exact-once merge; anchor added/deleted line blocks."""
+    """Exact-once hunks; already-applied evidence includes unchanged context."""
     require(isinstance(live, str), f"{label}: expected text")
     if live == old or live == new:
         return new
-    if "\n" in old or "\n" in new:
-        ol, nl = old.split("\n"), new.split("\n")
-        out = live
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, ol, nl, autojunk=False
-        ).get_opcodes():
-            if tag == "equal":
-                continue
-            ob, nb = "\n".join(ol[i1:i2]), "\n".join(nl[j1:j2])
-            if tag == "insert":
-                if i1 < len(ol):
-                    ob, nb = ol[i1], nb + "\n" + ol[i1]
-                else:
-                    ob, nb = ol[-1], ol[-1] + "\n" + nb
-            elif tag == "delete":
-                if i2 < len(ol):
-                    ob, nb = ob + "\n" + ol[i2], ol[i2]
-                else:
-                    ob, nb = ol[i1 - 1] + "\n" + ob, ol[i1 - 1]
-            out = replace_line_block(out, ob, nb, label)
-        return out
-    p = 0
-    while p < min(len(old), len(new)) and old[p] == new[p]:
-        p += 1
-    # Original one-line merge: differing middle anchored by unchanged suffix.
-    return replace_once(live, old[p:], new[p:], label)
+    # Whole new-template context may have retained local lines around it.
+    if new and live.count(new) == 1 and old not in live:
+        return live
+    if "\n" not in old:
+        return character_merge(old, new, live, label)
+    ol, nl = old.split("\n"), new.split("\n")
+    out = live
+    opcodes = difflib.SequenceMatcher(None, ol, nl, autojunk=False).get_opcodes()
+    for index, (tag, i1, i2, j1, j2) in enumerate(opcodes):
+        if tag == "equal":
+            continue
+        before, after = ol[i1:i2], nl[j1:j2]
+        # Use up to two adjacent unchanged lines on EACH side. Never borrow
+        # another hunk as context (it may already have been applied).
+        left = opcodes[index - 1] if index else None
+        right = opcodes[index + 1] if index + 1 < len(opcodes) else None
+        pre = ol[max(left[1], i1 - 2):i1] if left and left[0] == "equal" else []
+        post = ol[i2:min(right[2], i2 + 2)] if right and right[0] == "equal" else []
+        lines = out.split("\n")
+        anchored_before, anchored_after = pre + before + post, pre + after + post
+        # A new fragment elsewhere, or a surviving delete anchor alone, does
+        # not prove a hunk applied. Absence means the entire old block is absent.
+        if (not line_matches(lines, before if before else anchored_before)
+                and (pre or post) and len(line_matches(lines, anchored_after)) == 1):
+            continue
+        search = anchored_before if tag in ("insert", "delete") else before
+        replacement = anchored_after if tag in ("insert", "delete") else after
+        found = line_matches(lines, search)
+        if len(found) == 1:
+            start = found[0]
+            out = "\n".join(lines[:start] + replacement + lines[start + len(search):])
+        elif not found:
+            # A customised anchor can still leave an exact character-level
+            # delta. A changed old middle/suffix remains a conflict.
+            out = character_merge("\n".join(anchored_before), "\n".join(anchored_after), out, label)
+        else:
+            raise conflict(label)
+    return out
 
 
 def patch_value(old, new, live, label):
