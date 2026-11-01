@@ -648,7 +648,7 @@ class GoLiveTests(unittest.TestCase):
             ["/api/voice/pre-call"] * 2 + ["/api/voice/call-ended"] * 2,
         )
         for _, _, body in self.fake.calls[2:]:
-            self.assertEqual(body, {"workflow_run_id": "999999999999999999"})
+            self.assertEqual(body, {"workflow_run_id": "2147483647"})
         self.assertTrue(self.fake.probe_headers[2]["X-Dograh-Secret"] == self.fake.secret)
         self.assertTrue(self.fake.probe_headers[3]["X-Dograh-Secret"] != self.fake.secret)
         self.assertNotIn("Idempotency-Key", self.fake.probe_headers[2])

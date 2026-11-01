@@ -155,12 +155,13 @@ It mirrors `api/services/pipecat/pre_call_fetch.py:109–123`: `event = call_inb
 called E.164 number, integer `workflow_run_id = -2147483647`, and `Idempotency-Key: dograh-pre-call--2147483647`.
 The Synchronize runtime source (`src/synchronize/web/voice_api.py` in the main repo) ignores pre-call agent/run IDs and uses only the called number;
 the negative pre-call ID deliberately cannot name a real Dograh run. Probe expects 200 JSON with the environment secret and 401/403 with a wrong secret.
-It also probes `/api/voice/call-ended` with `{"workflow_run_id":"999999999999999999"}` and the same correct/wrong secret headers.
-This is the largest 18-digit plain decimal text accepted by `_run_id` / `_CallEnded`. `"0"` fails validation (the route still answers 200 `{}`),
+It also probes `/api/voice/call-ended` with `{"workflow_run_id":"2147483647"}` and the same correct/wrong secret headers.
+This is the largest value Dograh's 32-bit `workflow_runs.id` column can hold, so the lookup answers a clean 404 instead of a database range error (an 18-digit id would make Dograh answer 500 and the probe fail on a correct deployment). `"0"` fails validation (the route still answers 200 `{}`),
 so it would not exercise the lookup path. For the deliberately unknown positive ID, `Voice.owning_tenant` (`src/synchronize/voice.py`)
 maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}` without enqueueing a notice**. A lookup failure instead returns 503 and fails the probe.
 Successful probe output is four status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
 call-ended correct secret `200`, call-ended wrong secret `401`/`403`. A 404, 422 or 5xx at either route fails.
+An older runtime that silently drops digit-text ids also answers 200 `{}`, so this probe cannot tell the two receivers apart: only the test call proves that completions are processed.
 The runtime's completion lookup reads Dograh; it does not create a run. The deployed runtime's behavior and absence of that synthetic ID cannot be established offline.
 The test call must still verify business context, a saved call and authenticated completion separately.
 

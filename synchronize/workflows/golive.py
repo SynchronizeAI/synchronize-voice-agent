@@ -36,7 +36,7 @@ PENDING_UUID = "00000000-0000-4000-8000-000000000000"
 PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
 # Largest digit-text id accepted by the runtime's _run_id validator. Unlike
 # "0", this exercises the unknown-run lookup path rather than invalid-body handling.
-PROBE_COMPLETION_RUN_ID = "999999999999999999"
+PROBE_COMPLETION_RUN_ID = "2147483647"  # Largest id Dograh's 32-bit column can hold; never a real run.
 MISSING = object()
 
 
