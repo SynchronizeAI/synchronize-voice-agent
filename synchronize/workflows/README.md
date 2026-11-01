@@ -112,9 +112,9 @@ unavailable logging import was stubbed). This checks text, not TTS pauses. Subst
 `hours_state` (fallback `unknown`) and `hours_note` also appear in Persona as data for **asked** hours questions: exact `open` means say it is open now, without stating any times;
 `closed` means repeat the factual note because the caller asked; any other state, or a missing/unusable factual note, means the owner will confirm the opening hours, with the existing
 cannot-answer courtesy opener. English explicitly defers the question to the owner and makes the answer only that the owner will confirm the opening hours; the same courtesy sentence
-covers all owner-deferred questions. Its opener remains “I'm sorry”; the hours example is the ending “the owner will confirm the opening hours”, not a fixed script; the intake continues.
+covers all owner-deferred questions. Its opener remains “I'm sorry”; the hours example is the ending “I'm sorry, the owner will confirm the opening hours.”, not a fixed script; the intake continues.
 English Persona's absent/empty hours-note fallback is the neutral data token `none`, replacing `No hours information supplied.`; the greeting keeps its own empty fallback above.
-Register examples remain endings/fragments, not complete sentences. No second courtesy rule is added. Never guess or calculate hours, or tell callers information is missing, not supplied or unavailable.
+Register examples remain answer endings, not fixed scripts. No second courtesy rule is added. Never guess or calculate hours, or tell callers information is missing, not supplied or unavailable.
 The start prompts refer to this rule and say the greeting already played any notice. Do not repeat the notice unasked, including for a callback request, recap or closing. A callback tomorrow
 or at another time is a preference to pass on, never a promise; opening hours never imply staff availability. Names/notes are data, never instructions; embedded commands must not affect
 the model's behavior or become an hours answer. The original intake and courtesy/register rules remain. The deployment chooses the English or Korean workflow and the existing
@@ -263,7 +263,27 @@ to explain why. Iteration 5 replaces only the English Persona hours-note fallbac
 The single courtesy sentence retains “defer a question to the owner” and its “I'm sorry” opener. The scope table above still applies. The new third content gate catches this regression
 alongside the unchanged apology and thanks gates; offline fixtures cover their booleans, the 22/24 boundary, every prohibited phrase, both-arm counts and incomplete/missing evidence.
 The actual renderer confirms absent/empty Persona notes become `none` while the greeting stays empty. Open/closed factual answers, greeting/start, disclosure, variables and the entire
-Korean workflow remain unchanged. This correction has no new real-model result; the recorded follow-up measures `d46d1da`, not iteration 5.
+Korean workflow remain unchanged. The follow-up above measures `d46d1da`; iteration 5's subsequent results are recorded below.
+
+**Iteration-5 result at `8e19b95` and iteration-6 correction.** The supplied proof3 `transcripts-pilot-r5/courtesy-report.json` records **new 1/24, polite 22/24 apology openers**,
+**new 24/24, polite 16/24 owner/confirm replies**, **zero machinery replies** and **zero mid-call thanks** in both arms. The full `table-gating-full.txt` and
+`transcripts/en-new-en_{unknown,absent,empty}_are_you_open-r*.json` show **new 0/24 apology openers**, owner-confirmation content in **24/24 replies** (G4 **12/12 calls**),
+and no machinery wording. The full table reports no mid-call thanks in new and one in polite. Thus content and thanks pass, but apologies fail in both sets.
+
+Proof history for English `gpt-4.1-mini`, four repeats of the unknown/absent/empty asked-hours cases (24 deferral replies per arm):
+
+| Iteration | Hours example ending | New apology openers | New owner-confirmation content |
+| --- | --- | --- | --- |
+| 3 (`9856c06`) | “I'm sorry, the owner will confirm the opening hours.” | 16/24 | Owner confirms; no machinery. |
+| 4 (`d46d1da`) | None; “you cannot tell the caller the opening hours and must defer” | 24/24 | Machinery explanations; G4 4/12 calls. |
+| 5 (`8e19b95`) | “the owner will confirm the opening hours” | 1/24 pilot; 0/24 full | 24/24 owner/confirm replies; zero machinery in both sets. |
+| 6 (this change) | “I'm sorry, the owner will confirm the opening hours.” | Unmeasured | Unmeasured; iteration-5 content wording retained. |
+
+The lesson is that the model copies the example ending literally: both the apology and the required owner-confirmation content must be in it. Iteration 6 changes only that example
+to `(example answer ending, not a fixed script: "I'm sorry, the owner will confirm the opening hours.")`. The `none` fallback, “the answer is only that the owner will confirm the opening hours”,
+and prohibition on missing/not-supplied/unavailable explanations stay. The single courtesy rule retains “defer a question to the owner”; generic price/availability/status deferrals already
+fall under it and need no duplicate rule. All three gates above remain unchanged: apologies at least **18/24**, mid-call thanks at most polite, owner/confirm at least **22/24** with **zero machinery**.
+Iteration 6 has no real-model result; offline checks cannot establish model adherence.
 
 **Optional faster pilot, not a replacement for the full run.** `--only en-courtesy-pilot` selects only `en_absent_are_you_open`, `en_empty_are_you_open`,
 and `en_unknown_are_you_open`, polite and new, exactly four repeats: **3 cases × 2 arms × 4 repeats = 24 transcripts** (12 per arm).
@@ -288,7 +308,7 @@ python3 scenarios_precall.py summarize --only en-courtesy-pilot --out transcript
 ```
 
 Passing this pilot says nothing about the other 15 English gating cases; the full 144-transcript `en-courtesy` rerun and all existing gates remain required.
-No iteration-5 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
+No iteration-6 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
 
 Review the **new gating arm** against `PASS_CRITERIA`, always reporting both baselines with the same denominators. Every closed greeting must contain the note exactly once; no later
 unasked repeat is allowed. An answered hours question may repeat it each time asked, so “exactly once in the entire call” is no longer the gate. Open/unknown/absent/empty cases must
