@@ -20,6 +20,12 @@ ElevenLabs provider connections and a model configuration (`POST /api/v1/model-c
 workflow and enter its settings (`workflows/README.md`); add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 
+Shared reception uses Synchronize's `POST /api/voice/pre-call` for per-called-number business context and a completion Webhook node for
+`POST /api/voice/call-ended`. Both authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
+Custom Header credential, never the workflow JSON. Deployment URL/credential substitutions, failure/retry behavior and the separate real-model proof are in
+`workflows/README.md`. That file also records the current Dograh payload blocker: its renderer stringifies the run ID and adds `call_disposition`, so the completion
+node must not be published against Synchronize's strict one-integer-field receiver until the Dograh contract is corrected and verified.
+
 ## Measured
 
 End of the caller's speech to the first sound, Korean sentences at 8 kHz from a US server (clean synthetic callers, so network and noise are not included):

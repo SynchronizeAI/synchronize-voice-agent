@@ -192,6 +192,24 @@
           ],
           "allow_interrupt": true
         }
+      },
+      {
+        "id": "6",
+        "type": "webhook",
+        "position": {
+          "x": 600,
+          "y": 350
+        },
+        "data": {
+          "name": "Notify Synchronize on call completion",
+          "enabled": true,
+          "http_method": "POST",
+          "endpoint_url": "https://synchronize.example.invalid/api/voice/call-ended",
+          "credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>",
+          "payload_template": {
+            "workflow_run_id": "{{workflow_run_id}}"
+          }
+        }
       }
     ],
     "edges": [

@@ -72,6 +72,21 @@ This is an operator substitution before import, not a call variable; `.invalid` 
 Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
 Dograh continues with earlier context and the generic greeting fallback (`docs/voice-agent/pre-call-data-fetch.mdx`).
 
+Node `6` is the sole caller of `POST /api/voice/call-ended`: replace the same `.invalid` origin in `data.endpoint_url`, and put that same credential UUID in
+`data.credential_uuid`. It is an enabled `POST` Webhook node, with no incoming or outgoing edges: Dograh runs integration nodes asynchronously after completion,
+including caller hangups and English End Call tool exits, after QA. Do not connect it to the conversation graph or add a second tool/integration calling this endpoint.
+Import the substituted workflow, apply its settings, check both Authentication selectors, and publish. Dograh's durable delivery worker retries transient failures
+(including HTTP 500/502/503/504) with backoff, up to five total attempts by default (`WEBHOOK_DELIVERY_MAX_ATTEMPTS=5`, `api/constants.py`, `api/tasks/webhook_delivery.py`);
+permanent auth/validation errors dead-letter immediately. The developer reference's old "no retry by default" sentence is stale against this checkout.
+
+**Offline contract blocker — do not publish this webhook against the strict receiver yet.** The template contains only `workflow_run_id`, and the intended wire body is
+`{"workflow_run_id": 123}` with an integer and no other fields. `WebhookNodeData` in `api/services/workflow/dto.py` explicitly lists `workflow_run_id` as payload context,
+`docs/voice-agent/webhook.mdx` shows it, `docs/developer/webhooks.mdx` types it as integer, and `_build_render_context` in `api/tasks/run_integrations.py` supplies `workflow_run.id`.
+However, the DTO requires a JSON object for `payload_template`; the shared renderer converts its string placeholders to strings, and `_build_webhook_payload` unconditionally
+adds `call_disposition`. An offline execution of these actual functions yields `{"workflow_run_id": "123", "call_disposition": "follow_up"}`. No documented template syntax
+or node field suppresses that extra key or preserves the integer. This needs a Dograh payload contract change, not a different variable name or a Synchronize receiver shim.
+The node's URL/auth/completion placement is wired for review; the exact one-integer-field delivery remains unfulfilled pending that change and its focused tests.
+
 ## Business context in the prompts
 
 `business_name` stays in the static greeting and the Persona global prompt, with `our office` / `저희 회사` fallbacks. The AI disclosure (and the English recording disclosure)
