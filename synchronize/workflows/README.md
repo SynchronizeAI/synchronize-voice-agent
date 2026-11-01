@@ -79,13 +79,10 @@ Import the substituted workflow, apply its settings, check both Authentication s
 (including HTTP 500/502/503/504) with backoff, up to five total attempts by default (`WEBHOOK_DELIVERY_MAX_ATTEMPTS=5`, `api/constants.py`, `api/tasks/webhook_delivery.py`);
 permanent auth/validation errors dead-letter immediately. The developer reference's old "no retry by default" sentence is stale against this checkout.
 
-**Offline contract blocker — do not publish this webhook against the strict receiver yet.** The template contains only `workflow_run_id`, and the intended wire body is
-`{"workflow_run_id": 123}` with an integer and no other fields. `WebhookNodeData` in `api/services/workflow/dto.py` explicitly lists `workflow_run_id` as payload context,
-`docs/voice-agent/webhook.mdx` shows it, `docs/developer/webhooks.mdx` types it as integer, and `_build_render_context` in `api/tasks/run_integrations.py` supplies `workflow_run.id`.
-However, the DTO requires a JSON object for `payload_template`; the shared renderer converts its string placeholders to strings, and `_build_webhook_payload` unconditionally
-adds `call_disposition`. An offline execution of these actual functions yields `{"workflow_run_id": "123", "call_disposition": "follow_up"}`. No documented template syntax
-or node field suppresses that extra key or preserves the integer. This needs a Dograh payload contract change, not a different variable name or a Synchronize receiver shim.
-The node's URL/auth/completion placement is wired for review; the exact one-integer-field delivery remains unfulfilled pending that change and its focused tests.
+**What the webhook sends.** The template holds only `workflow_run_id`. `WebhookNodeData` in `api/services/workflow/dto.py` lists `workflow_run_id` as payload context, `docs/voice-agent/webhook.mdx` shows it, and
+`_build_render_context` in `api/tasks/run_integrations.py` supplies `workflow_run.id`. The renderer turns the placeholder into text and `_build_webhook_payload` always adds `call_disposition`,
+so the body on the wire is `{"workflow_run_id": "123", "call_disposition": "follow_up"}` (checked by running those functions offline). Synchronize's receiver accepts the id as plain digits in text
+and ignores every other field, so no change to Dograh is needed: this fork stays equal to upstream except `synchronize/`.
 
 ## Business context in the prompts
 
