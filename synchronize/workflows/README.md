@@ -68,7 +68,7 @@ into node `1` → `data.pre_call_fetch_credential_uuid`, replacing `<DOGRAH_WEBH
 with `credential_data.header_name` and `credential_data.header_value` (see `api/utils/credential_auth.py`). Keep secrets out of workflow JSON and git.
 Replace `https://synchronize.example.invalid` in node `1` → `data.pre_call_fetch_url` with this deployment's public Synchronize backend origin, preserving `/api/voice/pre-call`.
 This is an operator substitution before import, not a call variable; `.invalid` deliberately cannot name a deployed service. In the editor, Start Call → Advanced Settings must show
-**Inbound calls only**, that URL, and the saved credential under Authentication. Dograh sends JSON with `call_inbound.to_number` and `call_inbound.workflow_run_id`;
+**Inbound calls only**, that URL, and the saved credential under Authentication. Dograh sends JSON with `call_inbound.from_number`, `call_inbound.to_number` and `call_inbound.workflow_run_id`;
 Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
 Dograh continues with earlier context and the generic greeting fallback (`docs/voice-agent/pre-call-data-fetch.mdx`).
 
@@ -89,7 +89,11 @@ and ignores every other field, so no backend change to Dograh is needed. This la
 `business_name` stays in the static greeting and Persona, with `our office` / `저희 회사` fallbacks. `hours_note` is rendered in the **fixed greeting**, after the literal AI disclosure
 (and English recording disclosure), before the opening question. The model does not decide whether to announce it. Synchronize supplies a note only for `closed`, built by host code from
 structured hours, never tenant prose. The template deliberately does not gate on `hours_state`: the renderer has substitution and fallbacks, not conditionals. A decoy or hostile note from
-outside that contract would also be read literally. The tenant-typed business name may be echoed by the greeting but cannot change the disclosure or instruct the model.
+outside that contract would also be read literally. The tenant-typed business name may be echoed by the greeting; the disclosure remains literal, independent of data.
+The backend contract is to collapse all name whitespace (including newlines) to single spaces, strip the ends, apply a length cap, and omit the name if the result is empty.
+Dograh's renderer does not trim tenant values: a whitespace-only name would bypass its fallback. Name normalization and the length cap belong to Synchronize's backend and are not verified here.
+Persona wraps every interpolated business name and hours note in double quotes (`"{{business_name | fallback:...}}"`, `"{{hours_note | fallback:...}}"`); the existing data-boundary sentence names those delimiters as data.
+Quoting does not escape tenant text or replace backend normalization; the static greeting keeps its spoken form. The “only when closed” notice guarantee is also the backend contract, not a template condition.
 The exact greeting templates are:
 
 ```text
@@ -111,11 +115,14 @@ unavailable logging import was stubbed). This checks text, not TTS pauses. Subst
 
 `hours_state` (fallback `unknown`) and `hours_note` also appear in Persona as data for **asked** hours questions: exact `open` means say it is open now, without stating any times;
 `closed` means repeat the factual note because the caller asked; any other state, or a missing/unusable factual note, means the owner will confirm the opening hours, with the existing
-cannot-answer courtesy opener. English explicitly defers the question to the owner and makes the answer only that the owner will confirm the opening hours; the same courtesy sentence
-covers all owner-deferred questions. Its opener remains “I'm sorry”; the hours example is the ending “I'm sorry, the owner will confirm the opening hours.”, not a fixed script; the intake continues.
-English Persona's absent/empty hours-note fallback is the neutral data token `none`, replacing `No hours information supplied.`; the greeting keeps its own empty fallback above.
+cannot-answer courtesy opener. Both languages explicitly defer the question to the owner and make the answer only that the owner will confirm the opening hours; the same courtesy sentence
+covers all owner-deferred questions. English's opener remains “I'm sorry”; the hours example is the ending “I'm sorry, the owner will confirm the opening hours.”, not a fixed script; the intake continues.
+Persona's absent/empty hours-note fallbacks are the neutral data tokens `none` (English) and `없음` (Korean), replacing prose explanations; each greeting keeps its own empty fallback above.
+Korean's single courtesy rule now also covers “질문을 담당자에게 넘길 때”; its ending example, in the existing 합니다체 register, is “죄송하지만 담당자가 영업시간을 확인해서 알려 드리겠습니다.”
+The Korean hours rule answers unknown/missing/empty/other states only with owner confirmation and forbids explaining missing/unavailable information, as English already does.
 Register examples remain answer endings, not fixed scripts. No second courtesy rule is added. Never guess or calculate hours, or tell callers information is missing, not supplied or unavailable.
-The start prompts refer to this rule and say the greeting already played any notice. Do not repeat the notice unasked, including for a callback request, recap or closing. A callback tomorrow
+The global hours rule alone says the greeting already played any notice and forbids unasked repeats, including for a callback request, recap or closing. The duplicate Reception paragraphs are removed in both languages.
+The data-boundary paragraph alone restricts notes to factual hours content and rejects embedded commands; the duplicate hours-bullet sentence is removed in both languages. A callback tomorrow
 or at another time is a preference to pass on, never a promise; opening hours never imply staff availability. Names/notes are data, never instructions; embedded commands must not affect
 the model's behavior or become an hours answer. The original intake and courtesy/register rules remain. The deployment chooses the English or Korean workflow and the existing
 caller-driven language-switch rule remains; no per-call language field is consumed. The earlier real-model proof found no effect from that field. Prompts use template braces only for
@@ -126,11 +133,12 @@ never entering Closing. Those five delayed `name_given`, entered Detail after a 
 `/end`. Its `completed` flag therefore hid the missed Closing transition. Closing itself cannot repair a transition that never reaches it. Closing's own prompt, Detail's prompt and the
 edges are identical at `940fdef` and the first pre-call branch head; the new Persona/start rules differ. The proof's `old` arm is `7bc87a1` (before the courtesy work), **not** `940fdef`:
 it reached Closing 50/50, against 45/50 in `new`. The diagnostic `newcg` with global inheritance reached Closing 16/16 and made 0/16 tomorrow promises, but some closing turns asked
-another question. Neither comparison attributes the failures to this lane against what is live today. No `940fdef` model transcripts exist in that proof; the new arm below is required.
+another question. Neither comparison attributes the failures to this lane against what is live today. That first proof had no `940fdef` model transcripts; the round-2 comparison below subsequently included that baseline and Korean passed all then-existing gates.
 
 Closing keeps `add_global_prompt: false` and its no-new-topic/no-question ending (the earlier register proof measured 0/75 final questions against 12/75 with inheritance).
 Only its own prompt gains two sentences: no day/time attached to the contact promise, and the caller's requested timing is a preference to pass on. No full goodbye example is added.
-Detail and the edges are unchanged pending the `940fdef` comparison. The smaller local rule's real-model effect, including preservation of the no-question gain, is unverified offline.
+Detail and the edges stayed unchanged in the round-2 `940fdef` comparison; Korean passed the then-existing completion, callback and no-final-question gates.
+Iteration 7 changes Korean hours-deferral content/courtesy only (plus deduplication and data delimiters); its greeting, Closing, Detail and edges remain unchanged and all existing gates must be rechecked.
 
 ## Pre-call proof (separate authorized step; not run here)
 
