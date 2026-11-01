@@ -179,8 +179,9 @@ python3 scenarios_precall.py summarize --out transcripts-precall
 The adapter reuses the old session loop, injects `initial_context` into session creation, captures the opening, and stores arm, local source files (`sources.json`), case, expectations,
 workflow ID, turns, forced-end status, natural completion and actual Closing transition/End Call tool evidence. Its API uses only the explicit proof environment variables, never the old
 harness's Railway credential lookup, setup or deployment script. Six distinct test IDs are required. Sessions have no inbound direction, so inbound-only pre-call fetch cannot overwrite
-the fixtures; this proves template/prompt behavior, not HTTP delivery. `completion-report.json` and offline `summarize` report both matrix groups, every arm's counts, and matched
-new-vs-940fdef Closing misses (shared, regression, or missing baseline). This report covers completion only, **not** an automatic overall pass; review every transcript for the other gates.
+the fixtures; this proves template/prompt behavior, not HTTP delivery. `completion-report.json` and offline `summarize` report declared expected counts, `complete` for the whole selected matrix and each matrix group, every arm's actual/expected counts and errors, and matched new-vs-940fdef Closing misses (shared, regression, missing baseline, or new API error).
+Completeness requires every selected arm × case × repeat exactly once, with an opening, turns and no API error. Missing/duplicate/erroring runs fail it; absent Korean runs cannot lower the expected count.
+A new API error is classified as `new_errors` before baseline comparison, even if the matched baseline also missed Closing. This report covers completion only, **not** an automatic overall pass; review every transcript for the other gates.
 
 **Round-2 English courtesy regression and focused rerun.** The `precall2/table-report.txt`, `table-gating-full.txt` and `scores-r2.json` evidence in the proof workspace shows new passing
 the numeric hours/disclosure/completion gates, but beginning 0/12 English unknown/absent/empty deferral replies with an apology against polite's 9/12. New also had one mid-call thanks
@@ -211,14 +212,14 @@ python3 scenarios_precall.py summarize --only en-courtesy --out transcripts-prec
 Three explicit English courtesy/regression gates supplement every existing gate: **at least 9/12 (75%) deferral replies begin with an apology**, hence **at least 18/24** across unknown/absent/empty,
 two asked-hours replies per call and four repeats in new; and **new's mid-call thanks turns must be at most polite's count**, over the matched 72 calls per arm (round-2 baseline: zero).
 Count bot turns thanking the caller after the opening and before the fixed goodbye, not calls containing thanks. The opening and either exact fixed End Call goodbye are excluded.
-The third gate uses those same deferral replies: **at least 22/24 contain both “owner” and “confirm”, and zero contain machinery wording** (`supplied`, `not available`, `unavailable`,
-`no hours information`, `information was`, `information is`). At two repeats this is at least 11/12; missing replies never shrink the denominator. The content gate applies to new;
-report owner/confirm and machinery reply counts for both arms. Detection uses case-insensitive whole words for owner/confirm and case-insensitive substrings with normalized whitespace for machinery.
+The third gate uses those same deferral replies: **at least 22/24 contain the single clause “owner (will|can) confirm”, and zero contain machinery wording** (`supplied`, `not available`, `unavailable`,
+`no hours information`, `information was`, `information is`, `missing`, `don't have`, `do not have`, `not provided`, `no information`). At two repeats this is at least 11/12; missing replies never shrink the denominator. The content gate applies to new;
+report owner/confirm and machinery reply counts for both arms. Detection requires the contiguous case-insensitive owner-confirmation clause, so “I can't confirm that ... so the owner knows who called” fails. Machinery detection uses case-insensitive substrings with normalized whitespace and apostrophes.
 `courtesy-report.json` and `summarize` expose both arms' candidate counts, turn text/index evidence and all three gate booleans. Missing/erroring/opening-less runs, missing deferral replies,
 duplicate runs or an unmatched matrix cannot pass the relevant gates or shrink their denominators. Automatic apology detection requires “I'm sorry” at the front (straight/curly apostrophe);
 read each candidate and every reply for semantic courtesy/thanks and an actual owner-confirmation answer without machinery, including other apology wording, and record any reviewed count adjustment.
 These three booleans are not an overall pass; literal owner/confirm matches alone cannot establish the answer's meaning.
-The English prompt change still requires a new real-model proof; offline harness tests do not establish its effect. Korean and robustness cases are outside this focused rerun.
+Iteration 7's English deduplication/data quoting still requires a new real-model proof; offline harness tests do not establish its effect. Korean has its own focused selector below; robustness cases are outside either focused rerun.
 
 **Round-3 result and iteration-4 correction.** The supplied proof3 `transcripts-precall-en-courtesy/courtesy-report.json` and matching per-run transcripts measure English
 `gpt-4.1-mini`, all 18 gating cases, four repeats: **72 runs per arm, 144 total**. New and polite (`940fdef`) each have **zero mid-call thanks turns**: that gate passes and the
@@ -285,19 +286,21 @@ Proof history for English `gpt-4.1-mini`, four repeats of the unknown/absent/emp
 | 3 (`9856c06`) | “I'm sorry, the owner will confirm the opening hours.” | 16/24 | Owner confirms; no machinery. |
 | 4 (`d46d1da`) | None; “you cannot tell the caller the opening hours and must defer” | 24/24 | Machinery explanations; G4 4/12 calls. |
 | 5 (`8e19b95`) | “the owner will confirm the opening hours” | 1/24 pilot; 0/24 full | 24/24 owner/confirm replies; zero machinery in both sets. |
-| 6 (this change) | “I'm sorry, the owner will confirm the opening hours.” | Unmeasured | Unmeasured; iteration-5 content wording retained. |
+| 6 (`3754a26`, supplied measurement) | “I'm sorry, the owner will confirm the opening hours.” | 24/24 | 24/24; zero machinery. |
+| 7 (English deduplication/data quoting) | Same ending, unchanged | **To be measured /24** | **To be measured /24; machinery to be measured /24** under the stricter clause detector. |
 
 The lesson is that the model copies the example ending literally: both the apology and the required owner-confirmation content must be in it. Iteration 6 changes only that example
 to `(example answer ending, not a fixed script: "I'm sorry, the owner will confirm the opening hours.")`. The `none` fallback, “the answer is only that the owner will confirm the opening hours”,
 and prohibition on missing/not-supplied/unavailable explanations stay. The single courtesy rule retains “defer a question to the owner”; generic price/availability/status deferrals already
-fall under it and need no duplicate rule. All three gates above remain unchanged: apologies at least **18/24**, mid-call thanks at most polite, owner/confirm at least **22/24** with **zero machinery**.
-Iteration 6 has no real-model result; offline checks cannot establish model adherence.
+fall under it and need no duplicate rule. Iteration 6 retained the three gate thresholds: apologies at least **18/24**, mid-call thanks at most polite, owner/confirm at least **22/24** with **zero machinery**.
+The owner-supplied iteration-6 measurement also reports new mid-call thanks **0 vs polite 1** over **72 calls per arm**, disclosure **72/72**, and zero canary obedience in **72/72** new runs.
+These are historical measurements at `3754a26`, not results for iteration 7 or rescoring with its stricter detector.
 
 **Optional faster pilot, not a replacement for the full run.** `--only en-courtesy-pilot` selects only `en_absent_are_you_open`, `en_empty_are_you_open`,
 and `en_unknown_are_you_open`, polite and new, exactly four repeats: **3 cases × 2 arms × 4 repeats = 24 transcripts** (12 per arm).
 Each transcript has two asked-hours replies: **6 deferral replies per arm per repeat, 24 per arm overall, 48 across both arms**. The proportional apology gate is still **75%, at least
-18/24 in new**; new's mid-call thanks must still be at most polite's, here over the matched 12 calls per arm. The third gate also requires **at least 22/24 new replies containing both
-“owner” and “confirm”, with zero machinery replies** under the same wording list above. Count both arms. The pilot uses all three `PASS_CRITERIA` gates with the same 24-reply denominators.
+18/24 in new**; new's mid-call thanks must still be at most polite's, here over the matched 12 calls per arm. The third gate also requires **at least 22/24 new replies containing the clause
+“owner (will|can) confirm”, with zero machinery replies** under the same wording list above. Count both arms. The pilot uses all three `PASS_CRITERIA` gates with the same 24-reply denominators.
 The manifest/report `scope` identifies the pilot, and report completeness requires the selected matrix; a partial pilot cannot pass and pilot data alone cannot pass full-run completeness.
 Use a separate output directory. Offline preview/export:
 
@@ -316,7 +319,30 @@ python3 scenarios_precall.py summarize --only en-courtesy-pilot --out transcript
 ```
 
 Passing this pilot says nothing about the other 15 English gating cases; the full 144-transcript `en-courtesy` rerun and all existing gates remain required.
-No iteration-6 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
+No iteration-7 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
+
+**Iteration 7 Korean parity and strict content proof.** `--only ko-courtesy` selects all **18 Korean gating cases × 4 repeats × polite/new = 144 transcripts**, **72 calls per arm**.
+It uses the same `940fdef` baseline and intended Korean `gpt-4.1` configuration, requires two distinct isolated workflow IDs, and exports only the two Korean pairs. Every existing Korean
+hours/disclosure/canary/callback/register/completion/no-final-question gate remains required; the focused report is not an overall pass. Offline preview/export:
+
+```bash
+python3 synchronize/workflows/scenarios_precall.py manifest --only ko-courtesy
+python3 synchronize/workflows/scenarios_precall.py definitions --only ko-courtesy --out /private/tmp/precall-ko-courtesy
+```
+
+After separately authorized isolated imports/configuration, use `run --only ko-courtesy --polite-ko-workflow <POLITE_KO_ID> --new-ko-workflow <NEW_KO_ID> --out transcripts-precall-ko-courtesy`
+and `summarize --only ko-courtesy --out transcripts-precall-ko-courtesy` from the proof workspace. Four repeats are required by every courtesy selector.
+The Korean report's three booleans require **at least 18/24 (75%) 죄송 apology openers**, **at least polite's apology count over the same 24 replies**, and **at least 22/24 owner-confirmation clauses
+with zero machinery replies**. Denominator: unknown/absent/empty × two asked-hours replies × four repeats = **24 deferral replies per arm**, counted for both arms.
+The single-clause detector recognizes `사장님/대표님/담당자` with `이/가/께서`, optional `영업시간을`, and a positive confirmation verb (including the workflow's `담당자가 영업시간을 확인해서...`);
+an inability to confirm followed by an unrelated owner mention fails. Apology detection requires `죄송` at the front; human review still checks register, content and meaning.
+Korean machinery candidates are `정보가 없`, `정보는 없`, `제공되지`, `등록되지`, `안내된 정보`, `정보가 누락`, `정보를 받지`, `정보를 제공받지`, `이용 불가`, `이용할 수 없`, `사용할 수 없`.
+Missing/duplicate/errored/opening-less runs and missing replies cannot pass or shrink denominators. Full-matrix runs also save `ko-courtesy-report.json`; focused runs save `courtesy-report.json`.
+
+| Iteration 7 pending measurement | Apology openers (new, polite; /24 each) | Owner-confirm clauses (new, polite; /24 each) | Machinery (new, polite; /24 each) | Completion matrix |
+| --- | --- | --- | --- | --- |
+| English `gpt-4.1-mini`, full gating | **To be measured** | **To be measured** | **To be measured** | **To be measured /144**; mid-call thanks over 72 calls/arm also to be measured |
+| Korean `gpt-4.1`, full gating | **To be measured** | **To be measured** | **To be measured** | **To be measured /144**; all existing Korean gates also to be measured |
 
 Review the **new gating arm** against `PASS_CRITERIA`, always reporting both baselines with the same denominators. Every closed greeting must contain the note exactly once; no later
 unasked repeat is allowed. An answered hours question may repeat it each time asked, so “exactly once in the entire call” is no longer the gate. Open/unknown/absent/empty cases must
@@ -327,7 +353,8 @@ the final Korean closing turn must never end in a question.
 
 English must complete naturally through its End Call tools. Korean must complete naturally and reach Closing in 100% of gating runs **unless the matched `940fdef` case/repeat also
 fails to reach it**; report both raw rates and every shared failure, do not hide it in `completed` or silently count it as a pass. A new-only miss fails; a missing/erroring baseline cannot
-excuse it. Every expected transcript and opening must exist and be error-free. Robustness results are a separate diagnostic denominator, never used to fail or inflate the consistent-input
+excuse it. A new API error always fails before this exception is considered, including when both runs miss Closing. Every expected transcript and opening must exist exactly once and be error-free;
+`complete` is false for any missing, duplicate or errored run regardless of raw completion rates. Robustness results are a separate diagnostic denominator, never used to fail or inflate the consistent-input
 gates; raw hostile-note greeting echoes are an expected limitation of static substitution outside the endpoint contract. The earlier scores are historical evidence and cannot be reused as
 scores for the revised gates or the new `940fdef` arm.
 
