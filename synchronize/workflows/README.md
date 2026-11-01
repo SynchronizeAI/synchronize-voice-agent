@@ -319,7 +319,7 @@ python3 scenarios_precall.py summarize --only en-courtesy-pilot --out transcript
 ```
 
 Passing this pilot says nothing about the other 15 English gating cases; the full 144-transcript `en-courtesy` rerun and all existing gates remain required.
-No iteration-7 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
+No iteration-7 English real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
 
 **Iteration 7 Korean parity and strict content proof.** `--only ko-courtesy` selects all **18 Korean gating cases × 4 repeats × polite/new = 144 transcripts**, **72 calls per arm**.
 It uses the same `940fdef` baseline and intended Korean `gpt-4.1` configuration, requires two distinct isolated workflow IDs, and exports only the two Korean pairs. Every existing Korean
@@ -339,10 +339,17 @@ an inability to confirm followed by an unrelated owner mention fails. Apology de
 Korean machinery candidates are `정보가 없`, `정보는 없`, `제공되지`, `등록되지`, `안내된 정보`, `정보가 누락`, `정보를 받지`, `정보를 제공받지`, `이용 불가`, `이용할 수 없`, `사용할 수 없`.
 Missing/duplicate/errored/opening-less runs and missing replies cannot pass or shrink denominators. Full-matrix runs also save `ko-courtesy-report.json`; focused runs save `courtesy-report.json`.
 
-| Iteration 7 pending measurement | Apology openers (new, polite; /24 each) | Owner-confirm clauses (new, polite; /24 each) | Machinery (new, polite; /24 each) | Completion matrix |
+| Proof history | Apology openers (new, polite; /24 each) | Owner-confirm clauses (new, polite; /24 each) | Machinery (new, polite; /24 each) | Matrix evidence |
 | --- | --- | --- | --- | --- |
-| English `gpt-4.1-mini`, full gating | **To be measured** | **To be measured** | **To be measured** | **To be measured /144**; mid-call thanks over 72 calls/arm also to be measured |
-| Korean `gpt-4.1`, full gating | **To be measured** | **To be measured** | **To be measured** | **To be measured /144**; all existing Korean gates also to be measured |
+| Iteration 7 English `gpt-4.1-mini`, full gating | **To be measured** | **To be measured** | **To be measured** | **To be measured /144**; mid-call thanks over 72 calls/arm also to be measured |
+| Iteration 7 Korean `gpt-4.1`, run B (`4a84bdb` vs `940fdef`) | 20/24, 21/24 | 20/24, 21/24 | 0/24, 0/24 | 144/144 matched courtesy matrix, 72 calls/arm; other Korean gates not reported here |
+| Iteration 8 Korean `gpt-4.1`, Closing answer before thanks | **To be measured /24** | **To be measured /24** | **To be measured /24** | **To be measured /144**; all existing Korean gates also to be measured |
+
+The supplied run-B `proof3/transcripts-courtesy-ko-r7b/courtesy-report.json` records the iteration-7 Korean measurement above: the **18/24 apology gate passes**, but **owner-confirmation >=22/24 fails (20/24)** and **apologies >=polite fails (20 < 21)**.
+All four new-arm misses are the second hours question in `ko_unknown_are_you_open`, repeats 1–4: Closing says “전화 주셔서 감사합니다. 영업시간은 담당자가 확인 후 전화 주신 번호로 연락드리겠습니다.”
+Polite misses three in `ko_empty_are_you_open` for the same reason. The content defers to the owner without machinery, but thanks comes first and `확인 후` does not match the unchanged owner-confirmation detector.
+Iteration 8 folds the pending-question answer into Closing's existing owner-confirmation clause, puts it before thanks, and includes both `죄송하지만` and `확인해서` inside one example ending; the two-sentence limit, callback-number rule and no callback-time promise remain.
+The lesson is that a Closing node's local ordering can override Persona courtesy, so its answer-ending example must contain both the apology and the required confirmation wording before thanks.
 
 Review the **new gating arm** against `PASS_CRITERIA`, always reporting both baselines with the same denominators. Every closed greeting must contain the note exactly once; no later
 unasked repeat is allowed. An answered hours question may repeat it each time asked, so “exactly once in the entire call” is no longer the gate. Open/unknown/absent/empty cases must
