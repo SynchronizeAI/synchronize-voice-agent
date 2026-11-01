@@ -1,6 +1,6 @@
 # Synchronize fork of Dograh
 
-Synchronize's fork of [dograh-hq/dograh](https://github.com/dograh-hq/dograh), BSD-2, kept equal to upstream except `synchronize/`. A
+Synchronize's fork of [dograh-hq/dograh](https://github.com/dograh-hq/dograh), BSD-2, with Synchronize workflows and documentation in `synchronize/` and local-session exclusions in `.gitignore`. A
 carrier forwards a customer's calls to a connection number, Dograh answers, and the Synchronize web app reads the call history through
 Dograh's HTTP API with one organization key (the browser never sees it). Customers never see or edit prompts: the agent is content,
 `workflows/*.json` (how to load it: `workflows/README.md`).
@@ -19,6 +19,11 @@ One-time operator setup, all through Dograh's own UI and API (no code): sign up 
 ElevenLabs provider connections and a model configuration (`POST /api/v1/model-connections/...`), set it as the default; load the
 workflow and enter its settings (`workflows/README.md`); add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
+
+Shared reception uses Synchronize's `POST /api/voice/pre-call` for per-called-number business context and a completion Webhook node for
+`POST /api/voice/call-ended`. Both authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
+Custom Header credential, never the workflow JSON. Deployment URL/credential substitutions, failure/retry behavior and the separate real-model proof are in
+`workflows/README.md`. Dograh renders the run id as text and adds `call_disposition`; Synchronize's receiver accepts that body as it is.
 
 ## Measured
 
