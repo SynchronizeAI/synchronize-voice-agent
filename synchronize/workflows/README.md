@@ -114,7 +114,7 @@ and PUT keeps an existing draft's settings (`api/db/workflow_client.py:242–249
 Avoid concurrent editor changes during apply/rollback; the pre-write comparison includes definition, settings, status, version and definition ID,
 but the API has no conditional PUT to close the final read/write race.
 
-Both plan and apply flush a timestamped `0600` backup containing the definition, settings, template variables, version number and published definition ID.
+Both plan and apply flush a timestamped `0600` format-version-2 backup containing the definition, settings, template variables, version number and published definition ID.
 The version/ID and path are printed; apply explicitly prints **`ROLLBACK FILE: <path>`**. Keep that file for recovery.
 Backups never contain the supplied secrets; workflow data containing either is refused. QA/provider secrets remain masked by Dograh's API.
 Plan has no remote writes. Each changed template field prints
@@ -137,14 +137,17 @@ Start node 1 gets the exact `inbound` mode and `/api/voice/pre-call` URL/authent
 otherwise only its URL/authentication change. It must be POST, enabled (omitted `enabled` defaults to true per `api/services/workflow/dto.py:837`) and disconnected from graph edges.
 PUT saves a draft; publish releases it; read-back must equal the entire plan, preserve every existing node and all settings/model overrides, and contain no wiring placeholders.
 
-Every write/read-back stage is labelled. A failure after a write attempt prints one recovery block with the failed stage, credential state,
-published-definition state, draft state and the exact rollback command. Transport failures or HTTP 5xx mean **unknown, may have committed**.
+Every write/read-back stage is labelled, including wiring validation after credential creation/rotation. A failure after a write attempt prints one recovery block with the failed stage, credential state,
+published-definition state and draft state. When the workflow may have changed, it includes the exact rollback command.
+A rejected draft save (4xx), or validation failure before that save, says no workflow rollback is needed; any credential change remains.
+Malformed API responses fail with a suppressed-detail error and recovery evidence when a write was attempted.
+Transport failures or HTTP 5xx mean **unknown, may have committed**.
 If PUT succeeded and publish failed, anyone pressing **Publish** in Dograh would ship the wiring: roll back or discard that draft before using the editor.
 Credential/workflow writes are separate transactions. Rollback retains the credential and its current secret; restore an older shared secret separately if needed.
 
 `--rollback /absolute/path/to/backup.json` uses the saved workflow ID, backs up the current state, prints the field diff and warns that it **overwrites later edits**.
 It can recover a draft left by a failed apply, saves/publishes the backup definition, and sends only settings that differ from the backup to avoid a lossy typed round trip.
-A current draft's inspection backup is labelled draft and cannot itself be restored as a release; old backups without published-version evidence are also refused. Rollback verifies equality against the fetched API representation;
+A current draft's inspection backup is labelled draft and cannot itself be restored as a release; all backups except format version 2 are refused with an explicit message. Rollback verifies equality against the fetched API representation;
 masked/server-only values cannot be recovered from an API backup. Historical definitions need not have the new wiring.
 
 `probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` accesses only the runtime, never Dograh.

@@ -153,6 +153,13 @@ class Dograh:
                 f"Dograh {method} failed: HTTP {status}; unknown, may have committed"
             )
         require(200 <= status < 300, f"Dograh {method} failed: HTTP {status}")
+        expected = list if method == "GET" and path == "/credentials/" else dict
+        if not isinstance(result, expected):
+            error = GoLiveError if method == "GET" else UncertainWrite
+            raise error(
+                f"Dograh {method} returned a malformed response (expected JSON {expected.__name__})"
+                + ("; unknown, may have committed" if method != "GET" else "")
+            )
         return result
 
 
@@ -491,7 +498,7 @@ def backup(client, workflow_id, directory, *, allow_draft=False):
     if not allow_draft:
         require_published(workflow, workflow_id)
     snapshot = {
-        "format_version": 1,
+        "format_version": 2,
         "workflow_id": workflow_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "workflow_definition": workflow["workflow_definition"],
@@ -670,10 +677,20 @@ class WriteState:
                 f"RECOVERY — failed stage: {self.stage}\n"
                 f"  credential: {self.credential}\n"
                 f"  live published definition: {self.published}\n"
-                f"  draft left behind: {self.draft}\n"
-                f"  python3 {shlex.quote(str(Path(__file__).resolve()))} --rollback {shlex.quote(str(self.path))}",
+                f"  draft left behind: {self.draft}",
                 file=sys.stderr,
             )
+            if self.published == "unchanged" and self.draft == "no":
+                print(
+                    "  No workflow rollback needed: published definition unchanged; no draft saved. "
+                    "Any credential change is retained.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"  python3 {shlex.quote(str(Path(__file__).resolve()))} --rollback {shlex.quote(str(self.path))}",
+                    file=sys.stderr,
+                )
             if self.draft != "no":
                 print(
                     "  Anyone pressing Publish in the Dograh UI may ship the wiring; "
@@ -792,6 +809,8 @@ def deploy(args):
         planned_nodes = nodes(planned)
         planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
         planned_nodes["6"]["data"]["credential_uuid"] = ident
+        state.stage = "wiring validation"
+        print("Stage: wiring validation")
         validate_wiring(planned, live, runtime, ident)
         fetched = publish(
             client, args.workflow_id, {"workflow_definition": planned}, state
@@ -804,7 +823,10 @@ def deploy(args):
 
 def rollback(args):
     snapshot = json.loads(args.rollback.read_text(encoding="utf-8"))
-    require(snapshot.get("format_version") == 1, "Unsupported backup format")
+    require(
+        snapshot.get("format_version") == 2,
+        "Unsupported backup format: require format_version 2; old backups are refused",
+    )
     require(
         snapshot.get("version_status") == "published",
         "Cannot restore a draft backup or a backup without published-version evidence",
@@ -940,7 +962,7 @@ def main(argv=None):
     except GoLiveError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         print(
             "Error: invalid local data or API response (details suppressed)",
             file=sys.stderr,

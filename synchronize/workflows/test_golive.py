@@ -381,6 +381,7 @@ class GoLiveTests(unittest.TestCase):
         (path,) = self.backups.glob("*.json")
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         saved = json.loads(path.read_text())
+        self.assertEqual(saved["format_version"], 2)
         self.assertEqual(
             saved["workflow_definition"],
             masked(self.fake.original)["workflow_definition"],
@@ -774,8 +775,12 @@ class GoLiveTests(unittest.TestCase):
                     for line in out.splitlines()
                     if line.startswith("ROLLBACK FILE: ")
                 )
-                self.assertIn("--rollback " + backup_path, err)
-                self.assertIn("python3 " + str(Path(golive.__file__).resolve()), err)
+                if draft != "no" or published != "unchanged":
+                    self.assertIn("--rollback " + backup_path, err)
+                    self.assertIn("python3 " + str(Path(golive.__file__).resolve()), err)
+                else:
+                    self.assertNotIn("--rollback", err)
+                    self.assertIn("No workflow rollback needed", err)
                 if draft == "yes":
                     self.assertIn("Anyone pressing Publish", err)
                     self.assertIn("rolled back or discarded", err)
@@ -987,6 +992,78 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("node 1.data.greeting: template-replaced; -1/+3 changed lines", out)
         self.assertIn("node 4.data.prompt: template-replaced;", out)
         self.assertNotIn("MERGED-INTO-CUSTOM", out)
+
+    def test_malformed_workflow_responses_are_safe_stage_failures(self):
+        original_request = golive.request
+        for stage in ("backup", "fresh fetch", "read-back"):
+            for malformed in (None, [], "not an object", 7):
+                with self.subTest(stage=stage, malformed=malformed):
+                    self.fake.select("en")
+                    self.fake.credentials.clear()
+                    self.fake.calls.clear()
+                    gets = 0
+
+                    def malformed_response(method, url, headers, body=None):
+                        nonlocal gets
+                        result = original_request(method, url, headers, body)
+                        if method == "GET" and "/workflow/fetch/" in url:
+                            gets += 1
+                            if gets == {"backup": 1, "fresh fetch": 2, "read-back": 3}[stage]:
+                                return 200, malformed
+                        return result
+
+                    with patch.object(golive, "request", side_effect=malformed_response):
+                        _, err = self.run_cli(self.args("--apply"), expected=1)
+                    self.assertIn("malformed response", err)
+                    self.assertNotIn("Traceback", err)
+                    if stage == "read-back":
+                        self.assertEqual(err.count("RECOVERY"), 1)
+                        self.assertIn("failed stage: read-back", err)
+                        self.assertIn("live published definition: changed", err)
+                        self.assertIn("--rollback", err)
+                    else:
+                        self.assertNotIn("RECOVERY", err)
+                        self.assertEqual(self.writes(), [])
+
+    def test_attribute_error_after_write_is_suppressed_with_recovery(self):
+        with patch.object(golive, "verify_snapshot", side_effect=AttributeError("private details")):
+            _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("failed stage: read-back", err)
+        self.assertIn("invalid local data or API response", err)
+        self.assertNotIn("private details", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_post_credential_validation_failure_has_accurate_recovery(self):
+        validate = golive.validate_wiring
+        calls = 0
+
+        def fail_second(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise golive.GoLiveError("Wiring validation failed")
+            return validate(*args)
+
+        with patch.object(golive, "validate_wiring", side_effect=fail_second):
+            _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("failed stage: wiring validation", err)
+        self.assertIn("credential: created", err)
+        self.assertIn("No workflow rollback needed", err)
+        self.assertNotIn("--rollback", err)
+        self.assertEqual([c[0] for c in self.writes()], ["POST"])
+
+    def test_old_backup_format_is_refused_before_any_api_access(self):
+        self.run_cli(self.args())
+        (path,) = self.backups.glob("*.json")
+        saved = json.loads(path.read_text())
+        for version in (1, None):
+            with self.subTest(version=version):
+                saved["format_version"] = version
+                path.write_text(json.dumps(saved))
+                self.fake.calls.clear()
+                _, err = self.run_cli(["--rollback", str(path)], expected=1)
+                self.assertIn("require format_version 2; old backups are refused", err)
+                self.assertEqual(self.fake.calls, [])
 
 
 if __name__ == "__main__":
