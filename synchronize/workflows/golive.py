@@ -201,8 +201,9 @@ def replace_once(live, old, new, label):
 
 
 def character_merge(old, new, live, label):
-    # Trim the common prefix/suffix to locate the changed middle. Retain the
-    # suffix as an anchor: a bare space or '?' is not enough evidence to patch.
+    # Only a single old line expanding into multiple lines may use this path.
+    # Both literal sides must survive, as whole words, through the field end.
+    require("\n" not in old and "\n" in new, str(conflict(label)))
     prefix = 0
     while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
         prefix += 1
@@ -214,24 +215,38 @@ def character_merge(old, new, live, label):
         suffix += 1
     old_middle = old[prefix : len(old) - suffix if suffix else len(old)]
     new_middle = new[prefix : len(new) - suffix if suffix else len(new)]
-    anchor = old[len(old) - suffix :] if suffix else ""
-    # A previously expanded greeting may retain a customised business name.
-    # Recognise only the complete multiline suffix at the END of the field,
-    # including the unchanged literal text after the last template variable.
-    # A new fragment elsewhere (or punctuation alone) cannot satisfy this.
+    right = old[len(old) - suffix :] if suffix else ""
     left_literal = old[:prefix].rsplit("}}", 1)[-1]
-    if (
-        "\n" in new_middle
-        and left_literal
-        and live.endswith(left_literal + new_middle + anchor)
-        and live.count(left_literal + new_middle + anchor) == 1
-        and not live.count(old_middle + anchor)
+
+    def boundary(index):
+        return index in (0, len(old)) or not (
+            old[index - 1].isalnum() and old[index].isalnum()
+        )
+
+    if not (
+        len(left_literal.strip()) >= 8
+        and len(right.strip()) >= 8
+        and any(c.isalnum() for c in left_literal)
+        and any(c.isalnum() for c in right)
+        and boundary(prefix - len(left_literal))
+        and boundary(prefix)
+        and boundary(len(old) - suffix)
     ):
+        raise conflict(label)
+    before = left_literal + old_middle + right
+    after = left_literal + new_middle + right
+
+    def anchored(text):
+        if live.count(text) != 1 or not live.endswith(text):
+            return False
+        start = len(live) - len(text)
+        return not start or not (live[start - 1].isalnum() and text[0].isalnum())
+
+    if anchored(after) and before not in live:
         return live
-    if old_middle or anchor:
-        return replace_once(live, old_middle + anchor, new_middle + anchor, label)
-    # Insertion at end requires the full unchanged prefix, exactly once.
-    return replace_once(live, old, new, label)
+    if "\n" in live or not anchored(before):
+        raise conflict(label)
+    return replace_once(live, before, after, label)
 
 
 def line_matches(lines, block):
@@ -285,12 +300,6 @@ def patch_text(old, new, live, label):
         if len(found) == 1:
             start = found[0]
             out = "\n".join(lines[:start] + replacement + lines[start + len(search) :])
-        elif not found:
-            # A customised anchor can still leave an exact character-level
-            # delta. A changed old middle/suffix remains a conflict.
-            out = character_merge(
-                "\n".join(anchored_before), "\n".join(anchored_after), out, label
-            )
         else:
             raise conflict(label)
     return out
@@ -323,7 +332,7 @@ def nodes(definition):
     return result
 
 
-def patched(live, old, new, runtime, credential_uuid):
+def patched(live, old, new, runtime, credential_uuid, field_modes=None):
     out = copy.deepcopy(live)
     before, previous, current = nodes(out), nodes(old), nodes(new)
     for node_id in sorted(previous.keys() | current.keys()):
@@ -343,12 +352,18 @@ def patched(live, old, new, runtime, credential_uuid):
             ov, nv = a["data"].get(field, MISSING), b["data"].get(field, MISSING)
             if ov == nv:
                 continue
+            label = f"node {node_id}.data.{field}"
+            live_value = target["data"].get(field, MISSING)
             value = patch_value(
                 ov,
                 nv,
-                target["data"].get(field, MISSING),
-                f"node {node_id}.data.{field}",
+                live_value,
+                label,
             )
+            if field_modes is not None and value != live_value:
+                field_modes[label] = (
+                    "template-replaced" if live_value == ov else "MERGED-INTO-CUSTOM"
+                )
             if value is MISSING:
                 target["data"].pop(field, None)
             else:
@@ -562,9 +577,29 @@ def diff_fields(before, after):
     return changes
 
 
-def show_plan(changes):
+def show_plan(changes, field_modes=None):
     for node_id, field, old, new in changes:
-        print(f"node {node_id}.data.{field}")
+        label = f"node {node_id}.data.{field}"
+        mode = (
+            field_modes.get(label, "wiring")
+            if field_modes is not None else "restore-backup"
+        )
+        old_lines = (
+            old.splitlines() if isinstance(old, str)
+            else json.dumps(old, indent=2).splitlines()
+        )
+        new_lines = (
+            new.splitlines() if isinstance(new, str)
+            else json.dumps(new, indent=2).splitlines()
+        )
+        removed = added = 0
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, old_lines, new_lines, autojunk=False
+        ).get_opcodes():
+            if tag != "equal":
+                removed += i2 - i1
+                added += j2 - j1
+        print(f"{label}: {mode}; -{removed}/+{added} changed lines")
         if field in {"pre_call_fetch_url", "endpoint_url"}:
             path = (
                 "/api/voice/pre-call"
@@ -581,16 +616,16 @@ def show_plan(changes):
         }:
             print(f"  - {json.dumps(old)}\n  + {json.dumps(new)}")
         elif isinstance(old, str) and isinstance(new, str):
-            removed = added = 0
-            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-                None, old.splitlines(), new.splitlines(), autojunk=False
-            ).get_opcodes():
-                if tag != "equal":
-                    removed += i2 - i1
-                    added += j2 - j1
-            print(
-                f"  - {removed} changed lines\n  + {added} changed lines (prompt content withheld)"
-            )
+            if mode == "MERGED-INTO-CUSTOM":
+                # Show changed lines only, so an operator can review the merge
+                # before explicitly accepting this field. Backup/plan secret
+                # checks have already passed; never emit unchanged prompts.
+                for line in list(
+                    difflib.unified_diff(old_lines, new_lines, n=0, lineterm="")
+                )[2:]:
+                    print("  " + line)
+            else:
+                print("  (prompt content withheld)")
         else:
             print(
                 f"  - {type(old).__name__}\n  + {type(new).__name__} (value withheld)"
@@ -704,10 +739,28 @@ def deploy(args):
     snapshot, path = backup(client, args.workflow_id, backup_directory(args.backup_dir))
     live = snapshot["workflow_definition"]
     existing = find_credential(client, args.credential_name)
-    planned = patched(live, old, new, runtime, existing or PENDING_UUID)
+    field_modes = {}
+    planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes)
     ensure_no_secrets(planned)
     changes = diff_fields(live, planned)
-    show_plan(changes)
+    show_plan(changes, field_modes)
+    merged = {
+        field for field, mode in field_modes.items() if mode == "MERGED-INTO-CUSTOM"
+    }
+    new_nodes = nodes(new)
+    known_fields = {
+        f"node {node_id}.data.{field}"
+        for node_id, node in nodes(old).items()
+        if node_id in new_nodes and node_id != "6"
+        for field in node["data"].keys() | new_nodes[node_id]["data"].keys()
+        if node["data"].get(field, MISSING)
+        != new_nodes[node_id]["data"].get(field, MISSING)
+        and not (node_id == "1" and field in START_FIELDS)
+    }
+    require(
+        set(args.accept_merged) <= known_fields,
+        "--accept-merged must name a changed template field exactly as printed",
+    )
     already_wired = planned == live and existing is not None
     print(
         "Already wired; no remote writes"
@@ -718,6 +771,12 @@ def deploy(args):
         summary("PLAN", args.workflow_id, changes, len(nodes(live)))
         print("No remote writes")
         return
+    unaccepted = merged - set(args.accept_merged)
+    require(
+        not unaccepted,
+        "Review the MERGED-INTO-CUSTOM diff, then explicitly accept each field: "
+        + " ".join(f"--accept-merged {shlex.quote(field)}" for field in sorted(unaccepted)),
+    )
     # Fresh backup and all exact-once patches must succeed before ANY write,
     # including credential rotation. Also detect concurrent workflow edits.
     fresh = client.api("GET", f"/workflow/fetch/{args.workflow_id}")
@@ -835,6 +894,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=("plan", "probe"), default="plan")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--accept-merged", action="append", default=[], metavar="FIELD")
     parser.add_argument("--rollback", type=Path)
     parser.add_argument("--workflow-id", type=int)
     parser.add_argument("--lang", choices=("en", "ko"))
@@ -847,6 +907,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         require(not (args.apply and args.rollback), "Choose apply or rollback")
+        require(
+            not args.accept_merged or (args.command == "plan" and not args.rollback),
+            "--accept-merged is only for plan/apply",
+        )
         if args.command == "probe":
             require(
                 not args.apply and not args.rollback,

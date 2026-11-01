@@ -321,7 +321,7 @@ class GoLiveTests(unittest.TestCase):
         self.fake.server_close()
         self.thread.join()
 
-    def args(self, *extra):
+    def args(self, *extra, accept_merged=("node 4.data.prompt",)):
         return [
             "--workflow-id",
             str(self.fake.workflow_id),
@@ -333,6 +333,7 @@ class GoLiveTests(unittest.TestCase):
             "Synchronize reception",
             "--backup-dir",
             str(self.backups),
+            *(arg for field in accept_merged for arg in ("--accept-merged", field)),
             *extra,
         ]
 
@@ -641,7 +642,8 @@ class GoLiveTests(unittest.TestCase):
         data["greeting"] = (
             "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
         )
-        self.run_cli(self.args("--apply"))
+        out, _ = self.run_cli(self.args("--apply", "--accept-merged", "node 1.data.greeting"))
+        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+3 changed lines", out)
         first = copy.deepcopy(self.fake.workflow)
         self.fake.calls.clear()
         out, _ = self.run_cli(self.args("--apply"))
@@ -913,12 +915,11 @@ class GoLiveTests(unittest.TestCase):
         )
 
     def test_original_word_merge_and_multiline_insert_delete_are_exact_once(self):
-        self.assertEqual(
+        # Character merging is now limited to single-line -> multiline fields.
+        with self.assertRaisesRegex(golive.GoLiveError, "field"):
             golive.patch_text(
                 "Hello old world", "Hello new world", "Custom Hello old world", "field"
-            ),
-            "Custom Hello new world",
-        )
+            )
         self.assertEqual(
             golive.patch_text("A\nB", "HEAD\nA\nB", "A\nB\nLOCAL", "field"),
             "HEAD\nA\nB\nLOCAL",
@@ -933,6 +934,59 @@ class GoLiveTests(unittest.TestCase):
             golive.patch_value([1], [2], [1, 3], "field")
         with self.assertRaisesRegex(golive.GoLiveError, "local git commit"):
             golive.template("--output=must-never-write", "en")
+
+    def test_unrelated_character_fallback_reproductions_abort(self):
+        for old, new, live in (
+            ("Intro\nSay no.", "Intro\nSay yes.", "Intro\nSay it.\nWe say no."),
+            (
+                "Rules\nKeep it short.\nEnd",
+                "Rules\nKeep it short and kind.\nEnd",
+                "Rules custom\nBe brief.\nEnd custom\n...",
+            ),
+            ("...help you?", "...help you today?", "Hello, what do you need?"),
+        ):
+            with self.subTest(old=old):
+                with self.assertRaisesRegex(golive.GoLiveError, "field.*Dograh UI.*re-plan"):
+                    golive.patch_text(old, new, live, "field")
+
+    def test_greeting_requires_both_substantial_word_boundary_anchors(self):
+        for old, new, live in (
+            ("Left side has words?", "Left side has words\nNew line?", "Custom Left side has words?"),
+            ("Hi. Right side has words", "Hi.\nRight side has words", "Custom Hi. Right side has words"),
+            ("Substantialprefix right side words", "Substantialpre\nfix right side words", "Custom Substantialprefix right side words"),
+        ):
+            with self.subTest(old=old):
+                with self.assertRaisesRegex(golive.GoLiveError, "field"):
+                    golive.patch_text(old, new, live, "field")
+
+    def test_merged_fields_need_explicit_repeatable_acceptance_before_writes(self):
+        self.fake.select("ko")
+        golive.nodes(self.fake.workflow["workflow_definition"])["1"]["data"]["greeting"] = (
+            "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
+        )
+        out, _ = self.run_cli(self.args(accept_merged=()))
+        self.assertIn("node 1.data.greeting: MERGED-INTO-CUSTOM; -1/+3 changed lines", out)
+        self.assertIn("node 4.data.prompt: MERGED-INTO-CUSTOM;", out)
+        self.assertIn("+{{hours_note | fallback: }}", out)
+        self.assertEqual(self.writes(), [])
+        for accepted in ((), ("node 1.data.greeting",), ("node 4.data.prompt",)):
+            _, err = self.run_cli(self.args("--apply", accept_merged=accepted), expected=1)
+            self.assertIn("Review the MERGED-INTO-CUSTOM diff", err)
+            self.assertIn("--accept-merged", err)
+            self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply", accept_merged=("typo",)), expected=1)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply", accept_merged=("node 1.data.greeting", "node 4.data.prompt")))
+        self.assertEqual([c[0] for c in self.writes()], ["POST", "PUT", "POST"])
+
+    def test_template_replaced_fields_are_labelled_and_need_no_acceptance(self):
+        golive.nodes(self.fake.workflow["workflow_definition"])["4"]["data"]["prompt"] = (
+            golive.nodes(self.fake.old)["4"]["data"]["prompt"]
+        )
+        out, _ = self.run_cli(self.args("--apply", accept_merged=()))
+        self.assertIn("node 1.data.greeting: template-replaced; -1/+3 changed lines", out)
+        self.assertIn("node 4.data.prompt: template-replaced;", out)
+        self.assertNotIn("MERGED-INTO-CUSTOM", out)
 
 
 if __name__ == "__main__":

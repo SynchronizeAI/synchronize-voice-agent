@@ -95,7 +95,9 @@ No settings template is applied to an existing workflow. Stable node IDs/types p
 
 Text deltas use exact-once line/character merges. Insert/delete hunks use up to two unchanged context lines on each side;
 a new fragment elsewhere is insufficient evidence that a change was already applied. A single-line greeting becoming multiline uses an anchored character delta,
-so the Korean `영훈솔루션` greeting keeps its business name while adding the hours-note line. Missing line anchors also try the character merge;
+so the Korean `영훈솔루션` greeting keeps its business name while adding the hours-note line. Character merging is allowed only for single-line-to-multiline
+expansions with exact-once literal anchors on both sides (at least eight non-padding characters each, at word boundaries, through the field end).
+Missing multiline hunk lines abort without a character fallback;
 ambiguous or incompatible fields abort **before any remote write**, naming the field. LF/CRLF and NFC/NFD differences produce an explicit hint;
 resolve those differences in the named field rather than silently rewriting its Unicode or line endings.
 For the known Korean `node 4.data.prompt` conflict (`{{business_name}}` was customised), review the new template's field,
@@ -115,11 +117,20 @@ but the API has no conditional PUT to close the final read/write race.
 Both plan and apply flush a timestamped `0600` backup containing the definition, settings, template variables, version number and published definition ID.
 The version/ID and path are printed; apply explicitly prints **`ROLLBACK FILE: <path>`**. Keep that file for recovery.
 Backups never contain the supplied secrets; workflow data containing either is refused. QA/provider secrets remain masked by Dograh's API.
-Plan has no remote writes. Field diffs show prompt changed-line counts, URL paths without origins and mode/credential references; prompts and secrets are withheld.
+Plan has no remote writes. Each changed template field prints
+`node N.data.FIELD: template-replaced; -R/+A changed lines` when live equalled the old template, or
+`node N.data.FIELD: MERGED-INTO-CUSTOM; -R/+A changed lines` when a custom field was merged.
+Custom merges include a zero-context diff of changed text lines for review; unchanged prompt lines are withheld.
+Other template fields with no actual change are omitted. Operator wiring fields use `wiring` in the same format;
+rollback fields use `restore-backup`. URL paths omit origins; secrets are never shown.
 The all-zero UUID denotes a credential that does not yet exist and is never published.
 
 `--apply` requires `DOGRAH_WEBHOOK_SECRET` from the environment only. It creates or rotates the uniquely named `custom_header` credential,
 using `header_name = X-Dograh-Secret`. Use a dedicated shared credential: rotation affects every consumer.
+Before any remote write, apply refuses every `MERGED-INTO-CUSTOM` field unless explicitly named with repeatable
+`--accept-merged FIELD`. After reviewing the plan's diff, use e.g.
+`golive --apply --accept-merged 'node 1.data.greeting' --accept-merged 'node 4.data.prompt'`.
+Accept only the exact fields printed as merged; the flag never bypasses an ambiguous/conflicting merge or the published/draft guards.
 If the planned definition already equals live and the named credential exists, it says **Already wired** and skips rotation, PUT and publish;
 it cannot compare a masked stored secret, so changing the environment secret alone does not rotate an already-wired workflow.
 Start node 1 gets the exact `inbound` mode and `/api/voice/pre-call` URL/authentication. Webhook node 6 is copied from the template if missing;
@@ -168,7 +179,7 @@ railway redeploy --service synchronize-runtime --environment production
 # 3–5. Probe runtime auth first, then review the plan, then apply.
 golive probe --to-number "$TO_NUMBER"
 golive plan
-golive --apply
+golive --apply # Add --accept-merged 'node N.data.FIELD' for EACH reviewed custom merge.
 # 6. Place a test call; check greeting/business context, the saved call and authenticated completion.
 # 7. Recovery only: set BACKUP_FILE to the apply run's ROLLBACK FILE path, then:
 # golive --rollback "$BACKUP_FILE"
