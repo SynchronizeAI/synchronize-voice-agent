@@ -88,65 +88,99 @@ and ignores every other field, so no backend change to Dograh is needed. This la
 
 ## Live wiring without re-importing
 
-`python3 synchronize/workflows/golive.py [plan]` is the supported successor to the proof workspace's `deploy_live.py` (its implementation was moved here; there is one tool).
-It retains the old exact-once line/word merge, adds anchored whole-line insertions/deletions, and reads **local git objects only**: `--old-ref` defaults to `940fdef`,
-`--new-ref` to this checkout's `HEAD`. It never fetches refs or reads Railway credentials. Commit intended template changes before selecting `HEAD`.
-Target **3/en** or **1/ko** explicitly with `--workflow-id` and `--lang`; **2, Korean realtime, is excluded**.
-Renamed nodes are matched by stable node id and type. Changed text must match exactly once, or already contain the exact new block; ambiguous or incompatible fields stop with their field name.
-Fields the templates did not change, custom nodes, edges, positions, tools, model configuration override, dictionary and every setting are preserved. Conflicting structured values also stop.
-No settings template is applied to a live workflow.
+`python3 synchronize/workflows/golive.py [plan]` replaces the proof workspace's retired `deploy_live.py`.
+It reads **local git objects only**: `--old-ref` defaults to `940fdef`, `--new-ref` to this checkout's `HEAD`.
+Commit intended template changes before selecting `HEAD`. Target **3/en** or **1/ko** explicitly; **2, Korean realtime, is excluded**.
+No settings template is applied to an existing workflow. Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and tools.
 
-Supply `--runtime-origin` (a real public HTTPS origin, no path/query/credentials/placeholders), `--credential-name` and `--backup-dir` (outside **any git checkout**).
-HTTP loopback origins are accepted only to support offline fake servers. Connection values come solely from exported `DOGRAH_PROOF_BASE_URL` (Dograh origin) and
-`DOGRAH_PROOF_API_KEY`; quotes/newlines are rejected, redirects are refused, and these connection values are never printed. Proxy environment settings are ignored.
-The tool fetches definition **and settings together**, then writes and flushes a new timestamped `0600` JSON backup and prints its path, in both plan and apply mode.
-The backup contains the definition, all `workflow_configurations` and `template_context_variables`, never a credential value. It refuses workflow data containing either supplied secret.
-Plan has **no remote writes** (its only write is the local backup); its per-field diff shows changed-line counts for prompts, URL paths without origins, and old/new mode/credential references, with prompt contents withheld.
-The all-zero UUID in a plan is a temporary reference for the pending credential, never published.
+Text deltas use exact-once line/character merges. Insert/delete hunks use up to two unchanged context lines on each side;
+a new fragment elsewhere is insufficient evidence that a change was already applied. A single-line greeting becoming multiline uses an anchored character delta,
+so the Korean `영훈솔루션` greeting keeps its business name while adding the hours-note line. Missing line anchors also try the character merge;
+ambiguous or incompatible fields abort **before any remote write**, naming the field. LF/CRLF and NFC/NFD differences produce an explicit hint;
+resolve those differences in the named field rather than silently rewriting its Unicode or line endings.
+For the known Korean `node 4.data.prompt` conflict (`{{business_name}}` was customised), review the new template's field,
+edit that field in the Dograh UI to the reviewed new-template value, **publish that reviewed edit**, then re-plan and apply.
+This explicitly resolves the conflict; the tool never overwrites an incompatible customisation automatically.
 
-`--apply` validates the entire merge and wiring against that run's fresh backup, checks for edits since the backup, then creates or updates the uniquely named `custom_header` credential.
-`DOGRAH_WEBHOOK_SECRET` is required from the environment only, kept in memory, and sent as `credential_data.header_value` with `header_name = X-Dograh-Secret`.
-An existing credential must already have type `custom_header`; its header value is rotated to that environment value. Use a dedicated shared credential for these two workflows:
-rotation also affects any other consumer of that credential. Plan only reports “would create/update credential (secret not shown)”. HTTP error bodies are discarded.
-Start node 1 gets the template's exact `inbound` enum and `/api/voice/pre-call` URL/authentication. Missing webhook node 6 is copied from the new template, without graph edges;
-if it already exists, only its `/api/voice/call-ended` URL and credential reference change (it must already be an enabled POST webhook without edges).
-Definition PUT and publish are followed by a fetch: the complete definition must equal the plan, all existing node ids must remain, wiring must match, no `.invalid` or `<DOGRAH` placeholder
-may remain, and all settings, including the model override and template variables, must equal the backup. The summary names changed fields and counts without printing prompts or secrets.
-An error after any remote write leaves the backup path available for explicit rollback; credential and workflow writes are not one transaction. Avoid concurrent editor changes while applying.
+Supply `--runtime-origin` (HTTPS origin, no path/query/credentials/placeholders), `--credential-name` and a **durable** `--backup-dir`
+outside any git checkout, such as `~/golive-backups`. `/tmp`, `/private/tmp` and their descendants are refused.
+HTTP loopback is allowed for offline fakes only. `DOGRAH_PROOF_BASE_URL` and `DOGRAH_PROOF_API_KEY` come from the environment;
+quotes/newlines and redirects are refused, proxy environment settings ignored, connection values never printed.
+The tool requires the fetched `version_status` to be `published` at backup and again immediately before applying.
+**An unpublished draft must be reviewed and published, or discarded, in the Dograh UI first.** Fetch prefers a draft (`api/routes/workflow.py:814–837`),
+and PUT keeps an existing draft's settings (`api/db/workflow_client.py:242–249`); an editor model autosave must never be published by this tool unnoticed.
+Avoid concurrent editor changes during apply/rollback; the pre-write comparison includes definition, settings, status, version and definition ID,
+but the API has no conditional PUT to close the final read/write race.
 
-`--rollback /absolute/path/to/backup.json` uses the backup's workflow id (an optional `--workflow-id` must match), backs up the current state first, then PUTs the saved definition/settings,
-publishes and verifies equality. It retains the credential and its current secret; restore an older shared secret separately if needed. Settings equality is against Dograh's fetched API representation;
-masked provider credentials and server-only metadata cannot be recovered from an API backup. Rollback does not scan restored historical definitions for new wiring placeholders.
+Both plan and apply flush a timestamped `0600` backup containing the definition, settings, template variables, version number and published definition ID.
+The version/ID and path are printed; apply explicitly prints **`ROLLBACK FILE: <path>`**. Keep that file for recovery.
+Backups never contain the supplied secrets; workflow data containing either is refused. QA/provider secrets remain masked by Dograh's API.
+Plan has no remote writes. Field diffs show prompt changed-line counts, URL paths without origins and mode/credential references; prompts and secrets are withheld.
+The all-zero UUID denotes a credential that does not yet exist and is never published.
 
-`probe --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` does not access Dograh: it sends the documented `call_inbound` body (synthetic caller, called E.164 number,
-`workflow_run_id = "0"`) directly to Synchronize. It requires HTTP 200 with a JSON object using the environment secret, then 401/403 using a wrong secret; stdout contains only the two status codes.
-It sends no completion webhook. Probe establishes HTTP/authentication only; verify business variables and a real completion with the test call.
+`--apply` requires `DOGRAH_WEBHOOK_SECRET` from the environment only. It creates or rotates the uniquely named `custom_header` credential,
+using `header_name = X-Dograh-Secret`. Use a dedicated shared credential: rotation affects every consumer.
+If the planned definition already equals live and the named credential exists, it says **Already wired** and skips rotation, PUT and publish;
+it cannot compare a masked stored secret, so changing the environment secret alone does not rotate an already-wired workflow.
+Start node 1 gets the exact `inbound` mode and `/api/voice/pre-call` URL/authentication. Webhook node 6 is copied from the template if missing;
+otherwise only its URL/authentication change. It must be POST, enabled (omitted `enabled` defaults to true per `api/services/workflow/dto.py:837`) and disconnected from graph edges.
+PUT saves a draft; publish releases it; read-back must equal the entire plan, preserve every existing node and all settings/model overrides, and contain no wiring placeholders.
 
-Operator setup, from the repository root in the owner's terminal: link Railway to the **Synchronize runtime** service and export the two Dograh connection variables securely.
-Set `WORKFLOW_ID=3 LANGUAGE=en` (repeat with `WORKFLOW_ID=1 LANGUAGE=ko`), `RUNTIME_ORIGIN`, `CREDENTIAL_NAME`, `BACKUP_DIR` outside git, and the called `TO_NUMBER`.
-Define this convenience function (no wrapper file):
+Every write/read-back stage is labelled. A failure after a write attempt prints one recovery block with the failed stage, credential state,
+published-definition state, draft state and the exact rollback command. Transport failures or HTTP 5xx mean **unknown, may have committed**.
+If PUT succeeded and publish failed, anyone pressing **Publish** in Dograh would ship the wiring: roll back or discard that draft before using the editor.
+Credential/workflow writes are separate transactions. Rollback retains the credential and its current secret; restore an older shared secret separately if needed.
+
+`--rollback /absolute/path/to/backup.json` uses the saved workflow ID, backs up the current state, prints the field diff and warns that it **overwrites later edits**.
+It can recover a draft left by a failed apply, saves/publishes the backup definition, and sends only settings that differ from the backup to avoid a lossy typed round trip.
+A current draft's inspection backup is labelled draft and cannot itself be restored as a release; old backups without published-version evidence are also refused. Rollback verifies equality against the fetched API representation;
+masked/server-only values cannot be recovered from an API backup. Historical definitions need not have the new wiring.
+
+`probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` accesses only the runtime, never Dograh.
+It mirrors `api/services/pipecat/pre_call_fetch.py:109–123`: `event = call_inbound`, integer `agent_id` from `--workflow-id`, synthetic caller `+12025550100`,
+called E.164 number, integer `workflow_run_id = -2147483647`, and `Idempotency-Key: dograh-pre-call--2147483647`.
+The local receiver source (`/Users/enoch/work/voice-a1/src/synchronize/web/voice_api.py:122–155`) ignores agent/run IDs and uses only the called number;
+the negative ID deliberately cannot name a real Dograh run. Probe expects 200 JSON with the environment secret and 401/403 with a wrong secret, printing status codes only.
+It sends no completion. The test call must verify business context, a saved call and authenticated completion separately.
+
+Operator setup in the owner's terminal: set the nonsecret `DOGRAH_PROOF_BASE_URL`, `RUNTIME_ORIGIN`, `CREDENTIAL_NAME`, called `TO_NUMBER`,
+`WORKFLOW_ID=3 LANGUAGE=en`, and `BACKUP_DIR="$HOME/golive-backups"`. Export `DOGRAH_PROOF_BASE_URL`.
+For Korean, repeat probe/plan/apply with `WORKFLOW_ID=1 LANGUAGE=ko` and the correct called number; English workflow 3 owns the only Twilio number today.
+Use the absolute path in the function so Railway commands can run from the production project's link directory:
 
 ```bash
-golive() { python3 synchronize/workflows/golive.py "$@" --workflow-id "$WORKFLOW_ID" --lang "$LANGUAGE" --runtime-origin "$RUNTIME_ORIGIN" --credential-name "$CREDENTIAL_NAME" --backup-dir "$BACKUP_DIR"; }
+cd /Users/enoch/work/deploy-20261029/railway-link
+golive() { python3 /Users/enoch/work/voice-agent-c/synchronize/workflows/golive.py "$@" --workflow-id "$WORKFLOW_ID" --lang "$LANGUAGE" --runtime-origin "$RUNTIME_ORIGIN" --credential-name "$CREDENTIAL_NAME" --backup-dir "$BACKUP_DIR"; }
+IFS= read -rs DOGRAH_PROOF_API_KEY; export DOGRAH_PROOF_API_KEY; printf '\n'
 ```
 
-Six-line runbook (paste the shared secret at the silent `read`; set `BACKUP_FILE` to the **apply** backup path printed by the tool before considering rollback).
-`--skip-deploys` stages the Railway value: its activation requires the separately managed runtime deployment before probing/calling. Use the same value when repeating for the other language.
-The final line is a recovery command, **only if rollback is needed**:
+Run in this order. Paste secrets only at silent reads. Step 2 must finish successfully and the runtime must be healthy before step 3;
+`--skip-deploys` alone does **not** activate the secret. Pre-call auth errors fall back to empty context (`api/services/pipecat/pre_call_fetch.py:204–214`),
+and completion auth errors dead-letter (`api/tasks/webhook_delivery.py:327–330`), so applying Dograh wiring before runtime activation can lose completions.
+The stdin form below matches `set-resend-env.sh` and `set-soniox-railway-vars.sh`; installed offline CLI 5.49.6 help also confirms it.
+CLI 5.71.0 and production deployment behavior were not verified offline.
 
 ```bash
-IFS= read -rs DOGRAH_WEBHOOK_SECRET; export DOGRAH_WEBHOOK_SECRET; printf '%s' "$DOGRAH_WEBHOOK_SECRET" | railway variable set DOGRAH_WEBHOOK_SECRET --stdin --skip-deploys
+# 1. Stage the secret on the explicit production runtime service.
+IFS= read -rs DOGRAH_WEBHOOK_SECRET; export DOGRAH_WEBHOOK_SECRET; printf '\n'; printf '%s' "$DOGRAH_WEBHOOK_SECRET" | railway variable set DOGRAH_WEBHOOK_SECRET --stdin --service synchronize-runtime --environment production --skip-deploys >/dev/null
+# 2. Redeploy the runtime; wait for success/healthy status before continuing.
+railway redeploy --service synchronize-runtime --environment production
+# 3–5. Probe runtime auth first, then review the plan, then apply.
+golive probe --to-number "$TO_NUMBER"
 golive plan
 golive --apply
-golive probe --to-number "$TO_NUMBER"
-# Place an inbound test call; verify greeting, saved call and authenticated completion in Synchronize.
-golive --rollback "$BACKUP_FILE" # Recovery only, if needed.
+# 6. Place a test call; check greeting/business context, the saved call and authenticated completion.
+# 7. Recovery only: set BACKUP_FILE to the apply run's ROLLBACK FILE path, then:
+# golive --rollback "$BACKUP_FILE"
+unset DOGRAH_WEBHOOK_SECRET DOGRAH_PROOF_API_KEY
 ```
 
-Offline targeted proof: `python3 synchronize/workflows/test_golive.py` (standard-library unittest, loopback fake HTTP server, no pytest collection or external calls).
-It checks both languages, read-only planning/private backups, exact merges/customisations, credential create/rotation, publish/read-back drift, ambiguous-match aborts,
-placeholder/injection refusal, secret-free output/backups including echoed errors, byte-equal definition rollback and all probe codes.
-No live endpoint reachability, deployed API/image equivalence, Railway deployment, call audio or backend business-context/completion behavior is established by these tests.
+For later recovery, securely re-read/export `DOGRAH_PROOF_API_KEY` before `golive --rollback "$BACKUP_FILE"`, then unset it again.
+
+Offline targeted proof: `python3 synchronize/workflows/test_golive.py` (standard-library unittest, loopback fake server; no pytest or external calls).
+It covers both languages, draft refusal at both reads, private versioned backups, Korean greeting/conflict handling, silent-skip regressions,
+create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask fidelity, rollback with a pending draft/settings diffs, Unicode hints, durable paths and exact probe payload/auth.
+No live reachability, deployed image/API equivalence, runtime redeployment, call audio or authenticated real completion is established offline.
 
 ## Business context in the prompts
 
