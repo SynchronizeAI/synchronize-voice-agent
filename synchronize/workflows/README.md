@@ -82,7 +82,7 @@ permanent auth/validation errors dead-letter immediately. The developer referenc
 **What the webhook sends.** The template holds only `workflow_run_id`. `WebhookNodeData` in `api/services/workflow/dto.py` lists `workflow_run_id` as payload context, `docs/voice-agent/webhook.mdx` shows it, and
 `_build_render_context` in `api/tasks/run_integrations.py` supplies `workflow_run.id`. The renderer turns the placeholder into text and `_build_webhook_payload` always adds `call_disposition`,
 so the body on the wire is `{"workflow_run_id": "123", "call_disposition": "follow_up"}` (checked by running those functions offline). Synchronize's receiver accepts the id as plain digits in text
-and ignores every other field, so no change to Dograh is needed: this fork stays equal to upstream except `synchronize/`.
+and ignores every other field, so no backend change to Dograh is needed. This lane changes `synchronize/` and ignores local session state in `.gitignore`; no `.omc/` files are tracked.
 
 ## Business context in the prompts
 

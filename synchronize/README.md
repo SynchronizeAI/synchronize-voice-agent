@@ -1,6 +1,6 @@
 # Synchronize fork of Dograh
 
-Synchronize's fork of [dograh-hq/dograh](https://github.com/dograh-hq/dograh), BSD-2, kept equal to upstream except `synchronize/`. A
+Synchronize's fork of [dograh-hq/dograh](https://github.com/dograh-hq/dograh), BSD-2, with Synchronize workflows and documentation in `synchronize/` and local-session exclusions in `.gitignore`. A
 carrier forwards a customer's calls to a connection number, Dograh answers, and the Synchronize web app reads the call history through
 Dograh's HTTP API with one organization key (the browser never sees it). Customers never see or edit prompts: the agent is content,
 `workflows/*.json` (how to load it: `workflows/README.md`).
