@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -32,11 +33,16 @@ START_FIELDS = {
 }
 SETTINGS = ("workflow_configurations", "template_context_variables")
 PENDING_UUID = "00000000-0000-4000-8000-000000000000"
+PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
 MISSING = object()
 
 
 class GoLiveError(Exception):
     """An operator-safe message: never include HTTP bodies or secret values."""
+
+
+class UncertainWrite(GoLiveError):
+    """A transport/response failure cannot establish whether a write committed."""
 
 
 def require(condition, message):
@@ -54,7 +60,7 @@ def env_value(name, required=True):
     return value
 
 
-def origin(value):
+def origin(value, name="--runtime-origin"):
     """HTTPS origins only, with HTTP loopback allowed for offline fake servers."""
     try:
         parts = urllib.parse.urlsplit(value)
@@ -72,8 +78,11 @@ def origin(value):
         valid = valid and parts.path in ("", "/")
         valid = valid and not any(c.isspace() or c in "<>\"'\\" for c in value)
         valid = valid and not any(
-            token in host
-            for token in (".invalid", "example", "placeholder", "your-", "your_")
+            token in host for token in (".invalid", "placeholder", "your-", "your_")
+        )
+        valid = valid and not any(
+            host == reserved or host.endswith("." + reserved)
+            for reserved in ("example.com", "example.org", "example.net")
         )
         try:
             ipaddress.ip_address(host)
@@ -90,10 +99,10 @@ def origin(value):
             )
         require(
             valid,
-            "Expected a real HTTPS origin (HTTP loopback is allowed for offline tests)",
+            f"{name}: expected a real HTTPS origin (HTTP loopback is allowed for offline tests)",
         )
     except ValueError:
-        raise GoLiveError("Invalid origin") from None
+        raise GoLiveError(f"{name}: invalid origin") from None
     return value.rstrip("/")
 
 
@@ -119,22 +128,30 @@ def request(method, url, headers, body=None):
         error.close()
         return status, None  # Errors may echo submitted secrets; discard them.
     except (OSError, ValueError, http.client.HTTPException):
-        raise GoLiveError("HTTP request failed (details suppressed)") from None
+        raise UncertainWrite(
+            "HTTP transport failed; unknown, may have committed (details suppressed)"
+        ) from None
     try:
         return status, json.loads(raw) if raw else None
     except (ValueError, UnicodeError):
-        raise GoLiveError("HTTP response was not JSON") from None
+        raise UncertainWrite(
+            "HTTP response was not JSON; unknown, may have committed"
+        ) from None
 
 
 class Dograh:
     def __init__(self):
-        self.base = origin(env_value("DOGRAH_PROOF_BASE_URL"))
+        self.base = origin(env_value("DOGRAH_PROOF_BASE_URL"), "DOGRAH_PROOF_BASE_URL")
         self.key = env_value("DOGRAH_PROOF_API_KEY")
 
     def api(self, method, path, body=None):
         status, result = request(
             method, self.base + "/api/v1" + path, {"X-API-Key": self.key}, body
         )
+        if status >= 500:
+            raise UncertainWrite(
+                f"Dograh {method} failed: HTTP {status}; unknown, may have committed"
+            )
         require(200 <= status < 300, f"Dograh {method} failed: HTTP {status}")
         return result
 
@@ -190,12 +207,27 @@ def character_merge(old, new, live, label):
     while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
         prefix += 1
     suffix = 0
-    while (suffix < min(len(old), len(new)) - prefix
-           and old[-suffix - 1] == new[-suffix - 1]):
+    while (
+        suffix < min(len(old), len(new)) - prefix
+        and old[-suffix - 1] == new[-suffix - 1]
+    ):
         suffix += 1
-    old_middle = old[prefix:len(old) - suffix if suffix else len(old)]
-    new_middle = new[prefix:len(new) - suffix if suffix else len(new)]
-    anchor = old[len(old) - suffix:] if suffix else ""
+    old_middle = old[prefix : len(old) - suffix if suffix else len(old)]
+    new_middle = new[prefix : len(new) - suffix if suffix else len(new)]
+    anchor = old[len(old) - suffix :] if suffix else ""
+    # A previously expanded greeting may retain a customised business name.
+    # Recognise only the complete multiline suffix at the END of the field,
+    # including the unchanged literal text after the last template variable.
+    # A new fragment elsewhere (or punctuation alone) cannot satisfy this.
+    left_literal = old[:prefix].rsplit("}}", 1)[-1]
+    if (
+        "\n" in new_middle
+        and left_literal
+        and live.endswith(left_literal + new_middle + anchor)
+        and live.count(left_literal + new_middle + anchor) == 1
+        and not live.count(old_middle + anchor)
+    ):
+        return live
     if old_middle or anchor:
         return replace_once(live, old_middle + anchor, new_middle + anchor, label)
     # Insertion at end requires the full unchanged prefix, exactly once.
@@ -203,8 +235,11 @@ def character_merge(old, new, live, label):
 
 
 def line_matches(lines, block):
-    return [i for i in range(len(lines) - len(block) + 1)
-            if block and lines[i:i + len(block)] == block]
+    return [
+        i
+        for i in range(len(lines) - len(block) + 1)
+        if block and lines[i : i + len(block)] == block
+    ]
 
 
 def patch_text(old, new, live, label):
@@ -213,7 +248,11 @@ def patch_text(old, new, live, label):
     if live == old or live == new:
         return new
     # Whole new-template context may have retained local lines around it.
-    if new and live.count(new) == 1 and old not in live:
+    if (
+        "\n" in new
+        and len(line_matches(live.split("\n"), new.split("\n"))) == 1
+        and old not in live
+    ):
         return live
     if "\n" not in old:
         return character_merge(old, new, live, label)
@@ -228,25 +267,30 @@ def patch_text(old, new, live, label):
         # another hunk as context (it may already have been applied).
         left = opcodes[index - 1] if index else None
         right = opcodes[index + 1] if index + 1 < len(opcodes) else None
-        pre = ol[max(left[1], i1 - 2):i1] if left and left[0] == "equal" else []
-        post = ol[i2:min(right[2], i2 + 2)] if right and right[0] == "equal" else []
+        pre = ol[max(left[1], i1 - 2) : i1] if left and left[0] == "equal" else []
+        post = ol[i2 : min(right[2], i2 + 2)] if right and right[0] == "equal" else []
         lines = out.split("\n")
         anchored_before, anchored_after = pre + before + post, pre + after + post
         # A new fragment elsewhere, or a surviving delete anchor alone, does
         # not prove a hunk applied. Absence means the entire old block is absent.
-        if (not line_matches(lines, before if before else anchored_before)
-                and (pre or post) and len(line_matches(lines, anchored_after)) == 1):
+        if (
+            not line_matches(lines, before if before else anchored_before)
+            and (pre or post)
+            and len(line_matches(lines, anchored_after)) == 1
+        ):
             continue
         search = anchored_before if tag in ("insert", "delete") else before
         replacement = anchored_after if tag in ("insert", "delete") else after
         found = line_matches(lines, search)
         if len(found) == 1:
             start = found[0]
-            out = "\n".join(lines[:start] + replacement + lines[start + len(search):])
+            out = "\n".join(lines[:start] + replacement + lines[start + len(search) :])
         elif not found:
             # A customised anchor can still leave an exact character-level
             # delta. A changed old middle/suffix remains a conflict.
-            out = character_merge("\n".join(anchored_before), "\n".join(anchored_after), out, label)
+            out = character_merge(
+                "\n".join(anchored_before), "\n".join(anchored_after), out, label
+            )
         else:
             raise conflict(label)
     return out
@@ -325,7 +369,7 @@ def patched(live, old, new, runtime, credential_uuid):
     webhook = nodes(out)["6"]
     require(webhook["type"] == "webhook", "node 6: expected webhook")
     require(
-        webhook["data"].get("enabled") is True
+        webhook["data"].get("enabled", True) is True
         and webhook["data"].get("http_method") == "POST",
         "node 6: existing webhook must be enabled POST",
     )
@@ -366,6 +410,13 @@ def validate_wiring(definition, original, runtime, credential_uuid):
 
 def backup_directory(path):
     path = path.expanduser().resolve()
+    require(
+        not any(
+            path == root or root in path.parents
+            for root in (Path("/tmp"), Path("/private/tmp"))
+        ),
+        "Backup directory must be durable; use ~/golive-backups, not /tmp or /private/tmp",
+    )
     ancestor = path
     while not ancestor.exists():
         ancestor = ancestor.parent
@@ -398,14 +449,41 @@ def ensure_no_secrets(value):
         )
 
 
-def backup(client, workflow_id, directory):
+def require_published(workflow, workflow_id):
+    require(
+        workflow.get("version_status") == "published",
+        f"an unpublished draft exists on workflow {workflow_id}; "
+        "publish or discard it in the Dograh UI first",
+    )
+
+
+def same_snapshot(workflow, snapshot):
+    return all(
+        workflow.get(k) == snapshot.get(k)
+        for k in (
+            "workflow_definition",
+            *SETTINGS,
+            "version_status",
+            "version_number",
+            "current_definition_id",
+        )
+    )
+
+
+def backup(client, workflow_id, directory, *, allow_draft=False):
     workflow = client.api("GET", f"/workflow/fetch/{workflow_id}")
     require(workflow["id"] == workflow_id, "Fetched workflow id mismatch")
+    if not allow_draft:
+        require_published(workflow, workflow_id)
     snapshot = {
         "format_version": 1,
         "workflow_id": workflow_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "workflow_definition": workflow["workflow_definition"],
+        **{
+            field: workflow[field]
+            for field in ("version_status", "version_number", "current_definition_id")
+        },
         **{field: workflow[field] for field in SETTINGS},
     }
     ensure_no_secrets(snapshot)
@@ -424,26 +502,43 @@ def backup(client, workflow_id, directory):
         handle.flush()
         os.fsync(handle.fileno())
     print(f"Backup: {path}")
+    print(
+        f"Workflow {workflow_id}: {snapshot['version_status']} version "
+        f"{snapshot['version_number']}; published definition id {snapshot['current_definition_id']}"
+    )
     return snapshot, path
 
 
-def credential(client, name, secret):
+def find_credential(client, name):
     entries = client.api("GET", "/credentials/")
     matches = [entry for entry in entries if entry["name"] == name]
     require(len(matches) <= 1, "Credential name is ambiguous")
-    body = {
-        "credential_type": "custom_header",
-        "credential_data": {"header_name": "X-Dograh-Secret", "header_value": secret},
-    }
     if matches:
         require(
             matches[0]["credential_type"] == "custom_header",
             "Existing credential must be custom_header",
         )
-        ident = str(UUID(matches[0]["uuid"]))
-        result = client.api("PUT", f"/credentials/{ident}", body)
+        return str(UUID(matches[0]["uuid"]))
+    return None
+
+
+def credential(client, name, secret, ident, state):
+    body = {
+        "credential_type": "custom_header",
+        "credential_data": {"header_name": "X-Dograh-Secret", "header_value": secret},
+    }
+    if ident:
+        result = state.write(
+            "credential rotate",
+            "rotated",
+            lambda: client.api("PUT", f"/credentials/{ident}", body),
+        )
     else:
-        result = client.api("POST", "/credentials/", {"name": name, **body})
+        result = state.write(
+            "credential create",
+            "created",
+            lambda: client.api("POST", "/credentials/", {"name": name, **body}),
+        )
     return str(UUID(result["uuid"]))
 
 
@@ -451,6 +546,8 @@ def diff_fields(before, after):
     """Readable field diff without emitting full prompts or HTTP response data."""
     changes = []
     previous = nodes(before)
+    for node_id in previous.keys() - nodes(after).keys():
+        changes.append((node_id, "[removed node]", previous[node_id]["type"], None))
     for node_id, node in nodes(after).items():
         if node_id not in previous:
             changes.append((node_id, "[added node]", None, node["type"]))
@@ -477,7 +574,11 @@ def show_plan(changes):
             print(
                 f"  - {'configured URL' if old else 'unset'}\n  + runtime origin + {path}"
             )
-        elif field in START_FIELDS | {"credential_uuid", "[added node]"}:
+        elif field in START_FIELDS | {
+            "credential_uuid",
+            "[added node]",
+            "[removed node]",
+        }:
             print(f"  - {json.dumps(old)}\n  + {json.dumps(new)}")
         elif isinstance(old, str) and isinstance(new, str):
             removed = added = 0
@@ -517,10 +618,74 @@ def summary(status, workflow_id, changes, existing_count):
         print(f"  node {node_id}: {', '.join(fields)}")
 
 
-def publish(client, workflow_id, body):
-    client.api("PUT", f"/workflow/{workflow_id}", body)
-    client.api("POST", f"/workflow/{workflow_id}/publish", {})
-    return client.api("GET", f"/workflow/fetch/{workflow_id}")
+class WriteState:
+    """Keep recovery evidence even when the request's outcome is uncertain."""
+
+    def __init__(self, path, draft="no"):
+        self.path, self.stage = path, "pre-write"
+        self.credential, self.published, self.draft = "unchanged", "unchanged", draft
+        self.attempted = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        if error is not None and self.attempted:
+            print(
+                f"RECOVERY — failed stage: {self.stage}\n"
+                f"  credential: {self.credential}\n"
+                f"  live published definition: {self.published}\n"
+                f"  draft left behind: {self.draft}\n"
+                f"  python3 {shlex.quote(str(Path(__file__).resolve()))} --rollback {shlex.quote(str(self.path))}",
+                file=sys.stderr,
+            )
+            if self.draft != "no":
+                print(
+                    "  Anyone pressing Publish in the Dograh UI may ship the wiring; "
+                    "the draft must be rolled back or discarded first.",
+                    file=sys.stderr,
+                )
+
+    def write(self, stage, outcome, action):
+        self.stage, self.attempted = stage, True
+        print(f"Stage: {stage}")
+        try:
+            result = action()
+        except Exception as error:
+            if isinstance(error, UncertainWrite) or not isinstance(error, GoLiveError):
+                if stage.startswith("credential"):
+                    self.credential = "unknown, may have been created/rotated"
+                elif stage == "draft save":
+                    self.draft = "unknown, may have committed"
+                elif stage == "publish":
+                    self.published = "unknown, may have committed"
+                    self.draft = "unknown"
+            raise
+        if stage.startswith("credential"):
+            self.credential = outcome
+        elif stage == "draft save":
+            self.draft = "yes"
+        elif stage == "publish":
+            self.published, self.draft = "changed", "no"
+        return result
+
+
+def publish(client, workflow_id, body, state):
+    state.write(
+        "draft save", None, lambda: client.api("PUT", f"/workflow/{workflow_id}", body)
+    )
+    state.write(
+        "publish",
+        None,
+        lambda: client.api("POST", f"/workflow/{workflow_id}/publish", {}),
+    )
+    state.stage = "read-back"
+    print("Stage: read-back")
+    fetched = client.api("GET", f"/workflow/fetch/{workflow_id}")
+    state.draft = {"draft": "yes", "published": "no"}.get(
+        fetched.get("version_status"), "unknown"
+    )
+    return fetched
 
 
 def deploy(args):
@@ -530,15 +695,25 @@ def deploy(args):
     )
     runtime = origin(args.runtime_origin)
     secret = env_value("DOGRAH_WEBHOOK_SECRET", required=args.apply)
+    if args.apply:
+        print(
+            "Before apply: deploy the runtime with this secret active and run golive probe first."
+        )
     old, new = template(args.old_ref, args.lang), template(args.new_ref, args.lang)
     client = Dograh()
     snapshot, path = backup(client, args.workflow_id, backup_directory(args.backup_dir))
     live = snapshot["workflow_definition"]
-    planned = patched(live, old, new, runtime, PENDING_UUID)
+    existing = find_credential(client, args.credential_name)
+    planned = patched(live, old, new, runtime, existing or PENDING_UUID)
     ensure_no_secrets(planned)
     changes = diff_fields(live, planned)
     show_plan(changes)
-    print("Would create/update credential (secret not shown)")
+    already_wired = planned == live and existing is not None
+    print(
+        "Already wired; no remote writes"
+        if already_wired
+        else "Would create/update credential (secret not shown)"
+    )
     if not args.apply:
         summary("PLAN", args.workflow_id, changes, len(nodes(live)))
         print("No remote writes")
@@ -546,21 +721,24 @@ def deploy(args):
     # Fresh backup and all exact-once patches must succeed before ANY write,
     # including credential rotation. Also detect concurrent workflow edits.
     fresh = client.api("GET", f"/workflow/fetch/{args.workflow_id}")
-    require(
-        fresh["workflow_definition"] == live
-        and all(fresh[k] == snapshot[k] for k in SETTINGS),
-        "Workflow changed since backup; rerun plan",
-    )
+    require_published(fresh, args.workflow_id)
+    require(same_snapshot(fresh, snapshot), "Workflow changed since backup; rerun plan")
     require(path.is_file(), "Fresh backup missing")
-    ident = credential(client, args.credential_name, secret)
-    # Only substitute the UUID: do not re-run the merge after a remote write.
-    planned_nodes = nodes(planned)
-    planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
-    planned_nodes["6"]["data"]["credential_uuid"] = ident
-    validate_wiring(planned, live, runtime, ident)
-    fetched = publish(client, args.workflow_id, {"workflow_definition": planned})
-    verify_snapshot(fetched, planned, snapshot)
-    validate_wiring(fetched["workflow_definition"], live, runtime, ident)
+    print(f"ROLLBACK FILE: {path}")
+    if already_wired:
+        return
+    with WriteState(path) as state:
+        ident = credential(client, args.credential_name, secret, existing, state)
+        # Only substitute the UUID: do not re-run the merge after a remote write.
+        planned_nodes = nodes(planned)
+        planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
+        planned_nodes["6"]["data"]["credential_uuid"] = ident
+        validate_wiring(planned, live, runtime, ident)
+        fetched = publish(
+            client, args.workflow_id, {"workflow_definition": planned}, state
+        )
+        verify_snapshot(fetched, planned, snapshot)
+        validate_wiring(fetched["workflow_definition"], live, runtime, ident)
     summary("APPLIED", args.workflow_id, changes, len(nodes(live)))
     print("Published and verified; settings/model override unchanged")
 
@@ -568,6 +746,10 @@ def deploy(args):
 def rollback(args):
     snapshot = json.loads(args.rollback.read_text(encoding="utf-8"))
     require(snapshot.get("format_version") == 1, "Unsupported backup format")
+    require(
+        snapshot.get("version_status") == "published",
+        "Cannot restore a draft backup or a backup without published-version evidence",
+    )
     workflow_id = snapshot["workflow_id"]
     require(workflow_id in TARGETS, "Backup target must be workflow 1 or 3")
     if args.workflow_id is not None:
@@ -575,13 +757,30 @@ def rollback(args):
     ensure_no_secrets(snapshot)
     directory = backup_directory(args.backup_dir or args.rollback.resolve().parent)
     client = Dograh()
-    backup(client, workflow_id, directory)
+    # Recovery must work when a failed apply left a draft. Preserve it for
+    # inspection, clearly labelled; never allow that draft backup as a restore target.
+    current, _ = backup(client, workflow_id, directory, allow_draft=True)
+    print("Rollback overwrites later edits, including any unpublished draft.")
+    show_plan(
+        diff_fields(current["workflow_definition"], snapshot["workflow_definition"])
+    )
     body = {
         "workflow_definition": snapshot["workflow_definition"],
-        **{k: snapshot[k] for k in SETTINGS},
+        **{k: snapshot[k] for k in SETTINGS if current[k] != snapshot[k]},
     }
-    fetched = publish(client, workflow_id, body)
-    verify_snapshot(fetched, snapshot["workflow_definition"], snapshot)
+    for field in SETTINGS:
+        if field in body:
+            print(f"{field}: restore backup value (content withheld)")
+    fresh = client.api("GET", f"/workflow/fetch/{workflow_id}")
+    require(
+        same_snapshot(fresh, current), "Workflow changed since backup; rerun rollback"
+    )
+    with WriteState(
+        args.rollback.resolve(),
+        draft="yes" if current["version_status"] == "draft" else "no",
+    ) as state:
+        fetched = publish(client, workflow_id, body, state)
+        verify_snapshot(fetched, snapshot["workflow_definition"], snapshot)
     print(
         f"ROLLED BACK workflow {workflow_id}: definition and settings equal backup; credential retained"
     )
@@ -594,14 +793,22 @@ def probe(args):
         "Use an E.164 to-number",
     )
     body = {
+        "event": "call_inbound",
         "call_inbound": {
+            "agent_id": args.workflow_id,
             "from_number": "+12025550100",
             "to_number": args.to_number,
-            "workflow_run_id": "0",
-        }
+            "workflow_run_id": PROBE_RUN_ID,
+        },
     }
     status, data = request(
-        "POST", runtime + "/api/voice/pre-call", {"X-Dograh-Secret": secret}, body
+        "POST",
+        runtime + "/api/voice/pre-call",
+        {
+            "X-Dograh-Secret": secret,
+            "Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}",
+        },
+        body,
     )
     print(status)
     require(
@@ -612,7 +819,13 @@ def probe(args):
     while wrong == secret:
         wrong = "wrong-" + uuid4().hex
     status, _ = request(
-        "POST", runtime + "/api/voice/pre-call", {"X-Dograh-Secret": wrong}, body
+        "POST",
+        runtime + "/api/voice/pre-call",
+        {
+            "X-Dograh-Secret": wrong,
+            "Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}",
+        },
+        body,
     )
     print(status)
     require(status in (401, 403), "Wrong-secret probe expected HTTP 401/403")
@@ -640,8 +853,8 @@ def main(argv=None):
                 "Probe cannot apply or roll back workflows",
             )
             require(
-                args.runtime_origin and args.to_number,
-                "Probe needs --runtime-origin and --to-number",
+                args.runtime_origin and args.to_number and args.workflow_id in TARGETS,
+                "Probe needs --runtime-origin, --to-number and --workflow-id (1 or 3)",
             )
             probe(args)
         elif args.rollback:

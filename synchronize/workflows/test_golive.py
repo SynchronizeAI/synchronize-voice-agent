@@ -1,5 +1,6 @@
 """Targeted offline integration proof: every HTTP request goes to a local fake."""
 
+import ast
 import contextlib
 import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,65 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import golive
+
+
+def schema_fields():
+    """Read actual DTO field names without loading backend dependencies."""
+    classes = {}
+    for name in ("dto.py", "node_data.py"):
+        tree = ast.parse((golive.ROOT / "api/services/workflow" / name).read_text())
+        classes.update({c.name: c for c in tree.body if isinstance(c, ast.ClassDef)})
+
+    def fields(name):
+        cls = classes[name]
+        return {
+            s.target.id
+            for s in cls.body
+            if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+        } | set().union(
+            *(
+                fields(b.id)
+                for b in cls.bases
+                if isinstance(b, ast.Name) and b.id in classes
+            )
+        )
+
+    return {
+        kind: fields(name)
+        for kind, name in {
+            "startCall": "StartCallNodeData",
+            "agentNode": "AgentNodeData",
+            "endCall": "EndCallNodeData",
+            "globalNode": "GlobalNodeData",
+            "webhook": "WebhookNodeData",
+            "qa": "QANodeData",
+            "edge": "EdgeDataDTO",
+        }.items()
+    }
+
+
+ALLOWED_DATA = schema_fields()
+
+
+def sanitized(definition):
+    out = copy.deepcopy(definition)
+    for item in out["nodes"] + out["edges"]:
+        allowed = ALLOWED_DATA.get(
+            item.get("type"), ALLOWED_DATA["edge"] if "source" in item else None
+        )
+        if allowed is not None and isinstance(item.get("data"), dict):
+            item["data"] = {k: v for k, v in item["data"].items() if k in allowed}
+    return out
+
+
+def masked(workflow):
+    out = copy.deepcopy(workflow)
+    for node in out["workflow_definition"]["nodes"]:
+        data = node["data"]
+        if node["type"] == "qa" and data.get("qa_api_key"):
+            value = data["qa_api_key"]
+            data["qa_api_key"] = "*" * (len(value) - 4) + value[-4:]
+    return out
 
 
 def wire(definition, runtime, credential_uuid):
@@ -41,6 +101,9 @@ class FakeDograh(ThreadingHTTPServer):
         self.drift = None
         self.redirect = False
         self.on_get = None
+        self.failure = None
+        self.probe_headers = []
+        self.qa_key = "qa-" + uuid4().hex
         self.select("en")
 
     def select(self, lang):
@@ -53,7 +116,10 @@ class FakeDograh(ThreadingHTTPServer):
         # Unchanged field, changed field's extra line, renamed node, custom node,
         # model binding, dictionary and sparse settings all need to survive.
         indexed = golive.nodes(live)
-        indexed["1"]["data"]["operator_note"] = "Keep this local tuning"
+        indexed["1"]["data"]["allow_interrupt"] = False
+        for node in live["nodes"]:
+            if node["type"] == "qa":
+                node["data"]["qa_api_key"] = self.qa_key
         indexed["4"]["data"]["name"] = "Our customised persona"
         indexed["4"]["data"]["prompt"] += "\nLOCAL CUSTOM LINE: keep this exactly."
         indexed["1"]["position"] = {"x": 193, "y": 42}
@@ -74,11 +140,13 @@ class FakeDograh(ThreadingHTTPServer):
                 },
                 "dictionary": "Custom business",
                 "smart_turn_stop_secs": 1.3,
-                "custom_setting": {"nested": [True, 7]},
             },
             "template_context_variables": {"local": "value"},
             "version_status": "published",
+            "version_number": 7,
+            "current_definition_id": 107,
         }
+        self.released = copy.deepcopy(self.workflow)
         self.original = copy.deepcopy(self.workflow)
 
     def expected(self):
@@ -118,7 +186,11 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else None
         fake.calls.append((self.command, self.path, body))
+        if fake.failure and fake.failure(self.command, self.path):
+            self.reply(409, {"detail": body})
+            return
         if self.path == "/api/voice/pre-call":
+            fake.probe_headers.append(dict(self.headers))
             valid = self.headers.get("X-Dograh-Secret") == fake.secret
             self.reply(
                 200 if valid else fake.wrong_status,
@@ -137,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and self.path == fetch:
             if fake.on_get:
                 fake.on_get()
-            self.reply(200, fake.workflow)
+            self.reply(200, masked(fake.workflow))
         elif self.command == "GET" and self.path == "/api/v1/credentials/":
             self.reply(
                 200,
@@ -168,18 +240,49 @@ class Handler(BaseHTTPRequestHandler):
             self.command == "PUT"
             and self.path == f"/api/v1/workflow/{fake.workflow_id}"
         ):
+            if "workflow_definition" in body:
+                body = copy.deepcopy(body)
+                body["workflow_definition"] = sanitized(body["workflow_definition"])
+                old_nodes = golive.nodes(fake.workflow["workflow_definition"])
+                for node in body["workflow_definition"]["nodes"]:
+                    if node["type"] == "qa":
+                        old_key = (
+                            old_nodes.get(node["id"], {})
+                            .get("data", {})
+                            .get("qa_api_key")
+                        )
+                        if (
+                            old_key
+                            and node["data"].get("qa_api_key")
+                            == "*" * (len(old_key) - 4) + old_key[-4:]
+                        ):
+                            node["data"]["qa_api_key"] = old_key
+            if fake.workflow["version_status"] != "draft":
+                fake.workflow["version_number"] += 1
             fake.workflow.update(copy.deepcopy(body))
             fake.workflow["version_status"] = "draft"
-            self.reply(200, fake.workflow)
+            self.reply(200, masked(fake.workflow))
         elif (
             self.command == "POST"
             and self.path == f"/api/v1/workflow/{fake.workflow_id}/publish"
         ):
             fake.published += 1
             fake.workflow["version_status"] = "published"
+            fake.workflow["current_definition_id"] += 1
             if fake.drift:
                 fake.drift(fake.workflow)
-            self.reply(200, fake.workflow)
+            fake.released = copy.deepcopy(fake.workflow)
+            self.reply(
+                200,
+                {
+                    "id": fake.workflow["current_definition_id"],
+                    "version_number": fake.workflow["version_number"],
+                    "status": "published",
+                    "published_at": "2026-11-01T00:00:00Z",
+                    "version_name": None,
+                    "change_description": None,
+                },
+            )
         else:
             self.reply(404, {})
 
@@ -278,7 +381,8 @@ class GoLiveTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         saved = json.loads(path.read_text())
         self.assertEqual(
-            saved["workflow_definition"], self.fake.original["workflow_definition"]
+            saved["workflow_definition"],
+            masked(self.fake.original)["workflow_definition"],
         )
         self.assertEqual(
             saved["workflow_configurations"],
@@ -286,14 +390,15 @@ class GoLiveTests(unittest.TestCase):
         )
         self.assertIn(str(path), out)
 
-    def test_apply_both_languages_exact_changes_and_create_then_update(self):
+    def test_apply_both_languages_exact_changes_and_second_apply_noop(self):
         for lang in ("en", "ko"):
             with self.subTest(lang=lang):
                 self.fake.select(lang)
                 self.fake.credentials.clear()
                 self.fake.calls.clear()
                 expected = self.fake.expected()
-                self.run_cli(self.args("--apply"))
+                out, _ = self.run_cli(self.args("--apply"))
+                self.assertIn("ROLLBACK FILE:", out)
                 self.assertEqual(self.fake.workflow["workflow_definition"], expected)
                 for key in golive.SETTINGS:
                     self.assertEqual(self.fake.workflow[key], self.fake.original[key])
@@ -309,13 +414,15 @@ class GoLiveTests(unittest.TestCase):
                 )
                 self.fake.calls.clear()
                 os.environ["DOGRAH_WEBHOOK_SECRET"] = uuid4().hex
-                self.run_cli(self.args("--apply"))
+                out, _ = self.run_cli(self.args("--apply"))
+                self.assertIn("ROLLBACK FILE:", out)
                 self.assertEqual(self.fake.workflow["workflow_definition"], expected)
-                self.assertEqual([c[0] for c in self.writes()], ["PUT", "PUT", "POST"])
+                self.assertEqual(self.writes(), [])
+                self.assertIn("Already wired", out)
                 self.assertEqual(len(self.fake.credentials), 1)
                 self.assertTrue(
                     self.fake.credentials[0]["credential_data"]["header_value"]
-                    == os.environ["DOGRAH_WEBHOOK_SECRET"]
+                    == self.fake.secret
                 )
                 os.environ["DOGRAH_WEBHOOK_SECRET"] = self.fake.secret
 
@@ -485,6 +592,8 @@ class GoLiveTests(unittest.TestCase):
             self.fake.runtime,
             "--to-number",
             "+12025550199",
+            "--workflow-id",
+            "3",
         ]
         for status in (401, 403):
             self.fake.wrong_status = status
@@ -499,15 +608,21 @@ class GoLiveTests(unittest.TestCase):
         self.assertEqual(
             self.fake.calls[0][2],
             {
+                "event": "call_inbound",
                 "call_inbound": {
+                    "agent_id": 3,
                     "from_number": "+12025550100",
                     "to_number": "+12025550199",
-                    "workflow_run_id": "0",
-                }
+                    "workflow_run_id": golive.PROBE_RUN_ID,
+                },
             },
         )
         self.assertTrue(
             all(path == "/api/voice/pre-call" for _, path, _ in self.fake.calls)
+        )
+        self.assertEqual(
+            self.fake.probe_headers[0]["Idempotency-Key"],
+            f"dograh-pre-call-{golive.PROBE_RUN_ID}",
         )
         self.assertFalse(self.backups.exists())
 
@@ -515,24 +630,287 @@ class GoLiveTests(unittest.TestCase):
         old = golive.nodes(golive.template("940fdef", "ko"))["1"]["data"]["greeting"]
         new = golive.nodes(golive.template("HEAD", "ko"))["1"]["data"]["greeting"]
         live = "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
-        self.assertEqual(golive.patch_text(old, new, live, "node 1.data.greeting"),
-                         "안녕하세요, 영훈솔루션 AI 비서입니다.\n{{hours_note | fallback: }}\n어떤 일로 전화하셨나요?")
+        self.assertEqual(
+            golive.patch_text(old, new, live, "node 1.data.greeting"),
+            "안녕하세요, 영훈솔루션 AI 비서입니다.\n{{hours_note | fallback: }}\n어떤 일로 전화하셨나요?",
+        )
+
+    def test_customised_korean_greeting_apply_is_idempotent(self):
+        self.fake.select("ko")
+        data = golive.nodes(self.fake.workflow["workflow_definition"])["1"]["data"]
+        data["greeting"] = (
+            "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
+        )
+        self.run_cli(self.args("--apply"))
+        first = copy.deepcopy(self.fake.workflow)
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertIn("Already wired", out)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(first, self.fake.workflow)
 
     def test_silent_skips_are_conflicts_with_operator_guidance(self):
         for old, new, live in (
             ("A\nB\nD", "A\nC\nD", "A\nB-custom\nD\nC"),
             ("W\nX\nY", "W\nY", "W\nX-custom\nY"),
-            ("Hi. How may I help you?", "Hi. How may I help?",
-             "Hi there. How can I help you today?"),
+            ("hello", "?", "custom question?"),
+            (
+                "Hi. How may I help you?",
+                "Hi. How may I help?",
+                "Hi there. How can I help you today?",
+            ),
         ):
             with self.subTest(old=old):
-                with self.assertRaisesRegex(golive.GoLiveError, "field.*Dograh UI.*re-plan"):
+                with self.assertRaisesRegex(
+                    golive.GoLiveError, "field.*Dograh UI.*re-plan"
+                ):
                     golive.patch_text(old, new, live, "field")
         old = golive.nodes(golive.template("940fdef", "ko"))["4"]["data"]["prompt"]
         new = golive.nodes(golive.template("HEAD", "ko"))["4"]["data"]["prompt"]
         live = old.replace("{{business_name | fallback:저희 회사}}", "영훈솔루션")
-        with self.assertRaisesRegex(golive.GoLiveError, "node 4.data.prompt.*Dograh UI"):
+        with self.assertRaisesRegex(
+            golive.GoLiveError, "node 4.data.prompt.*Dograh UI"
+        ):
             golive.patch_text(old, new, live, "node 4.data.prompt")
+
+    def test_draft_at_backup_or_fresh_fetch_blocks_all_writes(self):
+        for fresh_only in (False, True):
+            self.fake.select("en")
+            self.fake.calls.clear()
+            gets = 0
+
+            def on_get():
+                nonlocal gets
+                gets += 1
+                if not fresh_only or gets == 2:
+                    self.fake.workflow["version_status"] = "draft"
+                    self.fake.workflow["version_number"] += 1
+                    self.fake.workflow["workflow_configurations"][
+                        "model_configuration_override"
+                    ] = {}
+
+            self.fake.on_get = on_get
+            _, err = self.run_cli(self.args("--apply"), expected=1)
+            self.assertIn(
+                "an unpublished draft exists on workflow 3; publish or discard it in the Dograh UI first",
+                err,
+            )
+            self.assertEqual(self.writes(), [])
+            self.assertEqual(self.fake.released, self.fake.original)
+
+    def test_backup_records_published_version_and_definition_id(self):
+        out, _ = self.run_cli(self.args())
+        (path,) = self.backups.glob("*.json")
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["version_number"], 7)
+        self.assertEqual(saved["current_definition_id"], 107)
+        self.assertEqual(saved["version_status"], "published")
+        self.assertIn("published version 7; published definition id 107", out)
+
+    def test_each_failed_stage_reports_recovery_state(self):
+        cases = (
+            (
+                "credential create",
+                "POST",
+                "/api/v1/credentials/",
+                "unchanged",
+                "unchanged",
+                "no",
+            ),
+            (
+                "credential rotate",
+                "PUT",
+                "/api/v1/credentials/",
+                "unchanged",
+                "unchanged",
+                "no",
+            ),
+            ("draft save", "PUT", "/api/v1/workflow/3", "created", "unchanged", "no"),
+            (
+                "publish",
+                "POST",
+                "/api/v1/workflow/3/publish",
+                "created",
+                "unchanged",
+                "yes",
+            ),
+            (
+                "read-back",
+                "GET",
+                "/api/v1/workflow/fetch/3",
+                "created",
+                "changed",
+                "no",
+            ),
+        )
+        for stage, method, path, cred, published, draft in cases:
+            with self.subTest(stage=stage):
+                self.fake.select("en")
+                self.fake.credentials.clear()
+                self.fake.published = 0
+                if stage == "credential rotate":
+                    self.fake.credentials.append(
+                        {
+                            "uuid": self.fake.credential_uuid,
+                            "name": "Synchronize reception",
+                            "credential_type": "custom_header",
+                        }
+                    )
+                self.fake.failure = lambda m, p: (
+                    m == method
+                    and p.startswith(path)
+                    and (stage != "read-back" or self.fake.published > 0)
+                )
+                out, err = self.run_cli(self.args("--apply"), expected=1)
+                self.assertEqual(err.count("RECOVERY"), 1)
+                self.assertIn(f"failed stage: {stage}", err)
+                self.assertIn(f"credential: {cred}", err)
+                self.assertIn(f"live published definition: {published}", err)
+                self.assertIn(f"draft left behind: {draft}", err)
+                backup_path = next(
+                    line.removeprefix("ROLLBACK FILE: ")
+                    for line in out.splitlines()
+                    if line.startswith("ROLLBACK FILE: ")
+                )
+                self.assertIn("--rollback " + backup_path, err)
+                self.assertIn("python3 " + str(Path(golive.__file__).resolve()), err)
+                if draft == "yes":
+                    self.assertIn("Anyone pressing Publish", err)
+                    self.assertIn("rolled back or discarded", err)
+
+    def test_transport_failure_after_put_or_publish_is_unknown_may_have_committed(self):
+        original_request = golive.request
+        for stage in ("draft save", "publish"):
+            with self.subTest(stage=stage):
+                self.fake.select("en")
+                self.fake.credentials.clear()
+                self.fake.published = 0
+
+                def uncertain(method, url, headers, body=None):
+                    result = original_request(method, url, headers, body)
+                    if (
+                        stage == "draft save"
+                        and method == "PUT"
+                        and url.endswith("/workflow/3")
+                    ) or (stage == "publish" and url.endswith("/publish")):
+                        raise golive.UncertainWrite(
+                            "HTTP transport failed; unknown, may have committed"
+                        )
+                    return result
+
+                with patch.object(golive, "request", side_effect=uncertain):
+                    _, err = self.run_cli(self.args("--apply"), expected=1)
+                self.assertIn(f"failed stage: {stage}", err)
+                self.assertIn("unknown, may have committed", err)
+                self.assertIn("draft left behind: unknown", err)
+                self.assertIn("Anyone pressing Publish", err)
+                if stage == "draft save":
+                    self.assertEqual(self.fake.released, self.fake.original)
+                    self.assertEqual(self.fake.workflow["version_status"], "draft")
+                else:
+                    self.assertIn("live published definition: unknown", err)
+                    self.assertEqual(self.fake.workflow["version_status"], "published")
+
+    def test_existing_credential_rotates_when_definition_needs_wiring(self):
+        self.fake.credentials.append(
+            {
+                "uuid": self.fake.credential_uuid,
+                "name": "Synchronize reception",
+                "credential_type": "custom_header",
+            }
+        )
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertIn("Stage: credential rotate", out)
+        self.assertEqual([c[0] for c in self.writes()], ["PUT", "PUT", "POST"])
+        self.assertTrue(
+            self.fake.credentials[0]["credential_data"]["header_value"]
+            == self.fake.secret
+        )
+
+    def test_sanitizer_and_mask_fidelity(self):
+        self.assertEqual(sanitized(self.fake.old), self.fake.old)
+        # The fake must remove unknown data keys exactly where Dograh does,
+        # while preserving unknown top-level metadata and nested payload values.
+        live = copy.deepcopy(self.fake.old)
+        live["nodes"][0]["data"]["operator_note"] = "unsupported"
+        live["nodes"][0]["local_position"] = 1
+        live["edges"] = [
+            {"source": "1", "target": "99", "data": {"label": "next", "invalid": True}}
+        ]
+        cleaned = sanitized(live)
+        self.assertNotIn("operator_note", cleaned["nodes"][0]["data"])
+        self.assertNotIn("invalid", cleaned["edges"][0]["data"])
+        self.assertEqual(cleaned["nodes"][0]["local_position"], 1)
+        self.run_cli(self.args("--apply"))
+        for path in self.backups.glob("*.json"):
+            self.assertFalse(self.fake.qa_key in path.read_text(), "QA key persisted")
+        self.assertTrue(
+            any(
+                n["data"].get("qa_api_key") == self.fake.qa_key
+                for n in self.fake.workflow["workflow_definition"]["nodes"]
+            )
+        )
+
+    def test_rollback_of_failed_publish_diffs_and_omits_unchanged_settings(self):
+        self.fake.failure = lambda m, p: p.endswith("/publish")
+        self.run_cli(self.args("--apply"), expected=1)
+        (path,) = self.backups.glob("*.json")
+        self.assertEqual(self.fake.workflow["version_status"], "draft")
+        self.fake.failure = None
+        self.fake.calls.clear()
+        out, _ = self.run_cli(["--rollback", str(path)])
+        self.assertIn("overwrites later edits", out)
+        self.assertIn("node 1.data.pre_call_fetch_url", out)
+        self.assertIn("[removed node]", out)
+        self.assertEqual(set(self.writes()[0][2]), {"workflow_definition"})
+        self.assertEqual(
+            self.fake.workflow["workflow_definition"],
+            self.fake.original["workflow_definition"],
+        )
+        drafts = [p for p in self.backups.glob("*.json") if p != path]
+        _, err = self.run_cli(["--rollback", str(drafts[0])], expected=1)
+        self.assertIn("Cannot restore a draft backup", err)
+
+    def test_default_enabled_durable_backup_origin_and_unicode_hints(self):
+        webhook = copy.deepcopy(golive.nodes(self.fake.new)["6"])
+        webhook["data"].pop("enabled")
+        self.fake.workflow["workflow_definition"]["nodes"].append(webhook)
+        self.run_cli(self.args("--apply"))
+        self.assertNotIn(
+            "enabled",
+            golive.nodes(self.fake.workflow["workflow_definition"])["6"]["data"],
+        )
+        for path in (
+            "/tmp",
+            "/private/tmp",
+            "/tmp/golive-backups",
+            "/private/tmp/golive-backups",
+        ):
+            with self.assertRaisesRegex(golive.GoLiveError, "durable"):
+                golive.backup_directory(Path(path))
+        self.assertEqual(
+            golive.origin("https://exampleclinic.com"), "https://exampleclinic.com"
+        )
+        for value in ("https://bad.invalid", "https://host:bad"):
+            with self.assertRaisesRegex(golive.GoLiveError, "DOGRAH_PROOF_BASE_URL"):
+                golive.origin(value, "DOGRAH_PROOF_BASE_URL")
+        for live in ("A\r\nB\r\nC", "A\n한\nC"):
+            with self.assertRaisesRegex(golive.GoLiveError, "LF/CRLF.*NFC/NFD"):
+                golive.patch_text("A\n한\nC", "A\n새\nC", live, "field")
+
+    def test_two_context_lines_disambiguate_insert_delete(self):
+        self.assertEqual(
+            golive.patch_text(
+                "A\nB\nC\nD", "A\nB\nX\nC\nD", "C\nLOCAL\nA\nB\nC\nD", "field"
+            ),
+            "C\nLOCAL\nA\nB\nX\nC\nD",
+        )
+        self.assertEqual(
+            golive.patch_text(
+                "A\nB\nX\nC\nD", "A\nB\nC\nD", "X\nC\nLOCAL\nA\nB\nX\nC\nD", "field"
+            ),
+            "X\nC\nLOCAL\nA\nB\nC\nD",
+        )
 
     def test_original_word_merge_and_multiline_insert_delete_are_exact_once(self):
         self.assertEqual(
