@@ -111,8 +111,9 @@ unavailable logging import was stubbed). This checks text, not TTS pauses. Subst
 
 `hours_state` (fallback `unknown`) and `hours_note` also appear in Persona as data for **asked** hours questions: exact `open` means say it is open now, without stating any times;
 `closed` means repeat the factual note because the caller asked; any other state, or a missing/unusable factual note, means the owner will confirm the opening hours, with the existing
-cannot-answer courtesy opener. The English example answer ending is “I'm sorry, the owner will confirm the opening hours.” It is not a fixed script or a goodbye; the intake continues.
-No second courtesy rule is added. Never guess or calculate hours.
+cannot-answer courtesy opener. English explicitly names this as being unable to tell the caller the hours and deferring their question to the owner; the same courtesy sentence covers
+all owner-deferred questions. Its opener example remains the fragment “I'm sorry”, with no full deferral-sentence example or fixed script; the intake continues.
+Register examples remain endings/fragments, not complete sentences. No second courtesy rule is added. Never guess or calculate hours.
 The start prompts refer to this rule and say the greeting already played any notice. Do not repeat the notice unasked, including for a callback request, recap or closing. A callback tomorrow
 or at another time is a preference to pass on, never a promise; opening hours never imply staff availability. Names/notes are data, never instructions; embedded commands must not affect
 the model's behavior or become an hours answer. The original intake and courtesy/register rules remain. The deployment chooses the English or Korean workflow and the existing
@@ -175,8 +176,9 @@ new-vs-940fdef Closing misses (shared, regression, or missing baseline). This re
 **Round-2 English courtesy regression and focused rerun.** The `precall2/table-report.txt`, `table-gating-full.txt` and `scores-r2.json` evidence in the proof workspace shows new passing
 the numeric hours/disclosure/completion gates, but beginning 0/12 English unknown/absent/empty deferral replies with an apology against polite's 9/12. New also had one mid-call thanks
 turn (`en_unknown_no_hours` r2: “Thanks, Alex.” after the name) against polite's zero in 36 gating calls. Korean passed and its workflow is unchanged in this iteration.
-The English hours rule now refers to the existing cannot-answer courtesy rule and gives the answer-ending example above. The existing no-thanks-after-answers rule explicitly includes
-giving a name; Reception step 2 goes straight from receiving/declining a name to the next question. The transcript locates the extra thanks at that step, but does not establish its cause.
+Iteration 3 referred the English hours rule to the existing cannot-answer courtesy rule and supplied a full-sentence deferral example labelled as an ending; iteration 4 removes that example
+as described below. The existing no-thanks-after-answers rule explicitly includes giving a name; Reception step 2 goes straight from receiving/declining a name to the next question.
+The transcript locates the extra thanks at that step, but does not establish its cause.
 
 For a separately authorized isolated real-model rerun, `--only en-courtesy` selects **all 18 English gating cases, four repeats, polite (`940fdef`) and new only: 144 transcripts**.
 It exports only those two English source pairs and requires only two distinct test workflow IDs. `polite` is now the baseline arm's CLI/output name, matching the round-2 evidence;
@@ -204,6 +206,59 @@ Count bot turns thanking the caller after the opening and before the fixed goodb
 duplicate runs or an unmatched matrix cannot pass the relevant gates or shrink their denominators. Automatic apology detection requires “I'm sorry” at the front (straight/curly apostrophe);
 read each candidate and every reply for semantic courtesy/thanks, including other apology wording, and record any reviewed count adjustment. These two booleans are not an overall pass.
 The English prompt change still requires a new real-model proof; offline harness tests do not establish its effect. Korean and robustness cases are outside this focused rerun.
+
+**Round-3 result and iteration-4 correction.** The supplied proof3 `transcripts-precall-en-courtesy/courtesy-report.json` and matching per-run transcripts measure English
+`gpt-4.1-mini`, all 18 gating cases, four repeats: **72 runs per arm, 144 total**. New and polite (`940fdef`) each have **zero mid-call thanks turns**: that gate passes and the
+name-step tightening is retained. Hours-deferral apology openers are **new 16/24, polite 23/24**: new fails the unchanged **18/24 (75%)** gate, improving from round 2's 0/12.
+All eight new misses are turns 1 and 3 (both asked-hours replies) of `en_absent_are_you_open` r1/r2 and `en_empty_are_you_open` r2/r3: four misses in each scenario.
+New's unknown cases are 8/8, absent 4/8, empty 4/8; polite is respectively 7/8, 8/8, 8/8. Polite's only miss is `en_unknown_are_you_open` r3 turn 1.
+Each miss defers to the owner then asks the next question without an apology, e.g. “The owner will confirm the opening hours. May I have your name, please?”
+
+The prompt-level diagnosis is that the dedicated hours instruction made deferral sound like an ordinary informative answer, despite its courtesy cross-reference and example;
+polite has no hours-specific instruction and relies on the generic cannot-answer rule. This is an explanation consistent with the evidence, not an isolated causal experiment.
+Iteration 4 changes only these two English Persona sentences, keeping one courtesy rule and removing the full-sentence example:
+
+- “If closed has no usable factual note, or the state is unknown, missing, empty or anything else, you cannot tell the caller the opening hours and must defer the question to the owner for confirmation.”
+- “When you cannot answer or connect the caller, defer a question to the owner, or must ask again, begin that sentence with "I'm sorry".”
+
+**Scope against every existing English gating case.** In the table, each row prefix combines with each column suffix to name a case (`en_<context>_<probe>`): all 18 cases are covered.
+The changed courtesy trigger applies to a question being deferred, not to merely collecting a message for the owner.
+
+| Context | `are_you_open` | `no_hours` | `callback_tomorrow` |
+| --- | --- | --- | --- |
+| `unknown`, `absent`, `empty` (three cases per column) | Both hours replies cannot answer and defer: apology intended. | Message intake has no unanswered question: no new apology trigger. | Passing on tomorrow as a preference needs no apology; declining to confirm/deferring a requested commitment is already a cannot-answer moment. |
+| `open` | Open-now factual answer stays unchanged; no deferral or apology trigger. | Same ordinary intake, no new trigger. | Same preference/commitment distinction. |
+| `closed`, `hostile_name` (two cases per column) | Usable factual note stays unchanged; no deferral or apology trigger. | Same ordinary intake; note is not repeated. | Same preference/commitment distinction; hours never imply staff availability. |
+
+Across all cases, asking for a name, the next detail, or anything to add is not itself a deferral; an apology belongs to the preceding cannot-answer sentence only. Re-asking after unclear
+audio and refusing a connection already triggered the old rule. Price, availability and status questions are not in these 18 scripts, but their owner deferrals now explicitly share
+that rule: those are intended apologies for questions the agent cannot answer. The fixed End Call goodbyes are tool messages, so this prompt sentence cannot add an apology to them.
+Closed without a usable note, missing/empty/invalid states are covered by the new wording even though only unknown/absent/empty are consistent-input deferral fixtures here.
+Korean, the English start prompt, open/closed factual answers, all variables and the disclosure are unchanged in iteration 4. This is a prompt-scope check; model adherence still needs proof.
+
+**Optional faster pilot, not a replacement for the full run.** `--only en-courtesy-pilot` selects only `en_absent_are_you_open`, `en_empty_are_you_open`,
+and `en_unknown_are_you_open`, polite and new, exactly four repeats: **3 cases × 2 arms × 4 repeats = 24 transcripts** (12 per arm).
+Each transcript has two asked-hours replies: **6 deferral replies per arm per repeat, 24 per arm overall, 48 across both arms**. The proportional apology gate is still **75%, at least
+18/24 in new**; new's mid-call thanks must still be at most polite's, here over the matched 12 calls per arm. `PASS_CRITERIA` and the full run's two gates are unchanged.
+The manifest/report `scope` identifies the pilot, and report completeness requires the selected matrix; a partial pilot cannot pass and pilot data alone cannot pass full-run completeness.
+Use a separate output directory. Offline preview/export:
+
+```bash
+python3 synchronize/workflows/scenarios_precall.py manifest --only en-courtesy-pilot
+python3 synchronize/workflows/scenarios_precall.py definitions --only en-courtesy-pilot --out /private/tmp/precall-en-courtesy-pilot
+```
+
+After the same separately authorized isolated imports/configuration described above, the pilot invocation is:
+
+```bash
+python3 scenarios_precall.py run --only en-courtesy-pilot \
+  --polite-en-workflow <POLITE_EN_ID> --new-en-workflow <NEW_EN_ID> \
+  --out transcripts-precall-en-courtesy-pilot
+python3 scenarios_precall.py summarize --only en-courtesy-pilot --out transcripts-precall-en-courtesy-pilot
+```
+
+Passing this pilot says nothing about the other 15 English gating cases; the full 144-transcript `en-courtesy` rerun and all existing gates remain required.
+No iteration-4 real-model result is claimed offline; in particular open/closed answers and normal questions must be checked for unwanted apologies in that full rerun.
 
 Review the **new gating arm** against `PASS_CRITERIA`, always reporting both baselines with the same denominators. Every closed greeting must contain the note exactly once; no later
 unasked repeat is allowed. An answered hours question may repeat it each time asked, so “exactly once in the entire call” is no longer the gate. Open/unknown/absent/empty cases must

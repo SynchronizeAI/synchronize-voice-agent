@@ -84,9 +84,25 @@ class PrecallProofTests(unittest.TestCase):
         self.assertTrue(report["complete_matched_matrix"])
         self.assertEqual(report["arms"]["new"]["apology_openers"], 18)
         self.assertTrue(all(report["gates"].values()))
+        pilot_arms, pilot_languages = scenarios.selection("en-courtesy-pilot")
+        pilot_ids = {s["id"] for s in pilot_languages["en"]}
+        self.assertEqual(pilot_arms, ("polite", "new"))
+        self.assertEqual(set(pilot_languages), {"en"})
+        self.assertEqual(pilot_ids, {f"en_{state}_are_you_open" for state in ("unknown", "absent", "empty")})
+        pilot_rows = [r for r in rows if r["scenario"]["id"] in pilot_ids]
+        self.assertEqual(len(pilot_rows), 24)
+        pilot = scenarios.courtesy_report(pilot_rows, 4, "en-courtesy-pilot")
+        self.assertEqual(pilot["scope"], "en-courtesy-pilot")
+        self.assertEqual(pilot["arms"]["new"]["deferral_replies"], 24)
+        self.assertEqual(pilot["arms"]["new"]["apology_openers"], 18)
+        self.assertTrue(all(pilot["gates"].values()))
+        self.assertFalse(any(scenarios.courtesy_report(pilot_rows, 4)["gates"].values()))
+        for invalid in (pilot_rows[:-1], pilot_rows + [pilot_rows[0]]):
+            self.assertFalse(any(scenarios.courtesy_report(invalid, 4, "en-courtesy-pilot")["gates"].values()))
         target = next(r for r in rows if r["arm"] == "new" and r["scenario"]["id"] == "en_unknown_are_you_open")
         target["turns"][0]["assistant_message"]["text"] = "The owner will confirm the opening hours."
         self.assertFalse(scenarios.courtesy_report(rows, 4)["gates"]["apology_openers_at_least_9_per_12"])
+        self.assertFalse(scenarios.courtesy_report(pilot_rows, 4, "en-courtesy-pilot")["gates"]["apology_openers_at_least_9_per_12"])
         target["turns"][1]["assistant_message"]["text"] = "Thanks, Alex."
         self.assertFalse(scenarios.courtesy_report(rows, 4)["gates"]["midcall_thanks_at_most_polite"])
         # Matched baseline thanks allows one turn; two in one call must fail.

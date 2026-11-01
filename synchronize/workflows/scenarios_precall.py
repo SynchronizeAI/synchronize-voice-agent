@@ -100,8 +100,11 @@ KO = build_scenarios("ko")
 
 
 def selection(only):
-    if only == "en-courtesy":
-        return ("polite", "new"), {"en": [s for s in EN if s["gating"]]}
+    if only in ("en-courtesy", "en-courtesy-pilot"):
+        cases = [s for s in EN if s["gating"]]
+        if only == "en-courtesy-pilot":
+            cases = [s for s in cases if s["probe"] == "are_you_open" and s["expected"]["hours_answer"] == "owner_confirms"]
+        return ("polite", "new"), {"en": cases}
     return tuple(ARM_REFS), {"en": EN, "ko": KO}
 
 
@@ -126,9 +129,9 @@ def english_courtesy_metrics(row):
     return {"deferrals": deferrals, "midcall_thanks": thanks}
 
 
-def courtesy_report(rows, repeats):
+def courtesy_report(rows, repeats, only=None):
     """Fail closed on incomplete/mismatched English gating evidence."""
-    cases = [s for s in EN if s["gating"]]
+    cases = [s for s in selection(only)[1]["en"] if s["gating"]]
     expected = {(arm, s["id"], rep) for arm in ("polite", "new")
                 for s in cases for rep in range(1, repeats + 1)}
     selected = [r for r in rows if r["lang"] == "en" and r["scenario"]["gating"]
@@ -148,7 +151,7 @@ def courtesy_report(rows, repeats):
                      "evidence": evidence}
     new = arms["new"]
     expected_deferrals = 6 * repeats  # three contexts, two asked-hours turns
-    return {"complete_matched_matrix": complete, "arms": arms,
+    return {"scope": only or "full", "complete_matched_matrix": complete, "arms": arms,
             "gates": {
                 "apology_openers_at_least_9_per_12": bool(complete and
                     new["deferral_replies"] == expected_deferrals and
@@ -271,7 +274,7 @@ def run(args):
                     path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
                     print(path.name, result.get("error") or output["completion"])
     (args.out / "completion-report.json").write_text(json.dumps(completion_report(rows), ensure_ascii=False, indent=2) + "\n")
-    (args.out / "courtesy-report.json").write_text(json.dumps(courtesy_report(rows, args.repeats), ensure_ascii=False, indent=2) + "\n")
+    (args.out / "courtesy-report.json").write_text(json.dumps(courtesy_report(rows, args.repeats, args.only), ensure_ascii=False, indent=2) + "\n")
 
 
 if __name__ == "__main__":
@@ -280,17 +283,17 @@ if __name__ == "__main__":
     for arm in ARM_REFS:
         for lang in ("en", "ko"):
             parser.add_argument(f"--{arm}-{lang}-workflow", type=int)
-    parser.add_argument("--only", choices=("en-courtesy",))
-    parser.add_argument("--repeats", type=int, help="default: 2 full matrix; 4 for --only en-courtesy")
+    parser.add_argument("--only", choices=("en-courtesy", "en-courtesy-pilot"))
+    parser.add_argument("--repeats", type=int, help="default: 2 full matrix; 4 for either English courtesy selector")
     parser.add_argument("--out", type=Path, default=Path("transcripts-precall"))
     args = parser.parse_args()
     if args.repeats is None:
-        args.repeats = 4 if args.only == "en-courtesy" else 2
-    if args.repeats < 1 or (args.only == "en-courtesy" and args.repeats != 4):
-        parser.error("positive repeat count required; --only en-courtesy requires exactly 4 repeats")
+        args.repeats = 4 if args.only else 2
+    if args.repeats < 1 or (args.only and args.repeats != 4):
+        parser.error("positive repeat count required; English courtesy selectors require exactly 4 repeats")
     arms, languages = selection(args.only)
     if args.command == "manifest":
-        print(json.dumps({"arm_refs": {a: ARM_REFS[a] for a in arms}, "repeats": args.repeats,
+        print(json.dumps({"scope": args.only or "full", "arm_refs": {a: ARM_REFS[a] for a in arms}, "repeats": args.repeats,
                           "transcripts": sum(map(len, languages.values())) * len(arms) * args.repeats,
                           "pass_criteria": PASS_CRITERIA, **languages}, ensure_ascii=False, indent=2))
     elif args.command == "definitions":
@@ -302,7 +305,7 @@ if __name__ == "__main__":
         rows = [json.loads(p.read_text()) for p in sorted(args.out.glob("*.json"))]
         rows = [r for r in rows if "completion" in r]
         print(json.dumps({"completion": completion_report(rows),
-                          "courtesy": courtesy_report(rows, args.repeats)}, ensure_ascii=False, indent=2))
+                          "courtesy": courtesy_report(rows, args.repeats, args.only)}, ensure_ascii=False, indent=2))
     else:
         ids = [getattr(args, f"{arm}_{lang}_workflow") for arm in arms for lang in languages]
         if any(wid is None or wid < 1 for wid in ids) or len(set(ids)) != len(ids):
