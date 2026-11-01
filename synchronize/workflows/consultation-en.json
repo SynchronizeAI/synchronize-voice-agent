@@ -57,7 +57,10 @@
           "tool_uuids": [
             "5f29e07c-6db9-4156-9631-74621e53a830",
             "a977af0b-b753-44a7-aef0-8ab2a85c8835"
-          ]
+          ],
+          "pre_call_fetch_mode": "inbound",
+          "pre_call_fetch_url": "https://synchronize.example.invalid/api/voice/pre-call",
+          "pre_call_fetch_credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
         }
       },
       {

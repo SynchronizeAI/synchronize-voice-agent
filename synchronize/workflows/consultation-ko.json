@@ -53,7 +53,10 @@
               "type": "string",
               "prompt": "확인할 내용을 고객이 쓴 말로 가리키는 8자 이내의 이름표. 남은 일이 없으면 비워 둬요."
             }
-          ]
+          ],
+          "pre_call_fetch_mode": "inbound",
+          "pre_call_fetch_url": "https://synchronize.example.invalid/api/voice/pre-call",
+          "pre_call_fetch_credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
         }
       },
       {

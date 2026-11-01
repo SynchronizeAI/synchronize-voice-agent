@@ -1,7 +1,7 @@
 # Consultation workflows
 
 The AI phone consultation, ready to load: `consultation-ko.json` and `consultation-en.json` are the body of
-`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the two dispositions and the turn strategy; add `"dictionary": "<business name>"` per customer, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or every call shows as needing follow-up. Use the pair that matches the customer's language. `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
+`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the two dispositions and the turn strategy; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or every call shows as needing follow-up. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
 
 Korean is three steps, the shape Dograh's own guide gives (one phase per node, a specific edge condition per exit). The start node plays the greeting, takes the
 reason with a short "네,", and asks the name. The Detail node asks one open question that continues from what the caller said (a bare "anything else?" ended
@@ -42,7 +42,7 @@ lines as a safeguard. Real calls of this shape are not measured yet.
 
 Speech recognition mishears the business name unless it is given as a keyterm: on a recorded call Deepgram heard `영혼솔루션` without it and
 `영훈솔루션` with it. Dograh reads the workflow field `dictionary` (comma-separated, once per workflow, no call variables), so set it to the
-business name on each customer's copy of the workflow.
+comma-separated names of the businesses served by this deployment on the shared workflow; update it when adding a business. It cannot vary per call.
 
 Both are an office front desk, not only a consultation line: the caller may be a new inquiry, an existing customer, a partner or
 vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act Art. 31 and MSIT guideline, for a voice that can pass as human); the English
@@ -51,12 +51,23 @@ the legal basis is consent; the customer's privacy policy must name the processo
 about price, schedule, feasibility or the status of existing work. `consultation-ko.json` and `consultation-en.json` are the same product prompt in two languages; neither names a business or an
 industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
 in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
-context variables apply to test calls only), so there are two ways to supply it. For the first customers, copy the workflow and replace
-the expression with the literal name in Dograh's workflow editor. For many customers, set Pre-Call Data Fetch on the start node: Dograh POSTs the
-called number to a Synchronize endpoint and merges the returned `initial_context` (`business_name`) into the call; that endpoint is not
-built yet. Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
-that variable. Who the caller is goes in the first line of `facts` (`구분:` or
+context variables apply to test calls only). Both start nodes now use inbound-only Pre-Call Data Fetch: Synchronize's `POST /api/voice/pre-call`
+uses the called number and returns `initial_context` with `business_name`, `hours_state` (`open`, `closed`, `unknown`), `hours_note`, and `language` (`en`, `ko`), or `{}` for an unknown number.
+Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
+these four variables. Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
 A `mapped_call_disposition` other than `follow_up` or `done`, such as `user_hangup`, means the call was not classified.
 Edge labels stay ASCII: Dograh names the LLM function from them.
+
+## Deployment values and authentication
+
+Set `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend to a shared secret. In the same Dograh organization as the workflow, open **Credentials**, create a credential
+with type **Custom Header**, set **Header Name** to `X-Dograh-Secret` and **Header Value** to that exact secret, and save it. Copy its UUID (the credential reference, never the secret)
+into node `1` → `data.pre_call_fetch_credential_uuid`, replacing `<DOGRAH_WEBHOOK_CREDENTIAL_UUID>` in each deployment JSON. The API credential type is `custom_header`,
+with `credential_data.header_name` and `credential_data.header_value` (see `api/utils/credential_auth.py`). Keep secrets out of workflow JSON and git.
+Replace `https://synchronize.example.invalid` in node `1` → `data.pre_call_fetch_url` with this deployment's public Synchronize backend origin, preserving `/api/voice/pre-call`.
+This is an operator substitution before import, not a call variable; `.invalid` deliberately cannot name a deployed service. In the editor, Start Call → Advanced Settings must show
+**Inbound calls only**, that URL, and the saved credential under Authentication. Dograh sends JSON with `call_inbound.to_number` and `call_inbound.workflow_run_id`;
+Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
+Dograh continues with earlier context and the generic greeting fallback (`docs/voice-agent/pre-call-data-fetch.mdx`).
