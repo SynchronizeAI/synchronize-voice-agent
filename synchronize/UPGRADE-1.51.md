@@ -96,7 +96,8 @@ Python dependencies moved (Pipecat 1.15, `tuner-pipecat-sdk` 0.3.0, `jsonschema`
   A silent caller is now hung up about 6 s after the greeting instead of about 20 s. Not measured on our lines.
 - **Greeting interruption (#911).** New Start Call fields `allow_greeting_interrupt` (default true) and `greeting_interrupt_min_words`
   (default 2, cascade only) (`api/services/workflow/dto.py:368-392`). The defaults equal 1.49's behaviour (1.49
-  `api/services/pipecat/greeting.py`, two words while the greeting is pending), so the templates leave them out.
+  `api/services/pipecat/greeting.py`, two words while the greeting is pending), so the Korean template leaves them out; the English
+  one sets `allow_greeting_interrupt` false (`workflows/README.md`, Kinds of call, visits, recording and language).
 - **Call opening (#913, #950).** One opening path for all transports; early caller speech is kept.
 - **End Call goodbye across a schema change.** Each api version reads only its own tool-message shape: 1.51 plays only
   `definition.messages` (`api/services/workflow/pipecat_engine_custom_tools.py:116-125`, `tool_messages.py:22-28`), 1.49 only
