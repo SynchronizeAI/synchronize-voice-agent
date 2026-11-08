@@ -1,0 +1,45 @@
+{
+  "placeholder_uuid": "00000000-0000-4000-8000-000000000102",
+  "tool": {
+    "name": "lookup_caller_work_en",
+    "description": "Record lookup: finds the existing work of the customer registered to this phone number. Use it when the caller asks how existing work, a quote or a visit is going. In the result, known says whether a customer record was found, name is the name on the record, open_work is open work with its due date, upcoming_visits are visits from today on, and estimates are estimates with their status. It holds only facts from the record.",
+    "category": "http_api",
+    "icon": "globe",
+    "icon_color": "#3B82F6",
+    "definition": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "type": "text",
+          "text": "Let me check.",
+          "event": "start"
+        },
+        {
+          "type": "text",
+          "text": "One moment, please.",
+          "event": "delayed",
+          "after_ms": 2500
+        }
+      ],
+      "type": "http_api",
+      "config": {
+        "method": "POST",
+        "url": "https://synchronize.example.invalid/api/voice/tools/caller-work",
+        "headers": null,
+        "credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>",
+        "parameters": null,
+        "preset_parameters": [
+          {
+            "name": "workflow_run_id",
+            "type": "string",
+            "value_template": "{{initial_context.workflow_run_id}}",
+            "required": true
+          }
+        ],
+        "timeout_ms": 5000,
+        "body_template": null,
+        "body_format": "json"
+      }
+    }
+  }
+}

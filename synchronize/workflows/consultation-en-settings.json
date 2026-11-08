@@ -2,12 +2,36 @@
   "workflow_configurations": {
     "call_dispositions": [
       {
-        "code": "follow_up",
-        "description": "The owner still has to confirm something or get back to the caller: the caller asked about price, availability, timing or whether something is possible, or asked to be called back."
+        "code": "quote_request",
+        "description": "The caller wants a price or a quote for new work, or asked for an estimate to be sent. If they only asked how an estimate they already have is going, use message."
+      },
+      {
+        "code": "booking_request",
+        "description": "The caller wants to book, move or cancel a visit, a measurement or an appointment, including a visit needed to give a quote."
+      },
+      {
+        "code": "urgent",
+        "description": "Something is being damaged or is unsafe right now and needs attention today, such as a leak, fire, electrical, gas or structural problem. Choose this before any other outcome that also fits."
+      },
+      {
+        "code": "complaint",
+        "description": "The caller complained or was upset about the work, a delay, the service or a charge, and it is not an urgent hazard."
+      },
+      {
+        "code": "message",
+        "description": "The owner still has something to check or a call to return, but no outcome above fits: a question about how existing work or an estimate is going, a partner or supplier passing on a message, or a request to be called back."
       },
       {
         "code": "done",
-        "description": "The call needed nothing from the owner: nothing to confirm, nothing to return, such as a wrong number or a caller who only wanted to leave a thank-you."
+        "description": "Nothing is left for the owner to do: the caller only needed the information they got or only said thanks, and nobody needs to call back."
+      },
+      {
+        "code": "spam",
+        "description": "A sales, advertising, survey or automated call, including someone trying to sell the business a product or service."
+      },
+      {
+        "code": "wrong_number",
+        "description": "The caller meant to reach someone else, or said they dialed by mistake and had nothing to pass on."
       }
     ],
     "turn_stop_strategy": "turn_analyzer",
