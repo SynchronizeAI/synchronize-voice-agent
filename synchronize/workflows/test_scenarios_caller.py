@@ -121,9 +121,10 @@ class Handler(BaseHTTPRequestHandler):
             name = session["initial_context"].get("caller_name")
             if len(session["lines"]) == 1 and name:
                 reply = f"네, 혹시 {name}님 맞으세요?"
-            elif len(session["lines"]) == 2 and (
+            elif len(session["lines"]) == 2 and name and (
                 "견적 어떻게" in session["lines"][0] or "How's my quote" in session["lines"][0]
             ):
+                # Only a caller who confirmed the record's name is looked up.
                 tool = f"lookup_caller_work_{'ko' if '견적' in session['lines'][0] else 'en'}"
                 events.append({"type": "tool_call_started", "payload": {"function_name": tool}})
                 events.append({"type": "tool_call_result", "payload": {"function_name": tool, "result": {"status": "success", "data": {"known": False}}}})
@@ -220,6 +221,8 @@ class CallerScenariosTest(unittest.TestCase):
                 self.assertEqual(set(cases[case]["initial_context"]), {"business_name", "caller_name"})
             self.assertIs(cases["known_caller_no_detail"]["expected"]["tool_called"], False)
             self.assertEqual(set(cases["unknown_caller_quote_status"]["initial_context"]), {"business_name"})
+            # No record name, nobody to confirm: the lookup must not run.
+            self.assertIs(cases["unknown_caller_quote_status"]["expected"]["tool_called"], False)
         self.assertEqual(self.fake.calls, [])
 
     def test_test_workflow_has_the_live_tool_and_no_production_side_effects(self):
@@ -246,6 +249,7 @@ class CallerScenariosTest(unittest.TestCase):
             for check in ("name_in_first_reply", "customer_name_confirmed"):
                 self.assertEqual(cases[case]["checks"][check], 1, (case, check))
         self.assertEqual(cases["known_caller_no_detail"]["checks"]["tool_not_called"], 1)
+        self.assertEqual(cases["unknown_caller_quote_status"]["checks"]["tool_not_called"], 1)
         self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_called"], 1)
         self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_after_confirmation"], 1)
         self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"booking_request": 1})

@@ -2,7 +2,7 @@
   "placeholder_uuid": "00000000-0000-4000-8000-000000000102",
   "tool": {
     "name": "lookup_caller_work_en",
-    "description": "Record lookup: finds the record of the customer registered to this phone number. Use it when the caller asks how existing work, a quote or a visit is going. The result holds only this: known says whether a customer record was found, name is the name on the record, open_items.count is how many open items they have, open_items.next_due is the earliest due date among them (null when none has one), and upcoming_visits lists the dates of visits from today on. You may tell the caller that count and those dates; take a message for anything else.",
+    "description": "Record lookup: finds the record of the customer registered to this phone number. Use it when a caller who confirmed the name on the caller record asks how existing work, a quote or a visit is going. The result holds only this: known says whether a customer record was found, name is the name on the record, open_items.count is how many open items they have, open_items.next_due is the earliest due date among them (null when none has one), and upcoming_visits lists the dates of visits from today on. You may tell that caller the count and those dates; take a message for anything else.",
     "category": "http_api",
     "icon": "globe",
     "icon_color": "#3B82F6",

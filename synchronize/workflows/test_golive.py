@@ -1583,6 +1583,19 @@ class GoLiveTests(unittest.TestCase):
                     ):
                         self.assertIn(name, ("business_name", "caller_name"), (node["id"], field))
                         self.assertTrue(fallback.strip(), (node["id"], field, name))
+            # One record rule: the tool's use and relay sentences name the same confirmed caller
+            # as the Persona's exception, so no instruction the model reads relays unconditionally.
+            confirmed = {"ko": "기록의 이름이 맞다고 확인한 본인", "en": "a caller who confirmed the name on the caller record"}[lang]
+            persona = golive.nodes(definition)["4"]["data"]["prompt"]
+            self.assertIn(confirmed.removeprefix("a "), persona)
+            use = spec["tool"]["description"].split(". ")[1]
+            self.assertIn(confirmed, use)
+            # Dograh's per-node QA renders only these keys (qa/analysis.py:208-215); any other
+            # placeholder would reach the judge empty.
+            (qa,) = [n["data"]["qa_system_prompt"] for n in definition["nodes"] if n["type"] == "qa"]
+            self.assertEqual(
+                set(re.findall(r"\{\{\s*(\w+)", qa)), {"previous_conversation_summary", "metrics"}
+            )
 
     @unittest.skipUnless(
         importlib.util.find_spec("pydantic"), "pydantic is needed to load Dograh's schemas"

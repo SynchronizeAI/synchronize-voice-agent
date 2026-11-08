@@ -86,11 +86,16 @@ CRITERIA = {
     ],
     "unknown_caller_quote_status": [
         "OBJECTIVE: the opening is today's generic greeting with the business name.",
+        "OBJECTIVE: the lookup tool is not called (no name on a caller record, so nobody confirmed one).",
         "JUDGED: the agent asks for the caller's name (no caller record), states no status from memory and promises nothing.",
     ],
 }
 # Whether the lookup must run (True) or must not (False); None: either is fine.
-TOOL_CALLED = {"known_caller_quote_status": True, "known_caller_no_detail": False}
+TOOL_CALLED = {
+    "known_caller_quote_status": True,
+    "known_caller_no_detail": False,
+    "unknown_caller_quote_status": False,
+}
 for _case, (_codes, _urgent) in EXPECTED_OUTCOME.items():
     CRITERIA[_case] = [
         f"OBJECTIVE: the call is classified {' or '.join(_codes)} (gathered_context.call_disposition).",

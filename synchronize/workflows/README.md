@@ -74,10 +74,12 @@ names are free text that can carry amounts, names and private notes, and caller 
 prompts. The greeting does not change for a known caller: Dograh's renderer has no conditional text, so a name in the greeting would leave a broken sentence
 for an unknown caller, and a pre-call `greeting_override` is read before the fetch is merged (`../UPGRADE-1.51.md`). A known caller is asked to confirm that
 name instead of giving one (Korean edge `name_given` counts the confirmation), and `customer_name` takes a confirmed name as well as a spoken one (the
-post-call extraction reads only the conversation, never `initial_context`, and Synchronize names the call by `customer_name`). The Persona states the record
-rule once, under `하지 않는 것` / `What you never do`, in one wording for both languages: what a lookup in this call shows may be told, as what the record
-shows, only to `기록의 이름이 맞다고 확인한 본인` / a caller who `confirmed the name on the caller record`. A record with no name has no name to confirm, so
-nothing is told. The agent never brings up open work by itself; open work comes only from the lookup.
+post-call extraction reads only the conversation, never `initial_context`, and Synchronize names the call by `customer_name`). The record rule has one
+wording in both languages, `기록의 이름이 맞다고 확인한 본인` / a caller who `confirmed the name on the caller record`, and every place the agent reads about
+the lookup names that same person: the Persona's exception under `하지 않는 것` / `What you never do` (what a lookup in this call shows may be told, as what the
+record shows, only to that caller), and the tool description's when-to-use sentence (the lookup is for that caller's question) and relay clause (the count
+and the dates may be told to that caller). A record with no name has no name to confirm, so nothing is looked up or told. The agent never brings up open
+work by itself; open work comes only from the lookup.
 
 During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under
 `tool`, written with every field Dograh stores so the read-back is exact). Its `body_template` is `{"workflow_run_id": "{{initial_context.workflow_run_id}}"}`,
@@ -92,22 +94,32 @@ model can set (`api/utils/template_renderer.py:192-196`), and the empty preset r
 runs 1.51's own `execute_http_tool` offline on both committed tools to show it, and go-live refuses a tool template without that body template. The tool posts
 to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom Header credential and times out after 5000 ms. The answer holds only
 `known`, `name`, `open_items` (`count` of open items and `next_due`, the earliest due date or null) and `upcoming_visits` (the dates of visits from today on):
-no task text, project or site names, estimates or amounts (amendment A1 §2). The tool description says exactly that, and that the agent may relay the count
-and the dates and takes a message for anything else. Dograh says `확인해 보겠습니다.` / "Let me check." when the lookup starts and `잠시만 기다려 주세요.` /
-"One moment, please." if the answer takes over 2.5 s (`api/services/workflow/tool_messages.py:97-124`). The Korean Detail line says the system speaks the first
-one, so the turn that calls the tool says nothing (English: "A turn is either speech or a tool call") and the caller does not hear it twice. The tool is on the
-Korean Detail node and on the English Reception node, where the prompt places it after step 1. The call reaches the Detail node after the name step also when
-the caller declines a name or gives another one (edge `name_given`), so only the Persona's record rule keeps a lookup result from a caller who did not confirm
-the name: a prompt rule, not structure, checked only by the runbook's test call 2 (its unconfirmed variant); a text-chat lookup answers `{"known": false}`.
+no task text, project or site names, estimates or amounts (amendment A1 §2). The tool description says exactly that, that the lookup is for a caller who
+confirmed the name on the caller record, that the count and the dates may be told to that caller, and that anything else is taken as a message. Dograh
+says `확인해 보겠습니다.` / "Let me check." when the lookup starts and `잠시만 기다려 주세요.` / "One moment, please." if the answer takes over 2.5 s
+(`api/services/workflow/tool_messages.py:97-124`). The Korean Detail line and the English Reception line say the phone system speaks the first one, so the
+turn that calls the tool says nothing (English also: the caller hears it from the system, never from the agent, so the step-1 answer does not say it
+either) and the caller does not hear it twice. The tool is on the Korean Detail node and on the English Reception node, where the prompt places it after step 1. The call reaches the Detail node after the name step also when
+the caller declines a name or gives another one (edge `name_given`), so only prompt text, not structure, keeps a lookup result from a caller who did not
+confirm the name: the tool description's when-to-use sentence keeps the lookup from running, and the Persona's record rule keeps a result from being told.
+The runbook's test call 2 (its unconfirmed variant) checks it live; the text-chat eval checks that an unknown caller's question runs no lookup (a text-chat
+lookup answers `{"known": false}`).
 When to use it lives only in the tool's description; the node line says only the order (look up before the node's question, ask that question on the next
 turn). Tools are organization objects referenced by UUID: the templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) /
 `…0102` (en), which `golive.py` replaces with the real tool's UUID; Dograh would silently drop the placeholder, and go-live refuses to publish it. Call QA
 cannot check that a relayed record is faithful: Dograh's QA transcript shows a lookup only as `[tool_call]: <name>` and never shows its result
 (`../UPGRADE-1.51.md`, Call QA transcript). `PROMISED_UNCONFIRMED` therefore keeps "stated or promised" for a price, schedule, availability, feasibility, the
 status of existing work, a contract or payment fact and a booked visit, and lets only a neutral "the record shows …" sentence about the count or the dates
-pass; faithfulness is checked only by the runbook's test call 2. Prompt text for this: the `전화한 분` / `Caller` name line, the role line naming the lookup,
-the record exception in `하지 않는 것` / `What you never do`, the confirm-the-name sentence in the start step, the confirmed-name clause of `customer_name`,
-the Detail / Reception lines on lookup order (Korean: and on the spoken start message), and the QA sentence. Only the text-chat evals below measure it.
+pass, and only after a `[tool_call]` line for the lookup and to a caller who confirmed the name on the caller record: since the record reaches the call only
+through the lookup, the same sentence with no lookup before it is invented. The Korean confirmation is in the Greeting node and the relay in Detail, and
+Dograh judges each node on its own transcript, so the QA prompt carries Dograh's `{{previous_conversation_summary}}`: Dograh writes that summary of the call
+before the node for every node after the first, whether the prompt uses it or not (`api/services/workflow/qa/analysis.py:196-215`), and its default QA
+prompt has the same section (`api/services/workflow/node_specs/constants.py:6-7`). `LONG_TURN` leaves out the fixed opening greeting: Dograh logs the
+greeting as a bot-text event under the start node (`api/services/pipecat/realtime_feedback_observer.py`, `log_greeting`), so the start node's QA reads it, and
+both greetings are three sentences. Faithfulness is checked only by the runbook's test call 2. Prompt text for this: the `전화한 분` / `Caller` name line,
+the role line naming the lookup, the record exception in `하지 않는 것` / `What you never do`, the tool description's use and relay sentences, the
+confirm-the-name sentence in the start step, the confirmed-name clause of `customer_name`, the Detail / Reception lines on lookup order and on the spoken
+start message, and the QA sentences. Only the text-chat evals below measure it.
 
 The settings carry six outcomes, each with a classifier description in the workflow's language: `quote_request` (new quote or price), `booking_request`
 (visit, measurement or appointment, including one needed for a quote), `message` (anything else the owner must check or return: the status of existing work,
@@ -245,7 +257,8 @@ This is the largest value Dograh's 32-bit `workflow_runs.id` column can hold, so
 so it would not exercise the lookup path. For the deliberately unknown positive ID, `Voice.owning_tenant` (`src/synchronize/voice.py`)
 maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}` without enqueueing a notice**. A lookup failure instead returns 503 and fails the probe.
 It then posts `{"workflow_run_id": 2147483647}` to `/api/voice/tools/caller-work`, a JSON integer as the tool's body template sends it, and expects 200
-`{"known": false}` (an unknown run) and 401/403 with the wrong secret.
+`{"known": false}` (an unknown run) and 401/403 with the wrong secret. Synchronize answers a body it refuses with the same 200 `{"known": false}`
+(`src/synchronize/web/voice_api.py`, `caller_work`), so this proves the route and its secret, not that the integer id is accepted: test call 2 proves that.
 Successful probe output is six status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
 call-ended correct secret `200`, call-ended wrong secret `401`/`403`, caller-work correct secret `200`, caller-work wrong secret `401`/`403`. A 404, 422 or 5xx at any route fails,
 so a runtime without the caller-work route stops the go-live before anything is wired.
@@ -265,7 +278,8 @@ tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, forma
 placeholder refusal and the caller-work probe. It also runs Dograh 1.51's own `execute_http_tool` (`custom_tool.py` and `template_renderer.py` from this
 checkout, checked against the tag's blob ids, with only the network, database and logging stubbed) on both committed lookup tools: a run id or
 `initial_context` the model supplies never reaches the request, a run context without its id sends nothing, and the pre-A1 preset-only shape does send the
-model's id. When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
+model's id. The contract test also checks that the tool's use sentence and the Persona name the same confirmed caller, and that the QA prompt uses only
+placeholders Dograh's per-node QA fills (`previous_conversation_summary`, `metrics`). When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
 Dograh schemas (`api/schemas/tool.py`, `api/schemas/workflow_configurations.py`, identical to the `dograh-v1.51.0` tag).
 No live reachability, deployed image/API equivalence, runtime redeployment, call audio or authenticated real completion is established offline.
 
@@ -306,14 +320,14 @@ For any later authorized model proof, use isolated test workflows and explicit `
 `scenarios_caller.py` runs nine cases per language through the text-chat API: a known caller greeted by name, a known caller who gives no detail
 (`여쭤볼 게 있어서 전화드렸어요.` / "I'm calling with a question.": after confirming, the agent asks its one open question and calls no lookup, since the caller
 never asked about existing work), a known caller asking `견적 어떻게 됐어요?` / "How's my quote coming along?" (the lookup tool is called, the result is relayed
-without promises), the same question from an unknown caller (today's greeting), and the outcome of a quote request, an urgent leak, a complaint, a sales call
-and a wrong number. A known contact with no name gets no `caller_name` from the pre-call, so in text chat it is the unknown caller. `manifest` (offline)
+without promises), the same question from an unknown caller (today's greeting, and no lookup: there is no record name to confirm), and the outcome of a
+quote request, an urgent leak, a complaint, a sales call and a wrong number. A known contact with no name gets no `caller_name` from the pre-call, so in text chat it is the unknown caller. `manifest` (offline)
 prints every case and its criteria. `run` builds one isolated test workflow from this checkout's committed templates (`HEAD`) with the live lookup tool, the
 live line's model configuration and the template settings; it removes the pre-call fetch, the completion webhook and the QA node, archives the test workflow
 at the end, and never touches the live workflow beyond reading its model configuration. It scores the objective checks: the opening text; for a known caller
-the name in the first reply and `customer_name` equal to the confirmed name; the lookup called, never before the confirmation line, when the caller asks
-about a quote, and not called when they never ask; for each outcome case the code (the leak may be `booking_request` or `message`, a complaint is
-`message`) and the `urgent` flag (true only for the leak). It writes every transcript with a review block for the judged criteria (no promise, no re-asked
+the name in the first reply and `customer_name` equal to the confirmed name; the lookup called, never before the confirmation line, when a known caller asks
+about a quote, and not called when they never ask or when the caller is unknown; for each outcome case the code (the leak may be `booking_request` or
+`message`, a complaint is `message`) and the `urgent` flag (true only for the leak). It writes every transcript with a review block for the judged criteria (no promise, no re-asked
 name, no open matter named by the agent). `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`).
 A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the lookup case measures that the tool is called and
 that the agent relays "nothing found, the owner will check" without promising; relaying real records is checked on the second test call of the runbook.
