@@ -25,8 +25,7 @@ Shared reception uses Synchronize's `POST /api/voice/pre-call?language=<the line
 business name, its service area, pricing policy and today's hours, whether it is open now and when it next opens; the hours are worded in the
 language the URL names) and the known caller's name, an HTTP API
 tool for `POST /api/voice/tools/caller-work` (during the call: the caller's next visit days, already in spoken form, for a caller who
-confirmed the name on the record), on the English line a Transfer Call tool whose resolver is `POST /api/voice/tools/transfer` (attached only
-by `golive.py --with-transfer`: first to a duplicate of the workflow for the runbook's step 9 gate, then to the line once the gate passed), and a
+confirmed the name on the record), and a
 completion Webhook node for `POST /api/voice/call-ended`. All of them authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
 Custom Header credential, never the workflow JSON. Deployment URL/credential substitutions, failure/retry behavior and the separate real-model proof are in
 `workflows/README.md`. Dograh renders the run id as text and adds `call_disposition` (one of six outcomes, `workflows/README.md`); Synchronize's receiver accepts that body as it is.

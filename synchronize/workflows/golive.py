@@ -4,11 +4,7 @@ Successor to the proof workspace's deploy_live.py: the same exact-once line/word
 merge, with local git refs, explicit targets, credential wiring and rollback.
 One run also creates or updates the caller-work HTTP tool (by its unique name),
 resolves its UUID into the nodes and applies the template's call dispositions,
-and only those, to the workflow settings. The English transfer tool is handled the
-same way, but only with --with-transfer: without it go-live neither attaches,
-updates nor removes it. The go-live gate (runbook step 9) first wires it on a
-Dograh duplicate of the English workflow that only a test number reaches
-(--copy-of 3), so no customer's call can be transferred before the gate passes.
+and only those, to the workflow settings.
 Standard library only. Nothing contacts Railway or fetches git refs.
 """
 
@@ -46,20 +42,8 @@ PLACEHOLDER_UUID_PREFIX = "00000000-0000-4000-8000-"
 PLACEHOLDER_ORIGIN = "https://synchronize.example.invalid"
 PRE_CALL_ROUTE = "/api/voice/pre-call"
 TOOL_ROUTE = "/api/voice/tools/caller-work"
-TRANSFER_ROUTE = "/api/voice/tools/transfer"
-# Where each tool category posts, and the field holding that URL and the credential (wiring()).
-ROUTES = {"http_api": TOOL_ROUTE, "transfer_call": TRANSFER_ROUTE}
-ROUTE_LABELS = {"http_api": "caller-work", "transfer_call": "transfer"}
-CATEGORY_LABELS = {"http_api": "HTTP API", "transfer_call": "Transfer Call"}
-# Ring time for the owner's phone, sent as the Twilio call's Timeout (twilio/provider.py:667). Always set:
-# Dograh's default is 30 s (schemas/tool.py:403-404) and Twilio's own for a REST call 60 s, both past the
-# 20-25 s after which US carriers usually hand an unanswered cell call to voicemail, which 1.51 would count
-# as answered (routes/telephony.py:1225-1233, no machine detection). 18 s ends before that.
-TRANSFER_TIMEOUT = 18
-TRANSFER_DISPOSITION = "transferred"
-TRANSFER_REASONS = ("person", "urgent")
 TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definition")
-# scenarios_caller.py gives every tool it creates (the failing lookup copy, the transfer copy) this icon. A copy keeps the
+# scenarios_caller.py gives every tool it creates (the failing lookup copy) this icon. A copy keeps the
 # live tool's name, because that name is the function the model calls; the icon is the one field neither the model
 # (custom_tool.py:156 builds the function from name and description) nor Dograh's UI (it draws a tool's icon from its
 # category, ui/src/app/tools/config.tsx) reads, so the mark changes nothing a call does. Go-live never takes a marked
@@ -273,17 +257,9 @@ def settings_template(ref, lang):
     return git_file(ref, f"consultation-{lang}-settings.json")["workflow_configurations"]
 
 
-def wiring(tool):
-    """The part of a tool definition holding go-live's wiring, the runtime URL and credential:
-    the config of an HTTP API tool, the resolver of a Transfer Call tool (None when it has none)."""
-    config = tool["definition"].get("config")
-    if not isinstance(config, dict):
-        return None
-    return config.get("resolver") if tool.get("category") == "transfer_call" else config
-
-
-def _tool_template(ref, name, category, message):
-    spec = git_file(ref, name, optional=True)
+def tool_spec(ref, lang):
+    """The caller-work HTTP tool at a ref, or None for refs from before the tool."""
+    spec = git_file(ref, f"tool-lookup-caller-work-{lang}.json", optional=True)
     if spec is None:
         return None
     placeholder = str(UUID(spec["placeholder_uuid"]))
@@ -292,73 +268,15 @@ def _tool_template(ref, name, category, message):
         "Tool placeholder_uuid must be a reserved placeholder UUID",
     )
     tool = spec["tool"]
-    target = wiring(tool) if tool["category"] == category else None
+    config = tool["definition"]["config"]
     require(
-        tool["category"] == tool["definition"]["type"] == category
-        and isinstance(target, dict)
-        and target["url"] == PLACEHOLDER_ORIGIN + ROUTES[category]
-        and target["credential_uuid"] == "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
+        tool["category"] == tool["definition"]["type"] == "http_api"
+        and config["url"] == PLACEHOLDER_ORIGIN + TOOL_ROUTE
+        and config["credential_uuid"] == "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
         and set(tool) == set(TOOL_FIELDS),
-        message,
-    )
-    return {"placeholder_uuid": placeholder, "tool": tool}
-
-
-def tool_spec(ref, lang):
-    """The caller-work HTTP tool at a ref, or None for refs from before the tool."""
-    return _tool_template(
-        ref,
-        f"tool-lookup-caller-work-{lang}.json",
-        "http_api",
         "Tool template must be an HTTP API tool on the placeholder caller-work route",
     )
-
-
-def transfer_spec(ref, lang):
-    """The transfer tool at a ref: English only (live transfer is a US-line feature); None otherwise."""
-    return _tool_template(
-        ref,
-        f"tool-transfer-{lang}.json",
-        "transfer_call",
-        "Transfer template must be a Transfer Call tool whose resolver posts to the placeholder transfer route",
-    )
-
-
-def check_transfer(spec):
-    """The transfer shape go-live publishes: the destination decided by Synchronize's resolver for this
-    run only, the reason the model gives, an explicit ring time and the outcome a connected call records.
-
-    The run id is a preset: at 1.51 the resolver body is the model's arguments with the presets laid over
-    them (transfer_resolver.py:260-273), and the preset renders from the run's own context, which the
-    model's arguments never enter, so the model cannot name another run.
-    """
-    config = spec["tool"]["definition"]["config"]
-    resolver = config["resolver"]
-    reasons = resolver.get("parameters") or []
-    require(
-        config.get("destination_source") == "dynamic"
-        and config.get("timeout") == TRANSFER_TIMEOUT
-        and config.get("call_disposition") == TRANSFER_DISPOSITION
-        and config.get("introduction_enabled") is True
-        and not config.get("parameters")
-        and not config.get("destination")
-        and resolver.get("preset_parameters") == RUN_PRESET
-        and [(p.get("name"), p.get("type"), p.get("required")) for p in reasons]
-        == [("reason", "string", True)]
-        and not resolver.get("headers"),
-        "Transfer template must resolve by HTTP with only the run id preset and the reason, an 18 s ring, "
-        "the introduction and the transferred outcome",
-    )
-
-
-def drop_tool_refs(definition, placeholder):
-    """Remove a template's tool placeholder from every node: a tool go-live does not attach."""
-    out = copy.deepcopy(definition)
-    for node in out["nodes"]:
-        refs = node.get("data", {}).get("tool_uuids")
-        if isinstance(refs, list):
-            node["data"]["tool_uuids"] = [ref for ref in refs if ref != placeholder]
-    return out
+    return {"placeholder_uuid": placeholder, "tool": tool}
 
 
 def resolve_tool_refs(definition, placeholder, tool_uuid):
@@ -689,18 +607,18 @@ def validate_wiring(definition, original, runtime, credential_uuid, lang, final=
 
 def planned_tool(spec, runtime, credential_uuid):
     tool = copy.deepcopy(spec["tool"])
-    wiring(tool).update(
-        url=runtime + ROUTES[tool["category"]], credential_uuid=credential_uuid
+    tool["definition"]["config"].update(
+        url=runtime + TOOL_ROUTE, credential_uuid=credential_uuid
     )
     return tool
 
 
 def validate_tool(tool, runtime, credential_uuid):
-    target = wiring(tool) if tool.get("category") in ROUTES else None
+    config = tool["definition"]["config"]
     require(
-        isinstance(target, dict)
-        and target["url"] == runtime + ROUTES[tool["category"]]
-        and target["credential_uuid"] == credential_uuid,
+        tool["category"] == "http_api"
+        and config["url"] == runtime + TOOL_ROUTE
+        and config["credential_uuid"] == credential_uuid,
         "Tool wiring verification failed",
     )
     text = json.dumps(tool).lower()
@@ -740,8 +658,7 @@ def tool_change(existing, planned):
     )
     require(
         existing["status"] == "active" and existing["category"] == planned["category"],
-        f"Existing tool {planned['name']} must be an active "
-        f"{CATEGORY_LABELS[planned['category']]} tool",
+        f"Existing tool {planned['name']} must be an active HTTP API tool",
     )
     differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
     return "update" if differs else None
@@ -754,10 +671,10 @@ def tool_label(name):
 def tool_owned(tool):
     """The tool fields a template owns; the URL and credential are go-live's wiring."""
     owned = copy.deepcopy({field: tool[field] for field in TOOL_UPDATE_FIELDS})
-    target = wiring({"category": tool.get("category"), "definition": owned["definition"]})
-    if isinstance(target, dict):
-        target.pop("url", None)
-        target.pop("credential_uuid", None)
+    config = owned["definition"].get("config")
+    if isinstance(config, dict):
+        config.pop("url", None)
+        config.pop("credential_uuid", None)
     return owned
 
 
@@ -771,7 +688,7 @@ def tool_mode(existing, old_planned, planned):
 
 
 def wire_tool_refs(client, definition, templates, spec, tool_ref):
-    """A go-live tool's reference (caller-work, or transfer with --with-transfer) is wiring, like the URLs.
+    """The caller-work tool reference is wiring, like the URLs.
 
     Every node the new template gives the tool references tool_ref once. A reference to an
     inactive tool of the same name (archived in the Dograh UI) is replaced where it stands;
@@ -780,7 +697,6 @@ def wire_tool_refs(client, definition, templates, spec, tool_ref):
     refused here rather than lost. Read-only.
     """
     name, placeholder = spec["tool"]["name"], spec["placeholder_uuid"]
-    label = ROUTE_LABELS[spec["tool"]["category"]]
     literal = {
         ref
         for template in templates
@@ -803,8 +719,8 @@ def wire_tool_refs(client, definition, templates, spec, tool_ref):
             continue
         require(
             others(nodes(templates[0])[node_id]) == others(node),
-            f"node {node_id}: the template changes other tools on the {label} node; "
-            f"go-live wires only the {label} tool there",
+            f"node {node_id}: the template changes other tools on the caller-work node; "
+            "go-live wires only the caller-work tool there",
         )
         data = indexed[node_id]["data"]
         refs = []
@@ -835,7 +751,7 @@ def show_tool(planned, existing, change, mode=None):
         print(f"tool {name}: unchanged")
         return
     if change == "create":
-        print(f"tool {name}: create (route {ROUTES[planned['category']]}; credential reference only)")
+        print(f"tool {name}: create (route {TOOL_ROUTE}; credential reference only)")
         return
     differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
     if "definition" in differs:
@@ -950,8 +866,7 @@ def same_snapshot(workflow, snapshot):
     )
 
 
-def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=(), copy_of=None):
-    """copy_of: the line workflow a --copy-of target duplicates (recorded, so rollback accepts that backup)."""
+def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=()):
     workflow = client.api("GET", f"/workflow/fetch/{workflow_id}")
     require(workflow["id"] == workflow_id, "Fetched workflow id mismatch")
     if not allow_draft:
@@ -968,7 +883,6 @@ def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=(), 
         **{field: workflow[field] for field in SETTINGS},
         # None records that the named tool did not exist at backup time.
         "tools": {name: lookup_tool(client, name) for name in tool_names},
-        **({"copy_of": copy_of} if copy_of is not None else {}),
     }
     ensure_no_secrets(snapshot)
     path = (
@@ -1150,18 +1064,11 @@ def summary(status, workflow_id, changes, existing_count, settings=None):
 class WriteState:
     """Keep recovery evidence even when the request's outcome is uncertain."""
 
-    def __init__(self, path, draft="no", tools=()):
+    def __init__(self, path, draft="no"):
         self.path, self.stage = path, "pre-write"
         self.credential, self.published, self.draft = "unchanged", "unchanged", draft
-        # Every tool this run may write -> what its write did; named when there is more than one.
-        self.tools = {name: "unchanged" for name in tools}
+        self.tool = "unchanged"
         self.attempted = False
-
-    @property
-    def tool(self):
-        if len(self.tools) <= 1:
-            return next(iter(self.tools.values()), "unchanged")
-        return ", ".join(f"{name} {outcome}" for name, outcome in self.tools.items())
 
     def __enter__(self):
         return self
@@ -1177,9 +1084,7 @@ class WriteState:
                 file=sys.stderr,
             )
             # An updated tool is live at once for every workflow that references it.
-            tool_live = any(
-                outcome not in ("unchanged", "created") for outcome in self.tools.values()
-            )
+            tool_live = self.tool not in ("unchanged", "created")
             workflow_unchanged = self.published == "unchanged" and self.draft == "no"
             if workflow_unchanged and not tool_live:
                 print(
@@ -1205,7 +1110,7 @@ class WriteState:
                     file=sys.stderr,
                 )
 
-    def write(self, stage, outcome, action, tool=None):
+    def write(self, stage, outcome, action):
         self.stage, self.attempted = stage, True
         print(f"Stage: {stage}")
         try:
@@ -1215,7 +1120,7 @@ class WriteState:
                 if stage.startswith("credential"):
                     self.credential = "unknown, may have been created/rotated"
                 elif stage.startswith("tool"):
-                    self.tools[tool] = "unknown, may have been written"
+                    self.tool = "unknown, may have been written"
                 elif stage == "draft save":
                     self.draft = "unknown, may have committed"
                 elif stage == "publish":
@@ -1225,7 +1130,7 @@ class WriteState:
         if stage.startswith("credential"):
             self.credential = outcome
         elif stage.startswith("tool"):
-            self.tools[tool] = outcome
+            self.tool = outcome
         elif stage == "draft save":
             self.draft = "yes"
         elif stage == "publish":
@@ -1252,21 +1157,10 @@ def publish(client, workflow_id, body, state):
 
 
 def deploy(args):
-    # --copy-of N: the target is a Dograh duplicate of line workflow N (the runbook's transfer gate copy, which only a
-    # test number routes to); it is planned and wired exactly as workflow N would be.
     require(
-        TARGETS.get(args.workflow_id if args.copy_of is None else args.copy_of) == args.lang,
+        TARGETS.get(args.workflow_id) == args.lang,
         "Use workflow 3/en or 1/ko; workflow 2 is excluded",
     )
-    if args.copy_of is not None:
-        require(
-            args.with_transfer,
-            "--copy-of is for the transfer gate copy only: add --with-transfer",
-        )
-        require(
-            args.workflow_id not in {*TARGETS, 2},
-            "--copy-of: --workflow-id must be the duplicate, not a line's own workflow",
-        )
     runtime = origin(args.runtime_origin)
     secret = env_value("DOGRAH_WEBHOOK_SECRET", required=args.apply)
     if args.apply:
@@ -1276,8 +1170,6 @@ def deploy(args):
     old, new = template(args.old_ref, args.lang), template(args.new_ref, args.lang)
     old_settings = settings_template(args.old_ref, args.lang)
     new_settings = settings_template(args.new_ref, args.lang)
-    # (spec at the new ref, spec at the old ref) for every tool this run creates/updates and wires.
-    managed = []
     spec, old_spec = tool_spec(args.new_ref, args.lang), tool_spec(args.old_ref, args.lang)
     require(
         not old_spec or (spec and old_spec["tool"]["name"] == spec["tool"]["name"]),
@@ -1294,82 +1186,47 @@ def deploy(args):
             and config.get("preset_parameters") == RUN_PRESET,
             "Tool template must send only the run id, from its body template, and its language",
         )
-        managed.append((spec, old_spec))
-    transfer, old_transfer = (
-        transfer_spec(args.new_ref, args.lang), transfer_spec(args.old_ref, args.lang)
-    )
-    if args.with_transfer:
-        require(
-            transfer is not None,
-            f"--with-transfer: the {args.lang} templates at the new ref have no transfer tool "
-            "(live transfer is for the English US line only)",
-        )
-        require(
-            not old_transfer or old_transfer["tool"]["name"] == transfer["tool"]["name"],
-            "Renaming the transfer tool is not supported by go-live",
-        )
-        require(
-            references(new, transfer["placeholder_uuid"]),
-            "Template does not reference its transfer tool placeholder",
-        )
-        check_transfer(transfer)
-        managed.append((transfer, old_transfer))
-    else:
-        # Not attached: the template's reference leaves both refs here, so nothing below sees it. A
-        # transfer tool an earlier --with-transfer run attached stays as it is (not updated, not removed).
-        for placeholder in {s["placeholder_uuid"] for s in (transfer, old_transfer) if s}:
-            old, new = drop_tool_refs(old, placeholder), drop_tool_refs(new, placeholder)
     client = Dograh()
     snapshot, path = backup(
         client,
         args.workflow_id,
         backup_directory(args.backup_dir),
-        tool_names=tuple(s["tool"]["name"] for s, _ in managed),
-        copy_of=args.copy_of,
+        tool_names=(spec["tool"]["name"],) if spec else (),
     )
     live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
     existing = find_credential(client, args.credential_name)
+    existing_tool = change = tool = None
     field_modes = {}
     templates = (old, new)
     wired = set()
-    plans = []
-    for spec, old_spec in managed:
-        name = spec["tool"]["name"]
-        wired |= {
+    if spec:
+        wired = {
             node["id"]
             for node in new["nodes"]
             if spec["placeholder_uuid"] in (node.get("data", {}).get("tool_uuids") or [])
         }
-        existing_tool = snapshot["tools"][name]
+        existing_tool = snapshot["tools"][spec["tool"]["name"]]
         tool = planned_tool(spec, runtime, existing or PENDING_UUID)
         change = tool_change(existing_tool, tool)
         if change == "update":
             old_tool = planned_tool(old_spec, runtime, existing or PENDING_UUID) if old_spec else None
-            field_modes[tool_label(name)] = tool_mode(existing_tool, old_tool, tool)
+            field_modes[tool_label(tool["name"])] = tool_mode(existing_tool, old_tool, tool)
         # Until the tool exists, the template placeholder stands for it.
         tool_ref = existing_tool["tool_uuid"] if existing_tool else spec["placeholder_uuid"]
         new = resolve_tool_refs(new, spec["placeholder_uuid"], tool_ref)
         if old_spec:
             old = resolve_tool_refs(old, old_spec["placeholder_uuid"], tool_ref)
-        plans.append(
-            {"spec": spec, "existing": existing_tool, "tool": tool, "change": change, "ref": tool_ref}
-        )
     planned = patched(live, old, new, runtime, existing or PENDING_UUID, args.lang, field_modes, wired)
-    for plan in plans:
-        planned = wire_tool_refs(client, planned, templates, plan["spec"], plan["ref"])
+    if spec:
+        planned = wire_tool_refs(client, planned, templates, spec, tool_ref)
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
-    for value in (planned, settings, *(plan["tool"] for plan in plans)):
+    for value in (planned, settings, tool):
         ensure_no_secrets(value)
     changes = diff_fields(live, planned)
     show_plan(changes, field_modes, args.lang)
     show_settings(live_settings, settings, field_modes)
-    for plan in plans:
-        name = plan["tool"]["name"]
-        show_tool(plan["tool"], plan["existing"], plan["change"], field_modes.get(tool_label(name)))
-    if transfer and not args.with_transfer:
-        print(
-            f"tool {transfer['tool']['name']}: skipped (needs --with-transfer; go-live gate in the runbook)"
-        )
+    if spec:
+        show_tool(tool, existing_tool, change, field_modes.get(tool_label(tool["name"])))
     merged = {
         field
         for field, mode in field_modes.items()
@@ -1387,10 +1244,7 @@ def deploy(args):
     )
     settings_changed = settings != live_settings
     already_wired = (
-        planned == live
-        and not settings_changed
-        and all(plan["change"] is None for plan in plans)
-        and existing is not None
+        planned == live and not settings_changed and change is None and existing is not None
     )
     print(
         "Already wired; no remote writes"
@@ -1413,29 +1267,25 @@ def deploy(args):
     fresh = client.api("GET", f"/workflow/fetch/{args.workflow_id}")
     require_published(fresh, args.workflow_id)
     require(same_snapshot(fresh, snapshot), "Workflow changed since backup; rerun plan")
-    for plan in plans:
+    if spec:
         require(
-            lookup_tool(client, plan["tool"]["name"]) == plan["existing"],
+            lookup_tool(client, spec["tool"]["name"]) == existing_tool,
             "Tool changed since backup; rerun plan",
         )
     require(path.is_file(), "Fresh backup missing")
     print(f"ROLLBACK FILE: {path}")
     if already_wired:
         return
-    with WriteState(path, tools=[plan["tool"]["name"] for plan in plans]) as state:
+    with WriteState(path) as state:
         ident = credential(client, args.credential_name, secret, existing, state)
         # Only substitute UUIDs: do not re-run the merge after a remote write.
-        for plan in plans:
-            name, existing_tool = plan["tool"]["name"], plan["existing"]
-            tool = planned_tool(plan["spec"], runtime, ident)
+        if spec:
+            tool = planned_tool(spec, runtime, ident)
             validate_tool(tool, runtime, ident)
             written = None
             if existing_tool is None:
                 written = state.write(
-                    "tool create",
-                    "created",
-                    lambda: client.api("POST", "/tools/", tool),
-                    tool=name,
+                    "tool create", "created", lambda: client.api("POST", "/tools/", tool)
                 )
             elif tool_change(existing_tool, tool):
                 written = state.write(
@@ -1446,15 +1296,14 @@ def deploy(args):
                         f"/tools/{existing_tool['tool_uuid']}",
                         {field: tool[field] for field in TOOL_UPDATE_FIELDS},
                     ),
-                    tool=name,
                 )
-            plan["uuid"] = (
+            tool_uuid = (
                 str(UUID(written["tool_uuid"])) if written else existing_tool["tool_uuid"]
             )
             state.stage = "tool read-back"
             print("Stage: tool read-back")
-            verify_tool(client, plan["uuid"], tool)
-            planned = resolve_tool_refs(planned, plan["spec"]["placeholder_uuid"], plan["uuid"])
+            verify_tool(client, tool_uuid, tool)
+            planned = resolve_tool_refs(planned, spec["placeholder_uuid"], tool_uuid)
         planned_nodes = nodes(planned)
         planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
         planned_nodes["6"]["data"]["credential_uuid"] = ident
@@ -1462,7 +1311,7 @@ def deploy(args):
         print("Stage: wiring validation")
         validate_wiring(planned, live, runtime, ident, args.lang, final=True)
         require(
-            all(references(planned, plan["uuid"]) for plan in plans),
+            not spec or references(planned, tool_uuid),
             "Tool reference missing from the planned definition",
         )
         expected = {
@@ -1501,11 +1350,7 @@ def rollback(args):
         "Cannot restore a draft backup or a backup without published-version evidence",
     )
     workflow_id = snapshot["workflow_id"]
-    copy_of = snapshot.get("copy_of")
-    require(
-        workflow_id in TARGETS or (copy_of in TARGETS and workflow_id not in {*TARGETS, 2}),
-        "Backup target must be workflow 1 or 3, or a --copy-of duplicate of one",
-    )
+    require(workflow_id in TARGETS, "Backup target must be workflow 1 or 3")
     if args.workflow_id is not None:
         require(args.workflow_id == workflow_id, "Rollback target differs from backup")
     ensure_no_secrets(snapshot)
@@ -1515,7 +1360,7 @@ def rollback(args):
     # Recovery must work when a failed apply left a draft. Preserve it for
     # inspection, clearly labelled; never allow that draft backup as a restore target.
     current, _ = backup(
-        client, workflow_id, directory, allow_draft=True, tool_names=tuple(saved_tools), copy_of=copy_of
+        client, workflow_id, directory, allow_draft=True, tool_names=tuple(saved_tools)
     )
     print("Rollback overwrites later edits, including any unpublished draft.")
     show_plan(
@@ -1551,7 +1396,6 @@ def rollback(args):
     with WriteState(
         args.rollback.resolve(),
         draft="yes" if current["version_status"] == "draft" else "no",
-        tools=[saved["name"] for saved in restores],
     ) as state:
         fetched = publish(client, workflow_id, body, state)
         verify_snapshot(fetched, snapshot["workflow_definition"], snapshot)
@@ -1564,7 +1408,6 @@ def rollback(args):
                     f"/tools/{saved['tool_uuid']}",
                     {field: saved[field] for field in TOOL_UPDATE_FIELDS},
                 ),
-                tool=saved["name"],
             )
             state.stage = "tool read-back"
             print("Stage: tool read-back")
@@ -1633,29 +1476,6 @@ def probe(args):
         )
         print(status)
         require(status in (401, 403), f"Wrong-secret {route} probe expected HTTP 401/403")
-    if args.with_transfer:
-        # The resolver body as 1.51 sends it: the reason, and the run id preset rendered as text
-        # (custom_tool.py:263-273). No real run has this id, so the resolver must refuse it with a 4xx
-        # (Dograh then fails the transfer before dialling) after accepting the secret; a missing route
-        # answers 404 to the wrong secret too, so the wrong-secret 401/403 proves the route is there.
-        payload = {"workflow_run_id": PROBE_COMPLETION_RUN_ID, "reason": "person"}
-        status, data = request(
-            "POST", runtime + TRANSFER_ROUTE, {"X-Dograh-Secret": secret}, payload
-        )
-        print(status)
-        require(
-            400 <= status < 500 and status not in (401, 403),
-            "Authenticated tools/transfer probe expected a 4xx refusal of the unknown run",
-        )
-        require(
-            not (isinstance(data, dict) and "transfer_context" in data),
-            "Unknown-run tools/transfer probe must not return a destination",
-        )
-        status, _ = request(
-            "POST", runtime + TRANSFER_ROUTE, {"X-Dograh-Secret": wrong}, payload
-        )
-        print(status)
-        require(status in (401, 403), "Wrong-secret tools/transfer probe expected HTTP 401/403")
 
 
 def main(argv=None):
@@ -1672,31 +1492,12 @@ def main(argv=None):
     parser.add_argument("--credential-name")
     parser.add_argument("--backup-dir", type=Path)
     parser.add_argument("--to-number")
-    parser.add_argument(
-        "--copy-of",
-        type=int,
-        metavar="WORKFLOW_ID",
-        help="plan/apply --with-transfer on --workflow-id, a Dograh duplicate of this line workflow (runbook step 9's gate copy)",
-    )
-    parser.add_argument(
-        "--with-transfer",
-        action="store_true",
-        help="also create/update and attach the English transfer tool (probe: also its route)",
-    )
     args = parser.parse_args(argv)
     try:
         require(not (args.apply and args.rollback), "Choose apply or rollback")
         require(
-            not (args.with_transfer and args.rollback),
-            "--with-transfer is only for plan/apply/probe; rollback restores what the backup holds",
-        )
-        require(
             not args.accept_merged or (args.command == "plan" and not args.rollback),
             "--accept-merged is only for plan/apply",
-        )
-        require(
-            args.copy_of is None or (args.command == "plan" and not args.rollback),
-            "--copy-of is only for plan/apply",
         )
         if args.command == "probe":
             require(
@@ -1706,10 +1507,6 @@ def main(argv=None):
             require(
                 args.runtime_origin and args.to_number and args.workflow_id in TARGETS,
                 "Probe needs --runtime-origin, --to-number and --workflow-id (1 or 3)",
-            )
-            require(
-                not args.with_transfer or TARGETS[args.workflow_id] == "en",
-                "--with-transfer: live transfer is for the English US line (workflow 3) only",
             )
             probe(args)
         elif args.rollback:
