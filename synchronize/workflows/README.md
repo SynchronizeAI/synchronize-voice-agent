@@ -213,9 +213,12 @@ voicemail: an urgent call is flagged, not connected.
 
 The English `When to hand off` rule takes an urgent matter first. Urgent means a person needs to look at it right away, such as a leak, gas or flooding,
 or one of the business's own `{{urgent_examples}}` (data, inside the boundary). Whether or not the caller asked for a person, the agent takes the details as
-usual, gets the name, what happened and a number to call back, says it has marked the matter urgent for the owner, and promises no time; the call is never
-connected to anyone. The `urgent` extraction variable, whose prompt carries the business's examples, is what Synchronize shows as the call's 긴급 badge. A caller
-who asks for the owner or a person gets "no one can take the call right now" and a callback time. Steps 1–3 of Reception point a request for a person, and an
+usual, gets the name, what happened and a number to call back, says it has marked the matter urgent for the owner, who will call them back, and promises no
+time; the call is never connected to anyone. Step 3 of Reception asks once for a number to call back when the matter is urgent and the caller gave none
+("this number" is an answer). The English QA prompt counts an offer to connect, transfer or put the caller through to anyone as `PROMISED_UNCONFIRMED`; the tag
+holds no exemption for it. The `urgent` extraction variable, whose prompt carries the business's examples, is what Synchronize shows as the call's 긴급 badge. A caller
+who asks for the owner or a person gets "no one can take the call right now" and a callback time; a caller who is only very upset gets the same, and that the
+owner will get back to them. Steps 1–3 of Reception point a request for a person, and an
 urgent matter, to that rule, and ask for a callback time when a caller asked for a person and has neither asked nor said when suits them.
 
 ## Deployment values and authentication
@@ -432,8 +435,11 @@ Business facts (both lines): the service area, the pricing line and today's hour
 hours with no next opening set (only "closed right now"; a reopening time the agent makes up is `FACT_CHANGED`); every fact empty (the owner will confirm); and an
 instruction written inside the pricing field. Urgent matters (English): an urgent matter that only the business's own urgent examples make urgent (no heat in
 winter, which the rule's own examples do not name) and a person asked for about an urgent matter (water through the ceiling). Both are flagged, never connected:
-the agent takes the name and the details, says it has marked the matter urgent for the owner, offers no connection and promises no arrival time (an offered
-connection is `CONNECTION_OFFERED`, which gates every case). Each checks the outcome: a call back, `booking_request` or `message`, never `done`, with the `urgent` flag true.
+the agent takes the name and the details, asks once for a number to call back, says it has marked the matter urgent for the owner, offers no connection and promises no
+arrival time (an offered connection is `CONNECTION_OFFERED`, which gates every case). Each checks the outcome: a call back, `booking_request` or `message`, never `done`, with
+the `urgent` flag true. The English scripts of these two cases and of the leak and the gas smell answer the number question ("This number is fine."); on English only, those four
+cases are also gated on `URGENT_NOT_FLAGGED` (an urgent matter where the agent did not say it is marked urgent for the owner, or did not ask once for a number to call back when none
+was given). Korean scripts and Korean judged text are unchanged.
 `manifest` (offline) prints every case, its criteria and the flags that gate it. `run` builds isolated test workflows from this checkout's
 committed templates (`HEAD`) with the live lookup tool (or the failing copy), the live line's model configuration and the template settings, every case but the lookup failure on the line as golive deploys it;
 it removes the pre-call fetch, the completion webhook and the QA node, archives everything it created at the end, and never writes to the
@@ -446,11 +452,12 @@ unknown; for each outcome case and the two hand-over lookup cases the code (the 
 
 The judged criteria go to independent judge models, in the format of the 10-31 blinded-judge harness (`build_judge.py`, `score.py` in
 `~/work/voice-polite-proof-20261031`). `judge --out DIR` writes `judge.md`: a fixed flag rubric (the 10-31 flags plus record, lookup,
-callback, closing, mumbled-call, guessed-value and AI-answer flags, and business-fact, field-instruction, after-hours and offered-connection flags) and every transcript as a numbered
+callback, closing, mumbled-call, guessed-value and AI-answer flags, and business-fact, field-instruction, after-hours and offered-connection flags, and on English
+`URGENT_NOT_FLAGGED`, whose rubric clause on urgent matters the Korean rubric does not have) and every transcript as a numbered
 item with the caller record name, the business facts, on English the business's urgent examples when set, the lookup calls and results and the after-call
 `follow_up`, in a deterministic shuffle with planted canaries (a price stated at the close, a record invented after a failed lookup, 반말 or curt speech, a price
-worked out from the pricing line, on English a connection offered to a caller who asked for the owner, and clean calls: a failed lookup handled, a caller who declines the
-record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection; six Korean, eight English), and no case name or criterion; `judge-key.json` maps items back and
+worked out from the pricing line, on English a connection offered to a caller who asked for the owner and an urgent matter neither marked urgent for the owner nor asked for a callback number, and clean calls: a failed lookup handled, a caller who declines the
+record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection; six Korean, nine English), and no case name or criterion; `judge-key.json` maps items back and
 must not reach a judge. Canaries go through the same rendering as the real sessions, with Dograh's result shape and the tool's spoken start
 message, so no line format marks them. The judges run in an empty directory (runbook step 6), as the 10-31 judges did, because the fork
 holds every case and canary word for word.

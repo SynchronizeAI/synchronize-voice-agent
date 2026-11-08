@@ -310,6 +310,19 @@ class CallerScenariosTest(unittest.TestCase):
                     # Flagged, never connected: offering a connection fails the case.
                     self.assertIn("CONNECTION_OFFERED", cases[case]["gate"])
                     self.assertIn("offers no connection", scenarios_caller.CASES[case]["judged"])
+            # An urgent matter must be marked urgent for the owner and a callback number asked once: gated on the
+            # English urgent cases only (the two English-only cases and the two outcome cases both lines run), and
+            # each of those scripts answers the number question.
+            marked = {"urgent_by_example", "person_urgent", "outcome_urgent_leak", "outcome_urgent_gas"}
+            for case, c in cases.items():
+                self.assertEqual("URGENT_NOT_FLAGGED" in c["gate"], lang == "en" and case in marked, (lang, case))
+                self.assertEqual(scenarios_caller.URGENT_NUMBER_ANSWER in c["lines"], lang == "en" and case in marked, (lang, case))
+            self.assertEqual("URGENT_NOT_FLAGGED" in manifest["flags"], lang == "en")
+            if lang == "en":
+                for case in marked:
+                    # The answer sits between the detail question and the recap's "anything to add".
+                    self.assertEqual(cases[case]["lines"].index("This number is fine."), 3, case)
+                    self.assertEqual(len(cases[case]["lines"]), 5, case)
             self.assertEqual({c["workflow"] for case, c in cases.items() if case != "lookup_failure"}, {"live"})
             self.assertEqual(cases["facts_after_hours"]["initial_context"]["open_now"], "no")
             self.assertTrue(cases["facts_after_hours"]["initial_context"]["next_open"])
@@ -340,7 +353,7 @@ class CallerScenariosTest(unittest.TestCase):
                 self.assertEqual(cases["rude_caller"]["lines"][0], "야 사장 있어?")
             for c in cases.values():
                 self.assertTrue(set(scenarios_caller.GATE_ALL) <= set(c["gate"]))
-                self.assertTrue(set(c["gate"]) <= set(scenarios_caller.FLAGS))
+                self.assertTrue(set(c["gate"]) <= set(scenarios_caller.flags_for(lang)))
             self.assertIn("NO_CALLBACK_TIME", cases["human_request"]["gate"])
             self.assertIn("NUMBER_NOT_READ_BACK", cases["callback_other_number"]["gate"])
             self.assertIn("CLOSING_ANSWERED", cases["closing_price_question"]["gate"])
@@ -446,6 +459,9 @@ class CallerScenariosTest(unittest.TestCase):
         for case in ("urgent_by_example", "person_urgent"):
             self.assertEqual(cases[case]["checks"]["disposition"], 1, case)
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
+        # The urgent script answers the English line's one question about a number to call back.
+        row = json.loads((self.out / "en_urgent_by_example-r1.json").read_text())
+        self.assertIn("This number is fine.", [t["user_message"]["text"] for t in row["turns"] if t.get("user_message")])
         # Two test workflows (as deployed, failing lookup), all archived; the only tool made is the failing copy.
         self.assertEqual(len(self.fake.workflows), 2)
         self.assertEqual({w["status"] for w in self.fake.workflows.values()}, {"archived"})
@@ -585,6 +601,10 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertNotIn("JUDGED", text)
         for flag in scenarios_caller.FLAGS:
             self.assertIn(f"- {flag}: ", text)
+        # The urgent rule is the English line's: the Korean rubric keeps only that a call is never connected.
+        self.assertIn("and to nobody else. It never connects a call to anyone.\nEach ITEM is one call", text)
+        self.assertNotIn("urgent", text.split("Each ITEM", 1)[0].lower())
+        self.assertNotIn("URGENT_NOT_FLAGGED", text)
         self.assertIn("[LOOKUP RESULT: {\"status\": \"error\"", text)
         self.assertIn("CALLER RECORD NAME: 홍길동", text)
         self.assertIn("AFTER THE CALL, FOR THE OWNER: follow_up:", text)
@@ -684,10 +704,54 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(planted["CANARY_bad_connection_offered"], ["CONNECTION_OFFERED"])
         self.assertEqual(planted["CANARY_good_urgent_flagged"], [])
         self.assertIn("Let me put you through to the owner now.", by_case["CANARY_bad_connection_offered"])
+        # An urgent matter not marked urgent for the owner, with no callback number asked, carries the English-only flag.
+        self.assertEqual(planted["CANARY_bad_urgent_not_flagged"], ["URGENT_NOT_FLAGGED"])
+        said = " ".join(line for line in by_case["CANARY_bad_urgent_not_flagged"].splitlines() if line.startswith("BOT: ")).lower()
+        self.assertFalse("urgent" in said or "number" in said)
+        self.assertIn("- URGENT_NOT_FLAGGED: ", text)
+        self.assertIn("It never connects a call to anyone. For an urgent matter it takes the details, asks once for a callback number", text)
+        self.assertIn("marked the matter urgent for the owner, who will call them back; it promises no time.\nEach ITEM is one call", text)
         self.assertEqual(
             {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
             {"[RECORD LOOKUP RAN, ARGUMENTS", "[LOOKUP RESULT"},
         )
+
+    def test_english_gate_fails_an_urgent_matter_not_marked_urgent_for_the_owner(self):
+        self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--repeats", "1", "--out", str(self.out))
+        self.cli("judge", "--out", str(self.out))
+        key = json.loads((self.out / "judge-key.json").read_text())
+        flag = "URGENT_NOT_FLAGGED"
+
+        def item_of(case):
+            return next(item["item"] for item in key["items"] if item["case"] == case)
+
+        def both_flag(case):
+            for name in "ab":
+                (self.out / f"judge.{name}.out").write_text(self.answer(key, lambda item: [flag] if item["item"] == item_of(case) else []))
+
+        # Both judges apply it to an urgent case: the gate fails on that session.
+        both_flag("person_urgent")
+        self.cli("score", "--out", str(self.out), expected=1)
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertEqual(judged["gate"], "fail")
+        self.assertEqual(judged["cases"]["person_urgent"]["gate_failures"], [{"rep": 1, "flags": [flag]}])
+        # On a case that does not gate it, the flag is counted per judge and does not fail the case.
+        both_flag("facts_not_set")
+        self.cli("score", "--out", str(self.out))
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertEqual(judged["gate"], "pass")
+        self.assertEqual(judged["cases"]["facts_not_set"]["flags"]["a"], {flag: 1})
+        # A judge that flags the clean urgent canary with it is not counted.
+        clean = item_of("CANARY_good_urgent_flagged")
+        rows = json.loads(self.answer(key).split("\n", 1)[1])
+        for row in rows:
+            if row["item"] == clean:
+                row["flags"] = [flag]
+        (self.out / "judge.b.out").write_text(json.dumps(rows))
+        self.cli("score", "--out", str(self.out), expected=1)
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertFalse(judged["judges"]["b"]["valid"])
+        self.assertEqual(judged["counted_judges"], ["a"])
 
 
 if __name__ == "__main__":

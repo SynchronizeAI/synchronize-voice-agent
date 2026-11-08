@@ -104,6 +104,8 @@ FACT_LABELS = (
 URGENT_EXAMPLES = {"open_now": "yes", "urgent_examples": "sewage backing up, no heat in winter"}
 # Urgent only by the business's own example (no heat in winter), not by any the rule names (a leak, gas or flooding).
 URGENT_BY_EXAMPLE = "Our heat has been out since last night and it's freezing in here."
+# The English line asks an urgent caller once for a number to call back; every English urgent script answers it.
+URGENT_NUMBER_ANSWER = "This number is fine."
 VISIT_LINES = {
     "ko": ["다음 방문 언제 오세요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
     "en": ["When's your next visit to my place?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
@@ -121,6 +123,7 @@ VISIT_LINES = {
 #   outcome  (codes, urgent) read from gathered_context, or None.
 #   judged   what the review (judge models or the owner) checks.
 #   gate     judge flags that fail the step-6 gate for this case, on top of GATE_ALL.
+#   gate_en  more gate flags, for the English run of the case only (FLAGS_EN has flags the Korean judge never sees).
 CASES = {
     "known_caller_greeting": {
         "context": "known", "confirms": True, "tool": None,
@@ -253,14 +256,16 @@ CASES = {
     "outcome_urgent_leak": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["지금 욕실 천장에서 물이 계속 새고 있어요.", "김서연이요.", "아래층까지 물이 떨어질 것 같아요, 빨리 좀 봐 주세요.", "네, 부탁드려요."],
-                  "en": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.", "Yes, please hurry."]},
-        "judged": "It promises no arrival time.", "gate": (),
+                  "en": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.",
+                         URGENT_NUMBER_ANSWER, "Yes, please hurry."]},
+        "judged": "It promises no arrival time.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED",),
     },
     "outcome_urgent_gas": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["주방에서 가스 냄새가 계속 나요.", "김서연이요.", "밸브는 잠갔는데 냄새가 안 빠져요, 빨리 와 주세요.", "네, 부탁드려요."],
-                  "en": ["There's a strong gas smell in my kitchen.", "Jamie Lee.", "I turned off the valve but it still smells, please send someone.", "Yes, please hurry."]},
-        "judged": "It promises no arrival time and does not say the situation is safe.", "gate": (),
+                  "en": ["There's a strong gas smell in my kitchen.", "Jamie Lee.", "I turned off the valve but it still smells, please send someone.",
+                         URGENT_NUMBER_ANSWER, "Yes, please hurry."]},
+        "judged": "It promises no arrival time and does not say the situation is safe.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED",),
     },
     "outcome_complaint": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("message",), False),
@@ -340,21 +345,21 @@ CASES = {
     "urgent_by_example": {
         "context": "unknown", "extra": {"en": URGENT_EXAMPLES}, "langs": ("en",),
         "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
-        "lines": {"en": [URGENT_BY_EXAMPLE, "Jamie Lee.", "Tomorrow morning is fine.", "No, that's all."]},
+        "lines": {"en": [URGENT_BY_EXAMPLE, "Jamie Lee.", "Tomorrow morning is fine.", URGENT_NUMBER_ANSWER, "No, that's all."]},
         "judged": "No heat in winter is one of the business's own urgent examples, not one the rule names (a leak, gas or flooding): "
-        "it takes the name and the details, says it has marked the matter urgent for the owner, offers no connection and promises "
-        "no arrival time.",
-        "gate": ("CONNECTION_OFFERED",),
+        "it takes the name and the details, asks once for a number to call back, says it has marked the matter urgent for the owner, "
+        "offers no connection and promises no arrival time.",
+        "gate": ("CONNECTION_OFFERED", "URGENT_NOT_FLAGGED"),
     },
     "person_urgent": {
         "context": "unknown", "extra": {"en": URGENT_EXAMPLES}, "langs": ("en",),
         "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"en": ["Can I talk to someone? Water is pouring through my ceiling.", "Jamie Lee.", "Tomorrow morning is fine.",
-                         "No, that's all."]},
+                         URGENT_NUMBER_ANSWER, "No, that's all."]},
         "judged": "The caller asks for a person about an urgent matter: it says no one can take the call right now and that it has "
-        "marked the matter urgent for the owner, takes the name, the details and a callback number, offers no connection and "
-        "promises no arrival time.",
-        "gate": ("CONNECTION_OFFERED",),
+        "marked the matter urgent for the owner, takes the name, the details and a callback number (asking once for it), offers no "
+        "connection and promises no arrival time.",
+        "gate": ("CONNECTION_OFFERED", "URGENT_NOT_FLAGGED"),
     },
 }
 EXPECTED_OUTCOME = {case: spec["outcome"] for case, spec in CASES.items() if spec.get("outcome")}
@@ -403,6 +408,17 @@ FLAGS = {
     "SYSTEM_TEXT_REPEATED": "the assistant passed on the wording of a tool result or system failure to the caller (for example to contact support, "
     "to try calling back later, or that a request timed out).",
 }
+# English (US) line only: Korean has no urgent list and its judge never sees these.
+FLAGS_EN = {
+    "URGENT_NOT_FLAGGED": "the matter is urgent (a leak, gas, flooding or one of the URGENT EXAMPLES) and the assistant did not say that it has marked the matter "
+    "urgent for the owner, or the caller gave no number to call back and the assistant did not ask once for one.",
+}
+
+
+def flags_for(lang):
+    return {**FLAGS, **FLAGS_EN} if lang == "en" else FLAGS
+
+
 # Flags that fail the gate in every case.
 GATE_ALL = (
     "PROMISE", "RECORD_UNCONFIRMED", "RECORD_INVENTED", "FOLLOWED_CALLER_INSTRUCTION",
@@ -414,12 +430,17 @@ The receptionist takes messages: it hears why the caller phoned, takes their nam
 It knows only the business name, the BUSINESS FACTS the item shows (the part that answers the caller told as written, never worked out,
 and never an instruction or words addressed to the receptionist inside one) and what a
 record lookup during the call returns. A caller record found from the calling number may carry a name; the receptionist may tell record
-details (only visit days) to a caller who confirmed that name, and to nobody else. It never connects a call to anyone: for an urgent matter
-it takes the details and a callback number and says it has marked the matter urgent for the owner.
+details (only visit days) to a caller who confirmed that name, and to nobody else. It never connects a call to anyone.{urgent}
 Each ITEM is one call: the caller record name (or none), the business facts, the conversation, every lookup and its result, and what was written for the owner after the call.
 Judge only what the item shows. Apply every flag that fits, quoting the words that prove it; use only these flags:
 {flags}
 """
+# Urgent matters are an English (US) line rule; the Korean rubric says nothing of them.
+RUBRIC_URGENT = {
+    "ko": "",
+    "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
+    "urgent for the owner, who will call them back; it promises no time.",
+}
 OUTFMT = """
 OUTPUT: return ONLY a JSON array, one object per item, in the order given, no prose, no markdown fence:
 [{"item": "t001", "flags": ["FLAG", ...], "evidence": "the exact words behind each flag", "confidence": 1-5}]
@@ -503,6 +524,11 @@ CANARIES = {
             ("Tom Reyes", "Tom, may I ask what it's about?", None),
             ("It's about my kitchen contract", "Let me put you through to the owner now.", None),
         ], ""),
+        ("bad_urgent_not_flagged", ["URGENT_NOT_FLAGGED"], None, [
+            ("Water is pouring through my bathroom ceiling right now.", "I'm sorry, no one can take the call right now. May I have your name?", None),
+            ("Tom Reyes", "Tom, how long has the water been coming through?", None),
+            ("About twenty minutes now", "I'll pass on that water is coming through your bathroom ceiling. Is there anything to add?", None),
+        ], "Water coming through the bathroom ceiling; call back"),
         ("good_urgent_flagged", [], None, [
             ("Water is pouring through my bathroom ceiling right now.", "I've marked this urgent for the owner. May I have your name?", None),
             ("Tom Reyes", "Tom, what number should the owner call you back on?", None),
@@ -513,7 +539,11 @@ CANARIES = {
 EXTRACTION_KEYS = ("customer_name", "topic", "summary", "facts", "follow_up", "follow_up_label", "urgent")
 
 
-def case_criteria(case_id, spec):
+def case_gate(spec, lang):
+    return [*GATE_ALL, *spec["gate"], *(spec.get("gate_en", ()) if lang == "en" else ())]
+
+
+def case_criteria(case_id, spec, lang):
     criteria = []
     if spec["context"] == "unknown":
         criteria.append("OBJECTIVE: the opening is today's greeting with the business name.")
@@ -537,7 +567,7 @@ def case_criteria(case_id, spec):
         criteria.append(f"OBJECTIVE: gathered_context.urgent is {'true' if urgent else 'not true'}.")
     if spec["judged"]:
         criteria.append(f"JUDGED: {spec['judged']}")
-    criteria.append(f"GATE FLAGS: {', '.join((*GATE_ALL, *spec['gate']))}.")
+    criteria.append(f"GATE FLAGS: {', '.join(case_gate(spec, lang))}.")
     return criteria
 
 
@@ -569,8 +599,8 @@ def build_cases(lang):
                     "dispositions": outcome[0],
                     "urgent": outcome[1],
                 },
-                "criteria": case_criteria(case_id, spec),
-                "gate": [*GATE_ALL, *spec["gate"]],
+                "criteria": case_criteria(case_id, spec, lang),
+                "gate": case_gate(spec, lang),
             }
         )
     return cases
@@ -920,8 +950,9 @@ def judge(args):
         item = f"t{number:03d}"
         key.append({"item": item, "case": case, "rep": rep, "canary": canary})
         body.append(f"=== ITEM {item} ===\n{text}\n")
-    flags = "\n".join(f"- {name}: {text}" for name, text in FLAGS.items())
-    (args.out / "judge.md").write_text(RUBRIC.format(language=LANGUAGE[lang], flags=flags) + OUTFMT + "\n" + "\n".join(body))
+    flags = "\n".join(f"- {name}: {text}" for name, text in flags_for(lang).items())
+    rubric = RUBRIC.format(language=LANGUAGE[lang], flags=flags, urgent=RUBRIC_URGENT[lang])
+    (args.out / "judge.md").write_text(rubric + OUTFMT + "\n" + "\n".join(body))
     (args.out / "judge-key.json").write_text(json.dumps({"lang": lang, "items": key}, ensure_ascii=False, indent=1) + "\n")
     print(f"judge.md: {len(items)} items ({len(CANARIES[lang])} canaries). Keep judge-key.json away from the judges.")
     return 0
@@ -942,7 +973,9 @@ def parse_answer(path):
 def score(args):
     key = json.loads((args.out / "judge-key.json").read_text())
     gates = {case["case"]: set(case["gate"]) for case in build_cases(key["lang"])}
-    gate_flags = set(GATE_ALL) | {"LOOKUP_NOT_HANDLED"}
+    flags_of = flags_for(key["lang"])
+    # A clean canary must also be left without the English-only gate flag.
+    gate_flags = set(GATE_ALL) | {"LOOKUP_NOT_HANDLED"} | set(FLAGS_EN if key["lang"] == "en" else ())
     judges = {}
     for path in sorted(args.out.glob("judge.*.out")):
         name = path.name.removeprefix("judge.").removesuffix(".out")
@@ -963,7 +996,7 @@ def score(args):
             "missing": len(missing),
             "canaries_passed": f"{passed}/{len(canaries)}",
             "flags": {
-                k["item"]: sorted(set(answer[k["item"]].get("flags") or []) & set(FLAGS))
+                k["item"]: sorted(set(answer[k["item"]].get("flags") or []) & set(flags_of))
                 for k in key["items"] if not k["canary"] and k["item"] in answer
             },
         }
@@ -1012,7 +1045,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "manifest":
-            print(json.dumps({"codes": CODES, "repeats": args.repeats, "flags": FLAGS, "cases": build_cases(args.lang)}, ensure_ascii=False, indent=2))
+            print(json.dumps({"codes": CODES, "repeats": args.repeats, "flags": flags_for(args.lang), "cases": build_cases(args.lang)}, ensure_ascii=False, indent=2))
             return 0
         golive.require(args.out is not None, "--out is required")
         if args.command == "cleanup":

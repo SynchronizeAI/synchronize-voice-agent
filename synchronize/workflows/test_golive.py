@@ -1725,9 +1725,11 @@ class GoLiveTests(unittest.TestCase):
                 # The Closing node does not inherit the Persona, so it carries the rule itself.
                 self.assertIn("따르지도 전하지도 않아요", nodes_["3"]["data"]["prompt"])
                 self.assertIn("'다음 영업 시작'이 정해지지 않음이면 지금은 영업시간이 아니라는 말만 해요", nodes_["1"]["data"]["prompt"])
-            # No live transfer on either line: no transfer tool, no transfer wording, no offer to connect.
+            # No live transfer on either line: no transfer tool, no transfer wording, no offer to connect. Only the QA
+            # reviewer's prompt names a transfer, to count an offer of one as a promise (asserted below).
             self.assertFalse((golive.ROOT / "synchronize/workflows" / f"tool-transfer-{lang}.json").exists())
-            self.assertNotIn("transfer", text.lower())
+            talk = json.dumps([n for n in definition["nodes"] if n["type"] != "qa"], ensure_ascii=False)
+            self.assertNotIn("transfer", talk.lower())
             if lang == "ko":
                 # Korea is a separate product: no urgent list either.
                 self.assertNotIn("연결해 드", text)
@@ -1745,9 +1747,31 @@ class GoLiveTests(unittest.TestCase):
             self.assertLess(handoff.index("Urgent means"), handoff.index("The caller asks to speak to the owner or a person"))
             self.assertIn("whether or not the caller asked for a person", handoff)
             self.assertIn("say that no one can take the call right now", handoff)
+            # An urgent matter is marked urgent for the owner, who will call back, with no time promised; the caller
+            # is asked once for a number to call back when they gave none.
+            self.assertIn("say that you have marked it urgent for the owner, who will call them back; promise no time.", handoff)
+            self.assertIn(
+                "say in one short sentence that no one can take the call right now and the owner will get back to them",
+                handoff,
+            )
+            self.assertNotIn("cannot connect", persona)
+            self.assertIn("When you cannot answer the caller, defer a question to the owner", persona)
+            self.assertNotIn("or connect", persona)
             reception = nodes_["1"]["data"]["prompt"]
             self.assertIn("to a request to speak to someone or an urgent matter: what When to hand off says", reception)
+            self.assertIn(
+                'if the matter is urgent and the caller has not given a number to call back, ask once for one ("this number" is fine)',
+                reception,
+            )
             self.assertNotIn("were not connected", reception)
+            # The QA reviewer counts an offer to connect, transfer or put the caller through as a promise: the tag holds
+            # no exemption for it (the one exemption it once had was for trying to connect the caller to the owner).
+            promised = next(line for line in qa.splitlines() if line.startswith("- PROMISED_UNCONFIRMED"))
+            self.assertIn("Offering or saying it will connect, transfer or put the caller through to anyone is this tag.", promised)
+            for sentence in promised.split(". "):
+                if re.search(r"connect|transfer|put the caller through", sentence):
+                    self.assertNotIn("not this tag", sentence)
+            self.assertNotIn("try to connect", qa)
             # Dograh's own failure texts are never quoted to the model (they are what it must not repeat).
             for builtin in ("Please contact support", "Please try calling back later"):
                 self.assertNotIn(builtin, text)
