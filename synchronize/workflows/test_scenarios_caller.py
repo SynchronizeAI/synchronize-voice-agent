@@ -128,6 +128,10 @@ class Handler(BaseHTTPRequestHandler):
                 events.append({"type": "tool_call_started", "payload": {"function_name": tool}})
                 events.append({"type": "tool_call_result", "payload": {"function_name": tool, "result": {"status": "success", "data": {"known": False}}}})
                 reply = "기록에서 찾지 못해 담당자가 확인해서 연락드리겠습니다."
+            elif len(session["lines"]) == 2 and name and (
+                "여쭤볼" in session["lines"][0] or "a question" in session["lines"][0]
+            ):
+                reply = "거실 도배 견적서 건으로 전화 주셨어요?"
             else:
                 reply = "네."
             events.append({"type": "bot_speech", "payload": {"text": reply}})
@@ -137,6 +141,9 @@ class Handler(BaseHTTPRequestHandler):
             session["is_completed"] = True
             code = disposition(session["lines"])
             session["gathered_context"] = {"call_disposition": code, "mapped_call_disposition": code}
+            name = session["initial_context"].get("caller_name")
+            if name:
+                session["gathered_context"]["customer_name"] = name
         return self.reply(200, session)
 
     def reply(self, status, body):
@@ -189,7 +196,8 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual(
                 set(cases),
                 {
-                    "known_caller_greeting", "known_caller_quote_status", "unknown_caller_quote_status",
+                    "known_caller_greeting", "known_caller_open_matter", "known_caller_quote_status",
+                    "unknown_caller_quote_status",
                     "outcome_quote_request", "outcome_urgent_leak", "outcome_complaint",
                     "outcome_sales_call", "outcome_wrong_number",
                 },
@@ -221,12 +229,16 @@ class CallerScenariosTest(unittest.TestCase):
     def test_run_scores_objective_checks_and_archives_the_test_workflow(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--repeats", "1", "--out", str(self.out))
         report = json.loads((self.out / "report.json").read_text())
-        self.assertEqual(report["runs"], 8)
+        self.assertEqual(report["runs"], 9)
         self.assertEqual(report["errors"], 0)
-        self.assertEqual(report["objective_passed"], 8)
+        self.assertEqual(report["objective_passed"], 9)
         cases = report["cases"]
-        self.assertEqual(cases["known_caller_greeting"]["checks"]["name_in_first_reply"], 1)
+        for case in ("known_caller_greeting", "known_caller_open_matter", "known_caller_quote_status"):
+            for check in ("name_in_first_reply", "no_record_before_confirmation", "customer_name_confirmed"):
+                self.assertEqual(cases[case]["checks"][check], 1, (case, check))
+        self.assertEqual(cases["known_caller_open_matter"]["checks"]["open_matter_after_confirmation"], 1)
         self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_called"], 1)
+        self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_after_confirmation"], 1)
         self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"urgent": 1})
         (workflow_id,) = self.fake.workflows
         workflow = self.fake.workflows[workflow_id]
@@ -249,7 +261,35 @@ class CallerScenariosTest(unittest.TestCase):
         turns = [{"user_message": {"text": "x"}, "events": [{"type": "bot_speech", "payload": {"text": "성함이 어떻게 되세요?"}}]}]
         graded = scenarios_caller.grade(case, opening, turns, {"call_disposition": "message"}, "lookup_caller_work_ko")
         self.assertFalse(graded["checks"]["name_in_first_reply"])
+        # Synchronize names the call by customer_name: a confirmed caller left unnamed fails.
+        self.assertFalse(graded["checks"]["customer_name_confirmed"])
         self.assertTrue(graded["needs_follow_up"])
+        confirmed = {"call_disposition": "message", "customer_name": "홍길동"}
+
+        def turn(text, *events):
+            return {"user_message": {"text": "x"}, "events": [*events, {"type": "bot_speech", "payload": {"text": text}}]}
+
+        graded = scenarios_caller.grade(
+            case, opening, [turn("거실 도배 건이시죠, 홍길동님 맞으세요?")], confirmed, "lookup_caller_work_ko"
+        )
+        self.assertTrue(graded["checks"]["customer_name_confirmed"])
+        self.assertFalse(graded["checks"]["no_record_before_confirmation"])
+        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_open_matter")
+        graded = scenarios_caller.grade(
+            case, opening, [turn("홍길동님 맞으세요?"), turn("더 말씀해 주시겠어요?")], confirmed, "lookup_caller_work_ko"
+        )
+        self.assertFalse(graded["checks"]["open_matter_after_confirmation"])
+        # The lookup may not run before the caller confirmed the name.
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "known_caller_quote_status")
+        tool = {"type": "tool_call_started", "payload": {"function_name": "lookup_caller_work_en"}}
+        graded = scenarios_caller.grade(
+            case, [case["expected"]["generic_opening"]],
+            [turn("Am I speaking with Alex Morgan?", tool), turn("Thanks.")],
+            {"call_disposition": "message", "customer_name": "Alex Morgan"}, "lookup_caller_work_en",
+        )
+        self.assertTrue(graded["checks"]["tool_called"])
+        self.assertFalse(graded["checks"]["tool_after_confirmation"])
+        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_greeting")
         case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "outcome_sales_call")
         graded = scenarios_caller.grade(case, opening, [], {"call_disposition": "message"}, "lookup_caller_work_ko")
         self.assertFalse(graded["checks"]["disposition"])

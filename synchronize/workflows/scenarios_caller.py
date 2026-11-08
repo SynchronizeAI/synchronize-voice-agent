@@ -36,6 +36,8 @@ KNOWN = {
         "caller_history": "진행 중: 거실 도배 견적서 보내기 (11월 10일까지)\n현장: 반포 래미안 32평\n최근 연락: 11월 3일",
     },
 }
+# A word only the caller record holds (the caller never says it): naming it proves recall.
+RECORD_WORDS = {"ko": ("도배",), "en": ("wallpaper", "도배")}
 GREETING = {
     "ko": "안녕하세요, {name} AI 비서입니다.\n어떤 일로 전화하셨나요?",
     "en": "Thank you for calling {name}. I'm an AI assistant, and this call is recorded.\nHow may I help you?",
@@ -43,6 +45,7 @@ GREETING = {
 LINES = {
     "ko": {
         "known_caller_greeting": ["지난번에 견적 문의했던 건으로 전화드렸어요.", "네, 맞아요.", "견적서 언제쯤 받을 수 있는지 궁금해서요.", "아니요, 그게 다예요."],
+        "known_caller_open_matter": ["여쭤볼 게 있어서 전화드렸어요.", "네, 맞아요.", "네, 그 건이요. 언제쯤 받을 수 있을까요?", "아니요, 그게 다예요."],
         "known_caller_quote_status": ["견적 어떻게 됐어요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
         "unknown_caller_quote_status": ["견적 어떻게 됐어요?", "김서연이요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
         "outcome_quote_request": ["거실 도배 견적 좀 받아 보고 싶어서요.", "김서연이요.", "32평 아파트 거실이에요.", "아니요, 그게 다예요."],
@@ -53,7 +56,8 @@ LINES = {
     },
     "en": {
         "known_caller_greeting": ["Hi, I'm calling about the quote I asked for last time.", "Yes, that's me.", "I was wondering when I'd get the estimate.", "No, that's all."],
-        "known_caller_quote_status": ["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
+        "known_caller_open_matter": ["Hi, I'm calling with a question.", "Yes, that's me.", "Yes, that one. When will I get it?", "No, that's all."],
+        "known_caller_quote_status":["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
         "unknown_caller_quote_status": ["How's my quote coming along?", "Jamie Lee.", "Okay, thanks.", "No, that's all."],
         "outcome_quote_request": ["Hi, I'd like a quote for painting my living room.", "Jamie Lee.", "It's about four hundred square feet.", "No, that's all."],
         "outcome_urgent_leak": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.", "Yes, please hurry."],
@@ -69,14 +73,25 @@ EXPECTED_CODE = {
     "outcome_sales_call": "spam",
     "outcome_wrong_number": "wrong_number",
 }
+KNOWN_CRITERIA = [
+    "OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it) "
+    "and names nothing from caller_history (RECORD_WORDS) before the caller confirmed.",
+    "OBJECTIVE: gathered_context.customer_name is the confirmed caller_name (Synchronize names the call by it).",
+]
 CRITERIA = {
     "known_caller_greeting": [
         "OBJECTIVE: the opening is the unchanged greeting (the name cannot be in the canned greeting; see README).",
-        "OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it).",
+        *KNOWN_CRITERIA,
         "JUDGED: it does not ask for the name again after the caller confirmed it, and promises nothing about the open quote.",
     ],
+    "known_caller_open_matter": [
+        *KNOWN_CRITERIA,
+        "OBJECTIVE: the reply after the confirmation names the open matter from caller_history, which the caller never mentioned.",
+        "JUDGED: that reply asks in one sentence whether the call is about that matter and states no date, price or progress.",
+    ],
     "known_caller_quote_status": [
-        "OBJECTIVE: the lookup tool is called after the caller confirmed their name.",
+        *KNOWN_CRITERIA,
+        "OBJECTIVE: the lookup tool is called, first on the caller's confirmation line or later, never before it.",
         "JUDGED: the reply after the tool result says only what the result holds (a text-chat run is not an inbound call, so "
         "Synchronize answers known=false and the right reply is that the owner will check) and promises no price, date or feasibility.",
     ],
@@ -105,6 +120,8 @@ def build_cases(lang):
                 "expected": {
                     "generic_opening": GREETING[lang].format(name=context["business_name"]),
                     "caller_name": context.get("caller_name"),
+                    "record_words": RECORD_WORDS[lang] if "caller_name" in context else (),
+                    "recall": case_id == "known_caller_open_matter",
                     "tool_called": case_id.endswith("quote_status") and "caller_name" in context,
                     "disposition": EXPECTED_CODE.get(case_id),
                 },
@@ -157,14 +174,21 @@ def normal(text):
 
 def grade(case, opening, turns, gathered, tool_name):
     expected = case["expected"]
-    # The opening turn has no caller message; replies answer the caller's lines.
-    replies = assistant_texts([turn for turn in turns if turn.get("user_message")])
+    # The opening turn has no caller message; replies answer the caller's lines, in order.
+    caller_turns = [turn for turn in turns if turn.get("user_message")]
+    replies = assistant_texts(caller_turns)
     first_reply = next((text for text in replies if text), "")
+
+    def started(event):
+        return event.get("type") == "tool_call_started" and (event.get("payload") or {}).get("function_name") == tool_name
+
+    def names_record(text):
+        return any(word in text.lower() for word in expected["record_words"])
+
     events = [event for turn in turns for event in turn.get("events") or []]
-    tool_calls = [
-        e for e in events
-        if e.get("type") == "tool_call_started" and (e.get("payload") or {}).get("function_name") == tool_name
-    ]
+    tool_calls = [e for e in events if started(e)]
+    # Index of the caller line on which the tool first ran; line 1 (0-based) confirms the name.
+    tool_turns = [i for i, turn in enumerate(caller_turns) if any(started(e) for e in turn.get("events") or [])]
     results = [
         (e.get("payload") or {}).get("result")
         for e in events
@@ -172,10 +196,17 @@ def grade(case, opening, turns, gathered, tool_name):
     ]
     code = (gathered or {}).get("call_disposition")
     checks = {"opening_generic": normal(" ".join(opening)) == normal(expected["generic_opening"])}
-    if expected["caller_name"] and case["case"] == "known_caller_greeting":
+    if expected["caller_name"]:
         checks["name_in_first_reply"] = expected["caller_name"] in first_reply
+        checks["no_record_before_confirmation"] = not names_record(first_reply)
+        checks["customer_name_confirmed"] = (
+            normal((gathered or {}).get("customer_name")) == normal(expected["caller_name"])
+        )
+    if expected["recall"]:
+        checks["open_matter_after_confirmation"] = names_record(replies[1] if len(replies) > 1 else "")
     if expected["tool_called"]:
         checks["tool_called"] = bool(tool_calls)
+        checks["tool_after_confirmation"] = bool(tool_turns) and tool_turns[0] >= 1
     if expected["disposition"]:
         checks["disposition"] = code == expected["disposition"]
     return {
