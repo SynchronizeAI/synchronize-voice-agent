@@ -41,20 +41,28 @@ def live_tool(lang, tool_uuid):
 VISIT_WORDS = ("방문", "오시는지", "visit", "coming out")
 # Words of an urgent matter: a leak, or the business's own urgent example (no heat in winter).
 URGENT_WORDS = ("ceiling", "heat has been out")
+# The English line's caller who does not want to be recorded, and a caller in Spanish: the agent ends either call.
+OBJECTION, SPANISH = "don't want this call recorded", "Hola"
 
 
 def outcome(lines):
     """The fake classifier: a code, and the separate urgent flag."""
     text = " ".join(lines)
-    for words, code in (
-        (("천장", "가스", "gas smell", *URGENT_WORDS), "booking_request"),
-        (("대출", "card processing"), "spam"),
-        (("중국집", "pizza"), "wrong_number"),
-        (("견적 좀", "a quote for"), "quote_request"),
+    for words, code, urgent in (
+        (("천장", "가스", "gas smell", *URGENT_WORDS), "booking_request", True),
+        (("대출", "card processing"), "spam", False),
+        (("중국집", "pizza"), "wrong_number", False),
+        (("move the estimate visit", "cancel the estimate visit"), "booking_request", False),
+        (("견적 좀", "a quote for", "a quote to", "new deck", "presupuesto"), "quote_request", False),
     ):
         if any(word in text for word in words):
-            return code, code == "booking_request"
+            return code, urgent
     return "message", False
+
+
+def ended_by_agent(lines):
+    """The fake agent ends the call on the caller's next line after an objection to the recording or a Spanish request."""
+    return any(OBJECTION in line for line in lines[:-1]) or (len(lines) >= 2 and lines[0].startswith(SPANISH))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -168,12 +176,16 @@ class Handler(BaseHTTPRequestHandler):
             events.append({"type": "bot_speech", "payload": {"text": reply}})
             session["session_data"]["turns"].append({"user_message": {"text": body["text"]}, "events": events})
             session["revision"] += 1
-        if parts[-1] == "end" or len(session["lines"]) >= 4:
+        if parts[-1] == "end" or len(session["lines"]) >= 4 or ended_by_agent(session["lines"]):
             session["is_completed"] = True
             code, urgent = outcome(session["lines"])
             session["gathered_context"] = {
                 "call_disposition": code, "mapped_call_disposition": code, "urgent": urgent,
             }
+            if any(OBJECTION in line for line in session["lines"]):
+                session["gathered_context"]["recording_declined"] = True
+            if session["lines"][:1] and session["lines"][0].startswith(SPANISH):
+                session["gathered_context"]["caller_language"] = "es"
             if confirmed(session):
                 session["gathered_context"]["customer_name"] = session["initial_context"]["caller_name"]
         return self.reply(200, session)
@@ -241,8 +253,13 @@ class CallerScenariosTest(unittest.TestCase):
             }
             # The business's own urgent examples are told to the English line only (US lines).
             urgent = {"urgent_by_example", "person_urgent"} if lang == "en" else set()
+            # So are the kinds of call, visits, a recording objection, the AI question mid-call and another language.
+            us = {
+                "kind_new_project", "kind_ongoing_project", "kind_problem_warranty", "visit_move", "visit_cancel",
+                "recording_objection", "ai_robot_question", "spanish_caller",
+            } if lang == "en" else set()
             self.assertEqual(
-                set(cases) - facts - urgent,
+                set(cases) - facts - urgent - us,
                 {
                     "known_caller_greeting", "known_caller_no_detail", "known_caller_visit",
                     "unknown_caller_visit",
@@ -260,6 +277,7 @@ class CallerScenariosTest(unittest.TestCase):
             )
             self.assertTrue(facts <= set(cases))
             self.assertTrue(urgent <= set(cases))
+            self.assertTrue(us <= set(cases))
             self.assertEqual(manifest["codes"], list(scenarios_caller.CODES))
             outcomes = {
                 case: (tuple(c["expected"]["dispositions"]), c["expected"]["urgent"])
@@ -272,6 +290,15 @@ class CallerScenariosTest(unittest.TestCase):
                         # Flagged urgent, never connected: a call back.
                         "urgent_by_example": (("booking_request", "message"), True),
                         "person_urgent": (("booking_request", "message"), True),
+                        # A project, a change, a problem with finished work and a visit to move or cancel each leave the owner work.
+                        "kind_new_project": (("quote_request", "booking_request"), False),
+                        "kind_ongoing_project": (("message",), False),
+                        "kind_problem_warranty": (("message",), False),
+                        "visit_move": (("booking_request",), False),
+                        "visit_cancel": (("booking_request",), False),
+                        # Ended by the agent with a call back owed, never done.
+                        "recording_objection": (("quote_request", "message"), False),
+                        "spanish_caller": (("quote_request", "message"), False),
                     } if lang == "en" else {}),
                     "outcome_quote_request": (("quote_request",), False),
                     "outcome_urgent_leak": (("booking_request", "message"), True),
@@ -318,6 +345,32 @@ class CallerScenariosTest(unittest.TestCase):
                 self.assertEqual("URGENT_NOT_FLAGGED" in c["gate"], lang == "en" and case in marked, (lang, case))
                 self.assertEqual(scenarios_caller.URGENT_NUMBER_ANSWER in c["lines"], lang == "en" and case in marked, (lang, case))
             self.assertEqual("URGENT_NOT_FLAGGED" in manifest["flags"], lang == "en")
+            # The English line's own flags: each gates its cases and no other (one bad canary each, see the judge tests).
+            line_flags = {
+                "INTAKE_MISSED": {"kind_new_project", "kind_ongoing_project", "kind_problem_warranty", "visit_move", "visit_cancel"},
+                "RECORDING_OBJECTION_IGNORED": {"recording_objection"},
+                "LANGUAGE_NOT_HANDLED": {"spanish_caller"},
+            }
+            for flag, gated in line_flags.items():
+                self.assertEqual(flag in manifest["flags"], lang == "en")
+                self.assertEqual({case for case, c in cases.items() if flag in c["gate"]}, gated if lang == "en" else set())
+            if lang == "en":
+                # Both values Synchronize reads after an English call are checked on every English case: a recording_declined on
+                # an ordinary call would delete its recording. The objection and the Spanish caller are ended by the agent.
+                default = {"recording_declined": False, "caller_language": ""}
+                expected = {
+                    "recording_objection": ({"recording_declined": True, "caller_language": ""}, True),
+                    "spanish_caller": ({"recording_declined": False, "caller_language": "es"}, True),
+                }
+                for case, c in cases.items():
+                    self.assertEqual((c["expected"]["contract"], c["expected"]["ends"]), expected.get(case, (default, False)), case)
+                self.assertTrue(cases["spanish_caller"]["lines"][0].startswith("Hola"))
+                self.assertIn("robot", cases["ai_robot_question"]["lines"][1])
+                self.assertEqual(cases["visit_cancel"]["lines"][2], "No thanks, I'd rather just cancel.")
+            else:
+                for c in cases.values():
+                    self.assertFalse({"contract", "ends"} & set(c["expected"]))
+                    self.assertFalse(any("recording_declined" in line or "caller_language" in line for line in c["criteria"]))
             if lang == "en":
                 for case in marked:
                     # The answer sits between the detail question and the recap's "anything to add".
@@ -421,6 +474,9 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(cases["outcome_complaint"]["dispositions"], {"message": 1})
         for case in (c["case"] for c in scenarios_caller.build_cases("ko") if c["expected"]["dispositions"]):
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
+        # The English line's values for Synchronize are not the Korean line's: no Korean case checks them.
+        for case, group in cases.items():
+            self.assertFalse({"recording_declined", "caller_language", "ended_by_agent"} & set(group["checks"]), case)
         # Two test workflows (live lookup, failing lookup) and the failing copy, all archived.
         self.assertEqual(len(self.fake.workflows), 2)
         for workflow in self.fake.workflows.values():
@@ -459,6 +515,18 @@ class CallerScenariosTest(unittest.TestCase):
         for case in ("urgent_by_example", "person_urgent"):
             self.assertEqual(cases[case]["checks"]["disposition"], 1, case)
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
+        # The agent ends the recording objection and the Spanish call; each carries its value for Synchronize, and every
+        # English case checks both values.
+        for case in ("recording_objection", "spanish_caller"):
+            self.assertEqual(cases[case]["checks"]["ended_by_agent"], 1, case)
+        self.assertEqual(cases["recording_objection"]["checks"]["recording_declined"], 1)
+        self.assertEqual(cases["spanish_caller"]["checks"]["caller_language"], 1)
+        for case, group in cases.items():
+            self.assertTrue({"recording_declined", "caller_language"} <= set(group["checks"]), case)
+        row = json.loads((self.out / "en_recording_objection-r1.json").read_text())
+        self.assertTrue(row["completed_naturally"])
+        self.assertIs(row["grade"]["review"]["extraction"]["recording_declined"], True)
+        self.assertEqual(len([t for t in row["turns"] if t.get("user_message")]), 3)
         # The urgent script answers the English line's one question about a number to call back.
         row = json.loads((self.out / "en_urgent_by_example-r1.json").read_text())
         self.assertIn("This number is fine.", [t["user_message"]["text"] for t in row["turns"] if t.get("user_message")])
@@ -545,6 +613,35 @@ class CallerScenariosTest(unittest.TestCase):
         ):
             graded = scenarios_caller.grade(case, opening, [], gathered, "lookup_caller_work_ko")
             self.assertEqual(graded["passed"], passed, gathered)
+        # English: a recording_declined on an ordinary call fails (Synchronize would delete its recording), and so does a
+        # caller_language on an English call.
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "kind_ongoing_project")
+        en_opening = [case["expected"]["generic_opening"]]
+        for gathered, passed in (
+            ({"call_disposition": "message"}, True),
+            ({"call_disposition": "message", "recording_declined": False, "caller_language": ""}, True),
+            ({"call_disposition": "message", "recording_declined": True}, False),
+            ({"call_disposition": "message", "recording_declined": "true"}, False),
+            ({"call_disposition": "message", "caller_language": "en"}, False),
+        ):
+            graded = scenarios_caller.grade(case, en_opening, [], gathered, "lookup_caller_work_en", True)
+            self.assertEqual(graded["passed"], passed, gathered)
+        # A call the agent must end fails when the runner had to end it; Spanish may come back as es or es-US.
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "spanish_caller")
+        for gathered, completed, passed in (
+            ({"call_disposition": "message", "caller_language": "es"}, True, True),
+            ({"call_disposition": "quote_request", "caller_language": "es-US"}, True, True),
+            ({"call_disposition": "message", "caller_language": "es"}, False, False),
+            ({"call_disposition": "message"}, True, False),
+            ({"call_disposition": "done", "caller_language": "es"}, True, False),
+        ):
+            graded = scenarios_caller.grade(case, en_opening, [], gathered, "lookup_caller_work_en", completed)
+            self.assertEqual(graded["passed"], passed, (gathered, completed))
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "recording_objection")
+        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "quote_request", "recording_declined": True}, "lookup_caller_work_en", True)
+        self.assertTrue(graded["passed"])
+        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "quote_request"}, "lookup_caller_work_en", True)
+        self.assertFalse(graded["checks"]["recording_declined"])
 
     def test_refusals_happen_before_any_write(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "3", "--out", str(self.out), expected=1)
@@ -604,7 +701,8 @@ class CallerScenariosTest(unittest.TestCase):
         # The urgent rule is the English line's: the Korean rubric keeps only that a call is never connected.
         self.assertIn("and to nobody else. It never connects a call to anyone.\nEach ITEM is one call", text)
         self.assertNotIn("urgent", text.split("Each ITEM", 1)[0].lower())
-        self.assertNotIn("URGENT_NOT_FLAGGED", text)
+        for flag in scenarios_caller.FLAGS_EN:
+            self.assertNotIn(flag, text)
         self.assertIn("[LOOKUP RESULT: {\"status\": \"error\"", text)
         self.assertIn("CALLER RECORD NAME: 홍길동", text)
         self.assertIn("AFTER THE CALL, FOR THE OWNER: follow_up:", text)
@@ -710,7 +808,21 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertFalse("urgent" in said or "number" in said)
         self.assertIn("- URGENT_NOT_FLAGGED: ", text)
         self.assertIn("It never connects a call to anyone. For an urgent matter it takes the details, asks once for a callback number", text)
-        self.assertIn("marked the matter urgent for the owner, who will call them back; it promises no time.\nEach ITEM is one call", text)
+        self.assertIn("marked the matter urgent for the owner, who will call them back; it promises no time. It asks each kind of call", text)
+        # The recording and language rules: the call ends, and another language hears one sentence in it before the fixed goodbye.
+        self.assertIn("and the call ends with the line's fixed English goodbye.\nEach ITEM is one call", text)
+        for canary, flag in (
+            ("bad_intake_missed", "INTAKE_MISSED"),
+            ("bad_recording_ignored", "RECORDING_OBJECTION_IGNORED"),
+            ("bad_language_not_handled", "LANGUAGE_NOT_HANDLED"),
+        ):
+            self.assertIn(f"- {flag}: ", text)
+            self.assertEqual(planted[f"CANARY_{canary}"], [flag])
+        # One Spanish sentence and the fixed goodbye are the rule: that canary is clean, so a judge reading it as
+        # WRONG_LANGUAGE is not counted.
+        self.assertEqual(planted["CANARY_good_language_handled"], [])
+        self.assertIn("BOT: El dueño le devolverá la llamada a este número.", by_case["CANARY_good_language_handled"])
+        self.assertEqual(len(scenarios_caller.CANARIES["en"]), 13)
         self.assertEqual(
             {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
             {"[RECORD LOOKUP RAN, ARGUMENTS", "[LOOKUP RESULT"},
