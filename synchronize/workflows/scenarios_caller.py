@@ -57,7 +57,7 @@ LINES = {
     "en": {
         "known_caller_greeting": ["Hi, I'm calling about the quote I asked for last time.", "Yes, that's me.", "I was wondering when I'd get the estimate.", "No, that's all."],
         "known_caller_open_matter": ["Hi, I'm calling with a question.", "Yes, that's me.", "Yes, that one. When will I get it?", "No, that's all."],
-        "known_caller_quote_status":["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
+        "known_caller_quote_status": ["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
         "unknown_caller_quote_status": ["How's my quote coming along?", "Jamie Lee.", "Okay, thanks.", "No, that's all."],
         "outcome_quote_request": ["Hi, I'd like a quote for painting my living room.", "Jamie Lee.", "It's about four hundred square feet.", "No, that's all."],
         "outcome_urgent_leak": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.", "Yes, please hurry."],

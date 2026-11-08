@@ -289,7 +289,6 @@ class CallerScenariosTest(unittest.TestCase):
         )
         self.assertTrue(graded["checks"]["tool_called"])
         self.assertFalse(graded["checks"]["tool_after_confirmation"])
-        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_greeting")
         case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "outcome_sales_call")
         graded = scenarios_caller.grade(case, opening, [], {"call_disposition": "message"}, "lookup_caller_work_ko")
         self.assertFalse(graded["checks"]["disposition"])

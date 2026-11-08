@@ -1203,7 +1203,7 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("credential: created", err)
         self.assertIn("tool: created", err)
         self.assertIn("No workflow rollback needed", err)
-        self.assertIn("Any credential or tool change is retained", err)
+        self.assertIn("A credential change or a newly created tool is retained", err)
         self.assertNotIn("--rollback", err)
         self.assertEqual([c[0] for c in self.writes()], ["POST", "POST"])
 
