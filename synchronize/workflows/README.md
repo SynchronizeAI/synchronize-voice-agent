@@ -81,7 +81,9 @@ written with every field Dograh stores so the read-back is exact). It posts `{"w
 (run-owned in Dograh, the caller cannot set it; the model supplies nothing) to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom
 Header credential, times out after 5000 ms, says `확인해 보겠습니다.` / "Let me check." when it starts and `잠시만 기다려 주세요.` / "One moment, please." if the answer takes
 over 2.5 s. Synchronize answers facts only (`known`, `name`, `open_work`, `upcoming_visits`, `estimates` with status, no amounts or addresses). The tool is on the Korean
-Detail node (after the name step, so nothing is told to an unconfirmed caller) and on the English Reception node, where the prompt places it after step 1. When to use it
+Detail node and on the English Reception node, where the prompt places it after step 1. The call reaches the Detail node after the name step also when the caller
+declines a name or gives another one (edge `name_given`), so only the Persona's record rule keeps a lookup result from a caller who did not confirm the name: a prompt
+rule, not structure, checked only by the runbook's test call 2 (its unconfirmed variant); a text-chat lookup answers `{"known": false}`. When to use it
 lives only in the tool's description; the node line says only the order (look up before the node's question, ask that question on the next turn). Tools are organization
 objects referenced by UUID: the templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) / `…0102` (en), which `golive.py` replaces
 with the real tool's UUID; Dograh would silently drop the placeholder, and go-live refuses to publish it. Call QA cannot check that a relayed record is faithful: Dograh's
@@ -111,6 +113,13 @@ This is an operator substitution before import, not a call variable; `.invalid` 
 Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
 Dograh continues with earlier context and the generic greeting fallback (`docs/voice-agent/pre-call-data-fetch.mdx`).
 
+The caller-work tool comes next, before import. In `tool-lookup-caller-work-{lang}.json` → `tool`, replace `https://synchronize.example.invalid` in
+`definition.config.url` (keep `/api/voice/tools/caller-work`) and `<DOGRAH_WEBHOOK_CREDENTIAL_UUID>` in `definition.config.credential_uuid` with the same origin and
+credential UUID. Create the tool from that object (`POST /api/v1/tools/`, or Tools → new HTTP API tool with the same fields), then put the returned `tool_uuid` in
+place of the placeholder `00000000-0000-4000-8000-000000000101` in node `2` → `data.tool_uuids` (Korean) or `…0102` in node `1` (English). Dograh looks a node's
+tools up among the organization's active tools only (`api/db/tool_client.py:294-319` at 1.51), so a placeholder left in place publishes without an error and the
+lookup never runs. For an existing workflow, `golive.py --apply` does all of this (Live wiring, below).
+
 Node `6` is the sole caller of `POST /api/voice/call-ended`: replace the same `.invalid` origin in `data.endpoint_url`, and put that same credential UUID in
 `data.credential_uuid`. It is an enabled `POST` Webhook node, with no incoming or outgoing edges: Dograh runs integration nodes asynchronously after completion,
 including caller hangups and English End Call tool exits, after QA. Do not connect it to the conversation graph or add a second tool/integration calling this endpoint.
@@ -138,7 +147,8 @@ equal → untouched, different description/icon/definition → updated in place 
 credential differs, `template-replaced` when the live tool equals the old ref's tool, and `REPLACES-CUSTOM` otherwise (edited in Dograh → Tools, or an old ref without the
 tool), which needs `--accept-merged tool.<name>`. Its URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named `--credential-name`
 credential. A duplicate name, or a tool of that name that is not an active HTTP API tool, aborts before any write. The tool reference is wiring too: every node the new
-template gives the tool references it once, a reference to an archived tool of that name is replaced where it stands, other tools on the node stay, and a reference Dograh
+template gives the tool references it once (from any old ref, with or without the tool), a reference to an archived tool of that name is replaced where it stands, other
+tools on the node stay, a template change to those other tools on that node is refused, and a reference Dograh
 cannot return aborts the plan. The published definition and the tool are both read back. A failed apply after a tool update prints the `--rollback` command even when the
 workflow is unchanged, because an updated tool is live at once.
 
