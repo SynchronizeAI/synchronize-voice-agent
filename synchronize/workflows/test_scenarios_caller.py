@@ -25,7 +25,8 @@ class FakeChat(ThreadingHTTPServer):
         self.tool_uuid = str(uuid4())
         self.calls, self.workflows, self.sessions = [], {}, {}
         self.override = {"model_configuration_uuid": str(uuid4())}
-        self.tools = [live_tool(lang, self.tool_uuid) for lang in ("ko", "en")]
+        # self.tool_uuid is the live Korean tool; English has its own.
+        self.tools = [live_tool("ko", self.tool_uuid), live_tool("en", str(uuid4()))]
 
 
 def live_tool(lang, tool_uuid):
@@ -342,7 +343,7 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual(
                 [d["code"] for d in workflow["settings"]["call_dispositions"]], list(scenarios_caller.CODES)
             )
-        copies = [t for t in self.fake.tools if t["tool_uuid"] not in (self.fake.tool_uuid,)]
+        copies = [t for t in self.fake.tools if t["name"] == "lookup_caller_work_ko" and t["tool_uuid"] != self.fake.tool_uuid]
         self.assertEqual(len(copies), 1)
         self.assertEqual(copies[0]["status"], "archived")
         self.assertEqual(copies[0]["name"], "lookup_caller_work_ko")

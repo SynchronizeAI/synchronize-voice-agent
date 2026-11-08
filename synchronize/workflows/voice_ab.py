@@ -158,7 +158,8 @@ def main(argv=None):
     parser.add_argument("--models", nargs=2, default=list(MODELS))
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("sheets", nargs="*", type=Path, help="score: the filled sheets")
-    args = parser.parse_args(argv)
+    # Intermixed: the sheets may follow --out (plain parse_args binds the empty list before it).
+    args = parser.parse_intermixed_args(argv)
     try:
         if args.command == "make":
             golive.require(bool(args.voice), "--voice is required")
