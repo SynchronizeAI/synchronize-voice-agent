@@ -1551,7 +1551,8 @@ class GoLiveTests(unittest.TestCase):
                 self.assertNotIn(gone, spec["tool"]["description"])
             # Nothing else the model reads still offers the count or a due date.
             text = json.dumps(golive.template("HEAD", lang), ensure_ascii=False)
-            for gone in ("open item", "due date", "건수", "기한", "마감"):
+            # Whole phrases: a bare 기한 would also match 이야기한.
+            for gone in ("open item", "due date", "건수", "이른 기한", "마감일"):
                 self.assertNotIn(gone, text)
             events = [m["event"] for m in spec["tool"]["definition"]["messages"]]
             self.assertEqual(events, ["start", "delayed"])
