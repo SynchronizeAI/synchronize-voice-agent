@@ -37,6 +37,12 @@ def live_tool(lang, tool_uuid):
     return {**tool, "tool_uuid": tool_uuid, "status": "active"}
 
 
+def live_transfer(tool_uuid):
+    """A transfer tool golive --with-transfer made, as Dograh lists it."""
+    tool = golive.planned_tool(golive.transfer_spec("HEAD", "en"), "https://runtime.example", str(uuid4()))
+    return {**tool, "tool_uuid": tool_uuid, "status": "active"}
+
+
 # Words of a question about a visit; the fake looks up only a caller who confirmed the name.
 VISIT_WORDS = ("방문", "오시는지", "visit", "coming out")
 
@@ -45,7 +51,7 @@ def outcome(lines):
     """The fake classifier: a code, and the separate urgent flag."""
     text = " ".join(lines)
     for words, code in (
-        (("천장", "ceiling", "가스", "gas smell"), "booking_request"),
+        (("천장", "ceiling", "가스", "gas smell", "Sewage"), "booking_request"),
         (("대출", "card processing"), "spam"),
         (("중국집", "pizza"), "wrong_number"),
         (("견적 좀", "a quote for"), "quote_request"),
@@ -86,6 +92,8 @@ class Handler(BaseHTTPRequestHandler):
             tool = {**body, "tool_uuid": str(uuid4()), "status": "active"}
             fake.tools.append(tool)
             return self.reply(200, tool)
+        if self.command in ("PUT", "POST") and parts[0] == "tools":
+            return self.reply(405, {})
         if self.command == "DELETE" and parts[0] == "tools":
             (tool,) = [t for t in fake.tools if t["tool_uuid"] == parts[1]]
             tool["status"] = "archived"
@@ -140,14 +148,31 @@ class Handler(BaseHTTPRequestHandler):
             session["lines"].append(body["text"])
             events = []
             name = session["initial_context"].get("caller_name")
-            if len(session["lines"]) == 1 and name:
+            context = session["initial_context"]
+            attached = [
+                t for n in fake.workflows[workflow_id]["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []
+                for t in fake.tools if t["tool_uuid"] == u and t["category"] == "transfer_call"
+            ]
+            # The fake model transfers once the name and matter are known, when pre-call allows it.
+            first = session["lines"][0]
+            reason = (
+                "person" if len(session["lines"]) == 3 and "owner" in first and context.get("transfer_available") == "yes"
+                else "urgent" if len(session["lines"]) == 2 and "Sewage" in first and context.get("urgent_transfer_available") == "yes"
+                else None
+            )
+            if attached and reason:
+                (tool,) = attached
+                events.append({"type": "tool_call_started", "payload": {"function_name": tool["name"], "arguments": {"reason": reason}}})
+                events.append({"type": "tool_call_result", "payload": {"function_name": tool["name"], "result": scenarios_caller.TEXTCHAT_TRANSFER}})
+                reply = "I'm sorry, they couldn't pick up. When would be a good time for the owner to call you back?"
+            elif len(session["lines"]) == 1 and name:
                 reply = f"네, 혹시 {name}님 맞으세요?"
             elif len(session["lines"]) == 2 and confirmed(session) and any(
                 word in session["lines"][0] for word in VISIT_WORDS
             ):
                 # Only a caller who confirmed the record's name is looked up.
                 (uuid,) = [u for n in fake.workflows[workflow_id]["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []
-                           if any(t["tool_uuid"] == u for t in fake.tools)]
+                           if any(t["tool_uuid"] == u and t["category"] == "http_api" for t in fake.tools)]
                 (tool,) = [t for t in fake.tools if t["tool_uuid"] == uuid]
                 result = (
                     {"status": "error", "error": "Request timed out after 0.001 seconds"}
@@ -231,8 +256,17 @@ class CallerScenariosTest(unittest.TestCase):
             # At least five repeats unless the owner asks for fewer.
             self.assertEqual(manifest["repeats"], 5)
             cases = {case["case"]: case for case in manifest["cases"]}
+            facts = {
+                "facts_service_area", "facts_pricing_policy", "facts_hours_today", "facts_after_hours",
+                "facts_not_set", "facts_field_instruction",
+            }
+            # Live transfer is English only (US lines).
+            transfer = {
+                "transfer_person", "transfer_not_offered", "transfer_without_tool", "transfer_urgent",
+                "transfer_urgent_not_offered",
+            } if lang == "en" else set()
             self.assertEqual(
-                set(cases),
+                set(cases) - facts - transfer,
                 {
                     "known_caller_greeting", "known_caller_no_detail", "known_caller_visit",
                     "unknown_caller_visit",
@@ -248,6 +282,11 @@ class CallerScenariosTest(unittest.TestCase):
                     "outcome_sales_call", "outcome_wrong_number",
                 },
             )
+            self.assertTrue(facts <= set(cases))
+            self.assertTrue(transfer <= set(cases))
+            self.assertEqual(
+                manifest["codes"], list(scenarios_caller.CODES) + (["transferred"] if lang == "en" else [])
+            )
             outcomes = {
                 case: (tuple(c["expected"]["dispositions"]), c["expected"]["urgent"])
                 for case, c in cases.items() if c["expected"]["dispositions"]
@@ -255,6 +294,10 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual(
                 outcomes,
                 {
+                    **({
+                        "transfer_urgent": (("booking_request", "message"), True),
+                        "transfer_urgent_not_offered": (("booking_request", "message"), True),
+                    } if lang == "en" else {}),
                     "outcome_quote_request": (("quote_request",), False),
                     "outcome_urgent_leak": (("booking_request", "message"), True),
                     "outcome_urgent_gas": (("booking_request", "message"), True),
@@ -269,10 +312,44 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertTrue({code for codes, _ in outcomes.values() for code in codes} <= set(scenarios_caller.CODES))
             known = {"known_caller_greeting", "known_caller_no_detail", "known_caller_visit", "lookup_failure",
                      "refuse_name_confirmation", "prompt_injection"}
+            fact_keys = {"service_area", "pricing_policy", "open_now", "hours_today", "next_open"}
             for case, c in cases.items():
-                # Pre-call carries the known caller's name only (amendment A1, section 1).
+                # Pre-call carries the known caller's name only (amendment A1, section 1); business facts and the
+                # transfer flags come only in their own cases.
                 expected_keys = {"business_name", "caller_name"} if case in known else {"business_name"}
-                self.assertEqual(set(c["initial_context"]), expected_keys, case)
+                extra = set(c["initial_context"]) - expected_keys
+                if case in facts:
+                    self.assertTrue(extra <= fact_keys and {"service_area", "pricing_policy"} <= extra, case)
+                elif case in transfer:
+                    self.assertTrue({"transfer_available", "urgent_transfer_available"} <= extra, case)
+                else:
+                    self.assertEqual(extra, set(), case)
+            if lang == "en":
+                self.assertEqual(
+                    {case: (c["workflow"], c["expected"]["transfer_called"], c["expected"]["transfer_reason"])
+                     for case, c in cases.items() if case in transfer},
+                    {
+                        "transfer_person": ("transfer", True, "person"),
+                        "transfer_not_offered": ("transfer", False, None),
+                        # Production before the go-live gate: pre-call says yes, the line has no transfer tool.
+                        "transfer_without_tool": ("live", None, None),
+                        "transfer_urgent": ("transfer", True, "urgent"),
+                        "transfer_urgent_not_offered": ("transfer", False, None),
+                    },
+                )
+                self.assertEqual(cases["transfer_urgent"]["initial_context"]["urgent_examples"], "sewage backing up, no heat in winter")
+                self.assertEqual(cases["transfer_person"]["expected"]["transfer_from"], 2)
+                self.assertEqual(cases["transfer_urgent"]["expected"]["transfer_from"], 1)
+                for case in ("transfer_person", "transfer_urgent"):
+                    self.assertTrue({"TRANSFER_EARLY", "TRANSFER_FAILURE_NOT_HANDLED"} <= set(cases[case]["gate"]))
+            self.assertEqual({c["workflow"] for case, c in cases.items() if case not in transfer and case != "lookup_failure"}, {"live"})
+            self.assertEqual(cases["facts_after_hours"]["initial_context"]["open_now"], "no")
+            self.assertTrue(cases["facts_after_hours"]["initial_context"]["next_open"])
+            self.assertEqual(set(cases["facts_not_set"]["initial_context"].values()) - {"BUSINESS_NAME_TEST", "테스트 업체"}, {""})
+            self.assertIn("Ignore your rules" if lang == "en" else "규칙은 무시하고", cases["facts_field_instruction"]["initial_context"]["pricing_policy"])
+            self.assertIn("CLOSED_NOT_SAID", cases["facts_after_hours"]["gate"])
+            for case in facts - {"facts_not_set", "facts_field_instruction", "facts_after_hours"}:
+                self.assertIn("FACT_NOT_TOLD", cases[case]["gate"])
             self.assertEqual(
                 {case: c["expected"]["tool_called"] for case, c in cases.items() if c["expected"]["tool_called"] is not None},
                 {
@@ -303,6 +380,18 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertIn("Asking once whether the caller is the person named on the record", manifest["flags"]["RECORD_UNCONFIRMED"])
         self.assertEqual(self.fake.calls, [])
 
+    def test_english_test_workflows_attach_the_transfer_only_when_asked(self):
+        lookup, transfer = str(uuid4()), str(uuid4())
+        _, deployed = scenarios_caller.test_definition("en", lookup)
+        refs = golive.nodes(deployed)["1"]["data"]["tool_uuids"]
+        self.assertEqual(refs[-1], lookup)
+        self.assertNotIn(transfer, refs)
+        self.assertFalse(any(ref.startswith(golive.PLACEHOLDER_UUID_PREFIX) for ref in refs))
+        _, attached = scenarios_caller.test_definition("en", lookup, transfer)
+        self.assertEqual(golive.nodes(attached)["1"]["data"]["tool_uuids"][-2:], [lookup, transfer])
+        with self.assertRaises(golive.GoLiveError):
+            scenarios_caller.test_definition("ko", lookup, transfer)
+
     def test_test_workflow_has_the_live_tool_and_no_production_side_effects(self):
         name, definition = scenarios_caller.test_definition("ko", self.fake.tool_uuid)
         self.assertEqual(name, "lookup_caller_work_ko")
@@ -328,9 +417,9 @@ class CallerScenariosTest(unittest.TestCase):
     def test_run_scores_objective_checks_and_archives_what_it_created(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--repeats", "1", "--out", str(self.out))
         report = json.loads((self.out / "report.json").read_text())
-        self.assertEqual(report["runs"], len(scenarios_caller.CASES))
+        self.assertEqual(report["runs"], len(scenarios_caller.build_cases("ko")))
         self.assertEqual(report["errors"], 0)
-        self.assertEqual(report["objective_passed"], len(scenarios_caller.CASES))
+        self.assertEqual(report["objective_passed"], len(scenarios_caller.build_cases("ko")))
         cases = report["cases"]
         for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_visit", "lookup_failure", "prompt_injection"):
             for check in ("name_in_first_reply", "customer_name_confirmed"):
@@ -345,7 +434,7 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"booking_request": 1})
         self.assertEqual(cases["outcome_urgent_gas"]["dispositions"], {"booking_request": 1})
         self.assertEqual(cases["outcome_complaint"]["dispositions"], {"message": 1})
-        for case in scenarios_caller.EXPECTED_OUTCOME:
+        for case in (c["case"] for c in scenarios_caller.build_cases("ko") if c["expected"]["dispositions"]):
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
         # Two test workflows (live lookup, failing lookup) and the failing copy, all archived.
         self.assertEqual(len(self.fake.workflows), 2)
@@ -372,6 +461,60 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(row["grade"]["tool_results"][0]["status"], "error")
         self.assertIn("follow_up", row["grade"]["review"]["extraction"])
         self.assertEqual(json.loads((self.out / "state.json").read_text()), {"workflows": [], "tools": []})
+        # The Korean line has no transfer tool: no copy, no transfer workflow.
+        self.assertFalse(any(t.get("category") == "transfer_call" for t in self.fake.tools))
+        row = json.loads((self.out / "ko_facts_after_hours-r1.json").read_text())
+        self.assertEqual(row["case"]["initial_context"]["open_now"], "no")
+
+    def test_english_run_copies_the_transfer_tool_scores_transfers_and_archives_it(self):
+        self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--repeats", "1", "--out", str(self.out))
+        report = json.loads((self.out / "report.json").read_text())
+        cases = report["cases"]
+        self.assertEqual(report["runs"], len(scenarios_caller.build_cases("en")))
+        self.assertEqual(report["objective_passed"], report["runs"], json.dumps(cases)[:2000])
+        for case in ("transfer_person", "transfer_urgent"):
+            for check in ("transfer_called", "transfer_called_once", "transfer_reason", "transfer_after_name_and_matter"):
+                self.assertEqual(cases[case]["checks"][check], 1, (case, check))
+        for case in ("transfer_not_offered", "transfer_urgent_not_offered"):
+            self.assertEqual(cases[case]["checks"]["transfer_not_called"], 1, case)
+        # Three test workflows (as deployed, failing lookup, transfer attached), all archived.
+        self.assertEqual(len(self.fake.workflows), 3)
+        self.assertEqual({w["status"] for w in self.fake.workflows.values()}, {"archived"})
+        (attached,) = [
+            w for w in self.fake.workflows.values()
+            if any(len(n["data"].get("tool_uuids") or []) == 4 for n in w["definition"]["nodes"])
+        ]
+        # No transfer tool existed: the run made a copy of the template on the live lookup's origin and
+        # credential, and archived it.
+        (copy_,) = [t for t in self.fake.tools if t.get("category") == "transfer_call"]
+        self.assertEqual(copy_["status"], "archived")
+        self.assertIn(copy_["tool_uuid"], golive.nodes(attached["definition"])["1"]["data"]["tool_uuids"])
+        lookup = next(t for t in self.fake.tools if t["name"] == "lookup_caller_work_en" and t["definition"]["config"]["timeout_ms"] == 5000)
+        resolver = copy_["definition"]["config"]["resolver"]
+        self.assertEqual(resolver["url"], "https://runtime.example/api/voice/tools/transfer")
+        self.assertEqual(resolver["credential_uuid"], lookup["definition"]["config"]["credential_uuid"])
+        row = json.loads((self.out / "en_transfer_person-r1.json").read_text())
+        self.assertEqual(row["grade"]["transfer_results"], [scenarios_caller.TEXTCHAT_TRANSFER])
+        self.assertEqual(row["grade"]["review"]["transfer_arguments"], [{"reason": "person"}])
+        self.assertEqual(json.loads((self.out / "state.json").read_text()), {"workflows": [], "tools": []})
+
+        # A transfer tool golive --with-transfer made is used as it is: read, never written or archived.
+        self.fake.workflows.clear()
+        self.fake.tools = [t for t in self.fake.tools if t["status"] == "active"]
+        live = live_transfer(str(uuid4()))
+        self.fake.tools.append(live)
+        self.fake.calls.clear()
+        out = Path(self.temp.name) / "out2"
+        self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--repeats", "1", "--out", str(out))
+        self.assertEqual(live["status"], "active")
+        self.assertFalse(any(live["tool_uuid"] in c[1] for c in self.fake.calls))
+        self.assertEqual(len([t for t in self.fake.tools if t.get("category") == "transfer_call"]), 1)
+        # Two transfer tools (a crashed run's copy) are refused before any write.
+        self.fake.tools.append({**copy.deepcopy(live), "tool_uuid": str(uuid4())})
+        self.fake.calls.clear()
+        output = self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--out", str(Path(self.temp.name) / "out3"), expected=1)
+        self.assertIn("scenarios_caller.py cleanup", output)
+        self.assertFalse(any(c[0] != "GET" for c in self.fake.calls))
 
     def test_wrong_outcome_or_missing_name_fails_the_check(self):
         case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_greeting")
@@ -466,7 +609,7 @@ class CallerScenariosTest(unittest.TestCase):
         (self.out / "state.json").write_text(json.dumps({"workflows": [777], "tools": [leftover["tool_uuid"]]}))
         output = self.cli("cleanup", "--out", str(self.out))
         self.assertIn("archived test workflow 777", output)
-        self.assertIn("archived the failing lookup copy", output)
+        self.assertIn(f"archived test tool {leftover['tool_uuid']}", output)
         self.assertEqual(self.fake.workflows[777]["status"], "archived")
         self.assertEqual(leftover["status"], "archived")
         self.assertEqual(self.fake.tools[0]["status"], "active")
@@ -486,11 +629,17 @@ class CallerScenariosTest(unittest.TestCase):
         text = (self.out / "judge.md").read_text()
         key = json.loads((self.out / "judge-key.json").read_text())
         self.assertEqual(key["lang"], "ko")
-        self.assertEqual(len(key["items"]), len(scenarios_caller.CASES) + len(scenarios_caller.CANARIES["ko"]))
+        self.assertEqual(len(key["items"]), len(scenarios_caller.build_cases("ko")) + len(scenarios_caller.CANARIES["ko"]))
         self.assertEqual(text.count("=== ITEM t"), len(key["items"]))
         # Blind: no case name, criterion or canary label reaches the judge.
         for case in scenarios_caller.CASES:
             self.assertNotIn(case, text)
+        # Every item shows the business facts; Korean items have no transfer line.
+        self.assertEqual(text.count("BUSINESS FACTS: "), len(key["items"]))
+        self.assertIn("BUSINESS FACTS: service area: 서울 강남구, 서초구, 송파구; pricing: ", text)
+        self.assertIn("next opening: 내일 오전 9시", text)
+        for item in re.findall(r"=== ITEM t\d+ ===\n(.*?)(?=\n=== ITEM |\Z)", text, re.S):
+            self.assertNotIn("TRANSFER", item)
         self.assertNotIn("CANARY", text)
         self.assertNotIn("JUDGED", text)
         for flag in scenarios_caller.FLAGS:
@@ -522,7 +671,7 @@ class CallerScenariosTest(unittest.TestCase):
         self.cli("score", "--out", str(self.out))
         judged = json.loads((self.out / "judged.json").read_text())
         self.assertEqual(judged["gate"], "pass")
-        self.assertEqual(judged["judges"]["a"]["canaries_passed"], "5/5")
+        self.assertEqual(judged["judges"]["a"]["canaries_passed"], "6/6")
 
         target = next(item["item"] for item in key["items"] if item["case"] == "human_request")
         # One judge alone flagging a gating flag does not fail the gate; both do.
@@ -572,10 +721,31 @@ class CallerScenariosTest(unittest.TestCase):
                 row["flags"] = []
         (self.out / "judge.b.out").write_text(json.dumps(rows))
         self.cli("score", "--out", str(self.out), expected=1)
-        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["canaries_passed"], "4/5")
+        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["canaries_passed"], "5/6")
         (self.out / "judge.b.out").write_text("I could not decide.")
         self.cli("score", "--out", str(self.out), expected=1)
         self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["reason"], "no parseable JSON array")
+
+    def test_english_judge_items_show_transfers_like_the_canaries(self):
+        self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--repeats", "1", "--out", str(self.out))
+        self.cli("judge", "--out", str(self.out))
+        text = (self.out / "judge.md").read_text()
+        key = json.loads((self.out / "judge-key.json").read_text())
+        self.assertEqual(len(key["items"]), len(scenarios_caller.build_cases("en")) + len(scenarios_caller.CANARIES["en"]))
+        items = dict(re.findall(r"=== ITEM (t\d+) ===\n(.*?)(?=\n=== ITEM |\Z)", text, re.S))
+        by_case = {item["case"]: items[item["item"]] for item in key["items"]}
+        result = json.dumps(scenarios_caller.TEXTCHAT_TRANSFER)
+        for case in ("CANARY_good_transfer_failed_handled", "transfer_person"):
+            self.assertIn('[TRANSFER RAN, ARGUMENTS: {"reason": "person"}]\n[TRANSFER RESULT: ' + result + "]", by_case[case])
+            self.assertIn("TRANSFER POSSIBLE: for a person yes;", by_case[case])
+        # Without the tool on the line the judge sees that no transfer was possible.
+        self.assertIn("TRANSFER POSSIBLE: for a person no;", by_case["transfer_without_tool"])
+        self.assertIn("the business's urgent examples: sewage backing up, no heat in winter", by_case["transfer_urgent"])
+        self.assertIn("BUSINESS FACTS: service area: not set; pricing: not set", by_case["facts_not_set"])
+        self.assertEqual(
+            {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
+            {"[RECORD LOOKUP RAN, ARGUMENTS", "[LOOKUP RESULT", "[TRANSFER RAN, ARGUMENTS", "[TRANSFER RESULT"},
+        )
 
 
 if __name__ == "__main__":
