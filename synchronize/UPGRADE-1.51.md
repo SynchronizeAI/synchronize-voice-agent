@@ -23,7 +23,9 @@ from the 1.51.0 image (the runbook's R steps).
 ## Configuration
 
 `docker-compose.yaml` is identical between the tags, so no Railway variable changes. One new variable, `DOGRAH_DEPLOYMENT_ID`
-(`api/constants.py:78-80`), defaults to `oss` and is only read by the hosted MPS key client (`api/services/mps_service_key_client.py:692,735`).
+(`api/constants.py:78-80`), defaults to `oss` when `DEPLOYMENT_MODE` is `oss` (its default, `:64`, our case) and to `us` otherwise. It is sent as
+`deployment_id` by the hosted MPS key client (`api/services/mps_service_key_client.py:692,735,772,817`) and added to PostHog event properties
+(`api/services/posthog_tenant.py:56`, `api/services/auth/depends.py:90,231,269`); nothing in the call path reads it.
 Python dependencies moved (Pipecat 1.15, `tuner-pipecat-sdk` 0.3.0, `jsonschema`), all inside the image.
 
 ## Fields Synchronize uses
@@ -90,6 +92,12 @@ Python dependencies moved (Pipecat 1.15, `tuner-pipecat-sdk` 0.3.0, `jsonschema`
   (default 2, cascade only) (`api/services/workflow/dto.py:368-392`). The defaults equal 1.49's behaviour (1.49
   `api/services/pipecat/greeting.py`, two words while the greeting is pending), so the templates leave them out.
 - **Call opening (#913, #950).** One opening path for all transports; early caller speech is kept.
+- **End Call goodbye across a schema change.** Each api version reads only its own tool-message shape: 1.51 plays only
+  `definition.messages` (`api/services/workflow/pipecat_engine_custom_tools.py:116-125`, `tool_messages.py:22-28`), 1.49 only
+  `config.messageType`/`customMessage` (1.49 `pipecat_engine_custom_tools.py:111-125`). The call still ends, without the spoken goodbye,
+  while an api serves on the other shape: during a rollback from the Alembic downgrade until the 1.49 api deployment is live, and during the
+  upgrade if Railway keeps the 1.49 container serving while the new one migrates at start (not verifiable offline). The runbook runs the
+  upgrade when no call is expected and the downgrade and the api image switch back to back.
 
 ## Operator UI
 
@@ -111,7 +119,9 @@ Exact commands: `RUNBOOK-20261108.md` steps 1–4 and R2–R5. In order:
    `pg_restore -f /dev/null`, since `pg_restore -l` reads only the table of contents), and confirm `alembic current` is `b3c1d9e4f7a2`.
 2. `dograh-api` → image `dograhai/dograh-api:1.51.0`. Watch the deploy log for `Running upgrade b3c1d9e4f7a2 -> c82d4f6a9b10` and
    `-> d6a83e2b19f0`; healthy when `GET /api/v1/health` answers 200 (the compose health check) and `alembic current` is `d6a83e2b19f0`.
-3. `dograh-ui` → image `dograhai/dograh-ui:1.51.0`; healthy when the UI root answers 200.
+3. `dograh-ui` → image `dograhai/dograh-ui:1.51.0`; healthy when `/auth/login` answers 200. The root answers 307 without a session
+   cookie: with the default `AUTH_PROVIDER=local` (`api/constants.py:68`) the UI middleware redirects every non-public path to `/auth/login`
+   (`ui/src/middleware.ts:11,60-67`).
 4. Check the two English End Call tools now show their goodbye under "When the tool starts".
 
 Rollback, newest state first: workflow changes with `golive.py --rollback`; cut every tool with a delayed message or more than
