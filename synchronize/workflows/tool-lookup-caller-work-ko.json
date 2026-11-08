@@ -38,7 +38,8 @@
         ],
         "timeout_ms": 5000,
         "body_template": {
-          "workflow_run_id": "{{initial_context.workflow_run_id}}"
+          "workflow_run_id": "{{initial_context.workflow_run_id}}",
+          "language": "ko"
         },
         "body_format": "json"
       }

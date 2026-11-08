@@ -1541,7 +1541,7 @@ class GoLiveTests(unittest.TestCase):
             self.assertEqual(config["method"], "POST")
             self.assertEqual(config["timeout_ms"], 5000)
             self.assertIsNone(config["parameters"])
-            self.assertEqual(config["body_template"], golive.RUN_BODY)
+            self.assertEqual(config["body_template"], golive.run_body(lang))
             self.assertEqual(config["preset_parameters"], golive.RUN_PRESET)
             # The description says what the result holds: the caller's next visit days, already
             # spoken (amendment A1, section 2; A2 drops the open item count and due date).

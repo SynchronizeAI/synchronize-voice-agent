@@ -53,7 +53,11 @@ PROBE_COMPLETION_RUN_ID = "2147483647"  # Largest id Dograh's 32-bit column can 
 # the namespaced initial_context it reads is the run's, set after the model's arguments
 # (api/services/workflow/tools/custom_tool.py:472-482); without it the body is the model's
 # arguments laid over the presets (:432, :473-474), so a caller could name another run.
-RUN_BODY = {"workflow_run_id": "{{initial_context.workflow_run_id}}"}
+def run_body(lang):
+    """The lookup tool's whole request body: the run id from the run's own context, and the
+    workflow's language as a constant (Synchronize speaks visit days in the call's language, not
+    in the language the company reads the app in)."""
+    return {"workflow_run_id": "{{initial_context.workflow_run_id}}", "language": lang}
 # The preset stays as a fail-closed guard. Were the run's context ever without the id, the
 # template would fall back to the bare name (api/utils/template_renderer.py:192-196), which
 # the model's arguments supply; the required preset refuses that request first
@@ -1156,9 +1160,9 @@ def deploy(args):
         )
         config = spec["tool"]["definition"]["config"]
         require(
-            config.get("body_template") == RUN_BODY
+            config.get("body_template") == run_body(args.lang)
             and config.get("preset_parameters") == RUN_PRESET,
-            "Tool template must send only the run id, from its body template",
+            "Tool template must send only the run id, from its body template, and its language",
         )
     client = Dograh()
     snapshot, path = backup(
@@ -1415,7 +1419,11 @@ def probe(args):
         ("pre-call", body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
         ("call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
         # The tool's body template keeps the run id's integer type (custom_tool.py:278-295).
-        ("tools/caller-work", {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID)}, {}),
+        (
+            "tools/caller-work",
+            {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID), "language": TARGETS[args.workflow_id]},
+            {},
+        ),
     ):
         status, data = request(
             "POST",

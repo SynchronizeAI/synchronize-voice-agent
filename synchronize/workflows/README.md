@@ -83,7 +83,7 @@ visit days may be told to that caller). A record with no name has no name to con
 nothing is told. The agent never brings up a visit by itself; visits come only from the lookup.
 
 During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under
-`tool`, written with every field Dograh stores so the read-back is exact). Its `body_template` is `{"workflow_run_id": "{{initial_context.workflow_run_id}}"}`,
+`tool`, written with every field Dograh stores so the read-back is exact). Its `body_template` is `{"workflow_run_id": "{{initial_context.workflow_run_id}}", "language": "<ko|en>"}` (the workflow's own language as a constant, so Synchronize speaks visit days in the call's language),
 so the request body is that one key, filled from the run's own context, and nothing the model sends reaches it. A preset alone would not hold: at 1.51 the
 model's arguments override presets and, with no body template, are the body (`api/services/workflow/tools/custom_tool.py:432`, `:473-474`), so a caller
 could have the model name another call's run. A body template sends only its own keys and is rendered with the run's `initial_context` laid over the
