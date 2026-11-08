@@ -13,6 +13,7 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import difflib
+import fnmatch
 import http.client
 import ipaddress
 import json
@@ -67,6 +68,10 @@ MODEL_CONNECTIONS = {
     "00000000-0000-4000-8000-000000000203": ("deepgram", "synchronize-deepgram"),
 }
 CONNECTIONS_ROUTE = "/model-connections/provider-connections"
+RESOLVE_ROUTE = "/model-connections/resolve"
+# The line's own End Call tools (tool-end-call-*-<lang>.json): one fixed start message and no reason
+# parameter, because a reason replaces the call's outcome (pipecat_engine_custom_tools.py end_call_handler).
+END_CALL_CONFIG = {"endCallReason": False, "endCallReasonDescription": None}
 BACKUP_FORMAT = 3  # 3 adds the caller-work tool; format 2 backups stay restorable.
 PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
 # Largest digit-text id accepted by the runtime's _run_id validator. Unlike
@@ -229,8 +234,7 @@ class Dograh:
         return result
 
 
-def git_file(ref, name, optional=False):
-    """A workflows/ file at a local commit; None when optional and absent there."""
+def git_commit(ref):
     resolved = subprocess.run(
         [
             "git",
@@ -245,7 +249,24 @@ def git_file(ref, name, optional=False):
         text=True,
     )
     require(resolved.returncode == 0, "Cannot resolve local git commit ref")
-    commit = resolved.stdout.strip()
+    return resolved.stdout.strip()
+
+
+def workflow_files(ref, pattern):
+    """The names of the workflows/ files at a local commit that match a glob pattern."""
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-tree", "--name-only", git_commit(ref), "--", "synchronize/workflows/"],
+        capture_output=True,
+        text=True,
+    )
+    require(listed.returncode == 0, "Cannot read template from local git ref")
+    names = [line.rsplit("/", 1)[-1] for line in listed.stdout.splitlines()]
+    return sorted(name for name in names if fnmatch.fnmatchcase(name, pattern))
+
+
+def git_file(ref, name, optional=False):
+    """A workflows/ file at a local commit; None when optional and absent there."""
+    commit = git_commit(ref)
     path = f"{commit}:synchronize/workflows/{name}"
     if optional:
         # Trees only: absence is an empty listing, any git failure an error.
@@ -293,6 +314,49 @@ def tool_spec(ref, lang):
         "Tool template must be an HTTP API tool on the placeholder caller-work route",
     )
     return {"placeholder_uuid": placeholder, "tool": tool}
+
+
+def end_call_spec(ref, name):
+    """One of the line's End Call tools at a ref: it speaks its fixed start message and hangs up."""
+    spec = git_file(ref, name)
+    placeholder = str(UUID(spec["placeholder_uuid"]))
+    require(
+        placeholder.startswith(PLACEHOLDER_UUID_PREFIX) and placeholder != PENDING_UUID,
+        "Tool placeholder_uuid must be a reserved placeholder UUID",
+    )
+    tool = spec["tool"]
+    definition = tool["definition"]
+    messages = definition.get("messages") or []
+    require(
+        tool["category"] == definition["type"] == "end_call"
+        and set(tool) == set(TOOL_FIELDS)
+        and definition.get("config") == END_CALL_CONFIG
+        and len(messages) == 1
+        and messages[0].get("event") == "start"
+        and messages[0].get("type") == "text",
+        "End Call tool template must be an End Call tool with one spoken start message and no reason",
+    )
+    return {"placeholder_uuid": placeholder, "tool": tool}
+
+
+def end_call_specs(ref, lang):
+    """The line's own End Call tools at a ref, in placeholder order; none for refs from before them."""
+    return sorted(
+        (end_call_spec(ref, name) for name in workflow_files(ref, f"tool-end-call-*-{lang}.json")),
+        key=lambda spec: spec["placeholder_uuid"],
+    )
+
+
+def tool_specs(ref, lang):
+    """Every tool a ref's template names by placeholder: the caller-work tool, then the End Call tools."""
+    lookup = tool_spec(ref, lang)
+    specs = ([lookup] if lookup else []) + end_call_specs(ref, lang)
+    require(
+        len({spec["placeholder_uuid"] for spec in specs}) == len(specs)
+        and len({spec["tool"]["name"] for spec in specs}) == len(specs),
+        "Tool templates must have distinct names and placeholders",
+    )
+    return specs
 
 
 def resolve_tool_refs(definition, placeholder, tool_uuid):
@@ -622,19 +686,24 @@ def validate_wiring(definition, original, runtime, credential_uuid, lang, final=
 
 
 def planned_tool(spec, runtime, credential_uuid):
+    """The tool as go-live writes it: the caller-work tool wired to the runtime; an End Call tool as is."""
     tool = copy.deepcopy(spec["tool"])
-    tool["definition"]["config"].update(
-        url=runtime + TOOL_ROUTE, credential_uuid=credential_uuid
-    )
+    if tool["category"] == "http_api":
+        tool["definition"]["config"].update(
+            url=runtime + TOOL_ROUTE, credential_uuid=credential_uuid
+        )
     return tool
 
 
 def validate_tool(tool, runtime, credential_uuid):
     config = tool["definition"]["config"]
     require(
-        tool["category"] == "http_api"
-        and config["url"] == runtime + TOOL_ROUTE
-        and config["credential_uuid"] == credential_uuid,
+        tool["category"] == "end_call"
+        or (
+            tool["category"] == "http_api"
+            and config["url"] == runtime + TOOL_ROUTE
+            and config["credential_uuid"] == credential_uuid
+        ),
         "Tool wiring verification failed",
     )
     text = json.dumps(tool).lower()
@@ -767,7 +836,11 @@ def show_tool(planned, existing, change, mode=None):
         print(f"tool {name}: unchanged")
         return
     if change == "create":
-        print(f"tool {name}: create (route {TOOL_ROUTE}; credential reference only)")
+        print(
+            f"tool {name}: create (route {TOOL_ROUTE}; credential reference only)"
+            if planned["category"] == "http_api"
+            else f"tool {name}: create (End Call; its fixed start message only)"
+        )
         return
     differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
     if "definition" in differs:
@@ -838,12 +911,37 @@ def resolve_connections(value, resolved):
     return resolved.get(value, value) if isinstance(value, str) else value
 
 
+def without_connections(value):
+    """A model service with every provider connection UUID left out."""
+    if isinstance(value, dict):
+        return {
+            key: None if key == "provider_connection_uuid" else without_connections(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [without_connections(item) for item in value]
+    return value
+
+
 def planned_settings(live, old, new, field_modes):
     """Apply only the template's delta of the settings go-live owns to the live settings."""
     out = copy.deepcopy(live or {})
     before, previous, current = settings_values(live), settings_values(old), settings_values(new)
     for label, new_value in current.items():
         old_value, live_value = previous[label], before[label]
+        # The template did not change, but the line names another connection than the one of that name now:
+        # an archived or recreated connection. Kept, it would fail the call or fall back every turn.
+        require(
+            not (
+                label.startswith(f"settings.{MODEL_OVERRIDE}.")
+                and old_value == new_value
+                and live_value not in (MISSING, new_value)
+                and without_connections(live_value) == without_connections(new_value)
+            ),
+            f"{label}: the live line names another provider connection than the active one of the template's name "
+            "(archived or recreated?). Point it at that connection in Dograh, or re-plan with an --old-ref from before "
+            f"this setting and --accept-merged {label}",
+        )
         if old_value == new_value or live_value == new_value:
             continue
         require(new_value is not MISSING, f"Template settings must keep {label.removeprefix('settings.')}")
@@ -859,6 +957,37 @@ def planned_settings(live, old, new, field_modes):
             target = out[MODEL_OVERRIDE] = dict(out.get(MODEL_OVERRIDE) or {})
         target[key] = copy.deepcopy(new_value)
     return out
+
+
+def check_model(client, settings):
+    """Dograh resolves the planned model override as a call would (read-only). A refusal stops the plan before any write."""
+    try:
+        result = client.api("POST", RESOLVE_ROUTE, (settings or {}).get(MODEL_OVERRIDE) or {})
+    except GoLiveError as error:
+        raise GoLiveError(
+            f"Dograh does not resolve the planned model override ({str(error).split(';')[0]}); nothing was written. "
+            "Check the line's named configuration and the model connections in Dograh"
+        ) from None
+    resolved = result.get("configuration") or {}
+    services = resolved.get("services") or {}
+
+    def described(service):
+        settings_ = service.get("settings") or {}
+        return " ".join(
+            str(value) for value in (service.get("provider"), settings_.get("model"), settings_.get("language")) if value
+        )
+
+    rules = [
+        f"{rule['condition']['type']}"
+        + (f" {rule['condition']['after_ms']} ms" if rule["condition"].get("after_ms") else "")
+        + f" → {described(rule['target'])}"
+        for rule in (resolved.get("llm_fallback") or {}).get("rules", [])
+    ]
+    print(
+        "model check (as a call resolves it): "
+        + "; ".join(f"{role} {described(services[role])}" for role in ("llm", "stt", "tts") if role in services)
+        + (f"; fallback {', '.join(rules)}" if rules else "; no fallback")
+    )
 
 
 def show_settings(live, planned, field_modes):
@@ -1206,7 +1335,8 @@ class WriteState:
             raise
         if stage.startswith("credential"):
             self.credential = outcome
-        elif stage.startswith("tool"):
+        elif stage.startswith("tool") and self.tool in ("unchanged", "created"):
+            # Several tools: an updated or restored one, live at once, outranks a created one.
             self.tool = outcome
         elif stage == "draft save":
             self.draft = "yes"
@@ -1247,28 +1377,30 @@ def deploy(args):
     old, new = template(args.old_ref, args.lang), template(args.new_ref, args.lang)
     old_settings = settings_template(args.old_ref, args.lang)
     new_settings = settings_template(args.new_ref, args.lang)
-    spec, old_spec = tool_spec(args.new_ref, args.lang), tool_spec(args.old_ref, args.lang)
+    specs, old_specs = tool_specs(args.new_ref, args.lang), tool_specs(args.old_ref, args.lang)
+    old_by_name = {spec["tool"]["name"]: spec for spec in old_specs}
     require(
-        not old_spec or (spec and old_spec["tool"]["name"] == spec["tool"]["name"]),
-        "Removing or renaming the caller-work tool is not supported by go-live",
+        old_by_name.keys() <= {spec["tool"]["name"] for spec in specs},
+        "Removing or renaming a tool is not supported by go-live",
     )
-    if spec:
+    for spec in specs:
         require(
             references(new, spec["placeholder_uuid"]),
-            "Template does not reference its tool placeholder",
+            f"Template does not reference the placeholder of tool {spec['tool']['name']}",
         )
-        config = spec["tool"]["definition"]["config"]
-        require(
-            config.get("body_template") == run_body(args.lang)
-            and config.get("preset_parameters") == RUN_PRESET,
-            "Tool template must send only the run id, from its body template, and its language",
-        )
+        if spec["tool"]["category"] == "http_api":
+            config = spec["tool"]["definition"]["config"]
+            require(
+                config.get("body_template") == run_body(args.lang)
+                and config.get("preset_parameters") == RUN_PRESET,
+                "Tool template must send only the run id, from its body template, and its language",
+            )
     client = Dograh()
     snapshot, path = backup(
         client,
         args.workflow_id,
         backup_directory(args.backup_dir),
-        tool_names=(spec["tool"]["name"],) if spec else (),
+        tool_names=tuple(spec["tool"]["name"] for spec in specs),
     )
     live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
     # The model connections the settings templates name, as their UUIDs, before any comparison with live.
@@ -1276,39 +1408,44 @@ def deploy(args):
     old_settings = resolve_connections(old_settings, connections)
     new_settings = resolve_connections(new_settings, connections)
     existing = find_credential(client, args.credential_name)
-    existing_tool = change = tool = None
     field_modes = {}
     templates = (old, new)
     wired = set()
-    if spec:
-        wired = {
+    entries = []  # one per tool: its template, the live tool, the planned tool, the change and its reference
+    for spec in specs:
+        name, placeholder = spec["tool"]["name"], spec["placeholder_uuid"]
+        old_spec = old_by_name.get(name)
+        wired |= {
             node["id"]
-            for node in new["nodes"]
-            if spec["placeholder_uuid"] in (node.get("data", {}).get("tool_uuids") or [])
+            for node in templates[1]["nodes"]
+            if placeholder in (node.get("data", {}).get("tool_uuids") or [])
         }
-        existing_tool = snapshot["tools"][spec["tool"]["name"]]
+        existing_tool = snapshot["tools"][name]
         tool = planned_tool(spec, runtime, existing or PENDING_UUID)
         change = tool_change(existing_tool, tool)
         if change == "update":
             old_tool = planned_tool(old_spec, runtime, existing or PENDING_UUID) if old_spec else None
-            field_modes[tool_label(tool["name"])] = tool_mode(existing_tool, old_tool, tool)
+            field_modes[tool_label(name)] = tool_mode(existing_tool, old_tool, tool)
         # Until the tool exists, the template placeholder stands for it.
-        tool_ref = existing_tool["tool_uuid"] if existing_tool else spec["placeholder_uuid"]
-        new = resolve_tool_refs(new, spec["placeholder_uuid"], tool_ref)
+        ref = existing_tool["tool_uuid"] if existing_tool else placeholder
+        new = resolve_tool_refs(new, placeholder, ref)
         if old_spec:
-            old = resolve_tool_refs(old, old_spec["placeholder_uuid"], tool_ref)
+            old = resolve_tool_refs(old, old_spec["placeholder_uuid"], ref)
+        entries.append({"spec": spec, "existing": existing_tool, "tool": tool, "change": change, "ref": ref})
     planned = patched(live, old, new, runtime, existing or PENDING_UUID, args.lang, field_modes, wired)
-    if spec:
-        planned = wire_tool_refs(client, planned, templates, spec, tool_ref)
+    for entry in entries:
+        planned = wire_tool_refs(client, planned, templates, entry["spec"], entry["ref"])
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
     require(PLACEHOLDER_UUID_PREFIX not in json.dumps(settings), "Unresolved placeholder in settings")
-    for value in (planned, settings, tool):
+    for value in (planned, settings, *(entry["tool"] for entry in entries)):
         ensure_no_secrets(value)
     changes = diff_fields(live, planned)
     show_plan(changes, field_modes, args.lang)
     show_settings(live_settings, settings, field_modes)
-    if spec:
-        show_tool(tool, existing_tool, change, field_modes.get(tool_label(tool["name"])))
+    if any(settings_values(new_settings)[f"settings.{MODEL_OVERRIDE}.{key}"] is not MISSING for key in MODEL_KEYS):
+        check_model(client, settings)
+    for entry in entries:
+        show_tool(entry["tool"], entry["existing"], entry["change"], field_modes.get(tool_label(entry["tool"]["name"])))
     merged = {
         field
         for field, mode in field_modes.items()
@@ -1324,7 +1461,10 @@ def deploy(args):
     )
     settings_changed = settings != live_settings
     already_wired = (
-        planned == live and not settings_changed and change is None and existing is not None
+        planned == live
+        and not settings_changed
+        and not any(entry["change"] for entry in entries)
+        and existing is not None
     )
     print(
         "Already wired; no remote writes"
@@ -1349,9 +1489,9 @@ def deploy(args):
     fresh = client.api("GET", f"/workflow/fetch/{args.workflow_id}")
     require_published(fresh, args.workflow_id)
     require(same_snapshot(fresh, snapshot), "Workflow changed since backup; rerun plan")
-    if spec:
+    for entry in entries:
         require(
-            lookup_tool(client, spec["tool"]["name"]) == existing_tool,
+            lookup_tool(client, entry["spec"]["tool"]["name"]) == entry["existing"],
             "Tool changed since backup; rerun plan",
         )
     require(path.is_file(), "Fresh backup missing")
@@ -1361,31 +1501,32 @@ def deploy(args):
     with WriteState(path) as state:
         ident = credential(client, args.credential_name, secret, existing, state)
         # Only substitute UUIDs: do not re-run the merge after a remote write.
-        if spec:
-            tool = planned_tool(spec, runtime, ident)
+        for entry in entries:
+            existing_tool = entry["existing"]
+            tool = planned_tool(entry["spec"], runtime, ident)
             validate_tool(tool, runtime, ident)
             written = None
             if existing_tool is None:
                 written = state.write(
-                    "tool create", "created", lambda: client.api("POST", "/tools/", tool)
+                    "tool create", "created", lambda tool=tool: client.api("POST", "/tools/", tool)
                 )
             elif tool_change(existing_tool, tool):
                 written = state.write(
                     "tool update",
                     "updated",
-                    lambda: client.api(
+                    lambda tool=tool, existing_tool=existing_tool: client.api(
                         "PUT",
                         f"/tools/{existing_tool['tool_uuid']}",
                         {field: tool[field] for field in TOOL_UPDATE_FIELDS},
                     ),
                 )
-            tool_uuid = (
+            entry["uuid"] = (
                 str(UUID(written["tool_uuid"])) if written else existing_tool["tool_uuid"]
             )
             state.stage = "tool read-back"
             print("Stage: tool read-back")
-            verify_tool(client, tool_uuid, tool)
-            planned = resolve_tool_refs(planned, spec["placeholder_uuid"], tool_uuid)
+            verify_tool(client, entry["uuid"], tool)
+            planned = resolve_tool_refs(planned, entry["spec"]["placeholder_uuid"], entry["uuid"])
         planned_nodes = nodes(planned)
         planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
         planned_nodes["6"]["data"]["credential_uuid"] = ident
@@ -1393,7 +1534,7 @@ def deploy(args):
         print("Stage: wiring validation")
         validate_wiring(planned, live, runtime, ident, args.lang, final=True)
         require(
-            not spec or references(planned, tool_uuid),
+            all(references(planned, entry["uuid"]) for entry in entries),
             "Tool reference missing from the planned definition",
         )
         expected = {

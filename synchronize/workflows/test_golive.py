@@ -121,6 +121,7 @@ class FakeDograh(ThreadingHTTPServer):
         # Provider connections as Dograh lists them: the three the English settings template names, plus one
         # unrelated; secrets are never listed (configured_credentials names the keys only).
         self.connection_uuids = {ref: str(uuid4()) for ref in golive.MODEL_CONNECTIONS}
+        self.resolve_status = None  # an HTTP status the model check answers instead of a preview
         self.connections = [
             {
                 "uuid": self.connection_uuids[ref], "name": name, "provider": provider, "connection_settings": {},
@@ -159,6 +160,11 @@ class FakeDograh(ThreadingHTTPServer):
             }
         )
         self.spec = golive.tool_spec("HEAD", lang)
+        # Every tool the template names by placeholder; a created tool gets its own UUID (the lookup keeps tool_uuid).
+        self.specs = golive.tool_specs("HEAD", lang)
+        self.created_uuids = {
+            spec["tool"]["name"]: self.tool_uuid if spec is self.specs[0] else str(uuid4()) for spec in self.specs
+        }
         self.old_settings = golive.settings_template("940fdef", lang)
         self.new_settings = golive.settings_template("HEAD", lang)
         self.tools.clear()
@@ -197,10 +203,8 @@ class FakeDograh(ThreadingHTTPServer):
                     if old["id"] == "4" and field == "prompt":
                         node["data"][field] += "\nLOCAL CUSTOM LINE: keep this exactly."
                     if field == "tool_uuids":
-                        node["data"][field] = [
-                            self.tool_uuid if ref == self.spec["placeholder_uuid"] else ref
-                            for ref in node["data"][field]
-                        ]
+                        uuid_of = {s["placeholder_uuid"]: self.created_uuids[s["tool"]["name"]] for s in self.specs}
+                        node["data"][field] = [uuid_of.get(ref, ref) for ref in node["data"][field]]
         for old in self.old["edges"]:
             new = next(e for e in self.new["edges"] if e["id"] == old["id"])
             edge = next(e for e in out["edges"] if e["id"] == old["id"])
@@ -307,6 +311,28 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, masked(fake.workflow))
         elif self.command == "GET" and self.path == "/api/v1/model-connections/provider-connections":
             self.reply(200, fake.connections)
+        elif self.command == "POST" and self.path == "/api/v1/model-connections/resolve":
+            # Dograh's preview: every referenced connection must be an active one (else 404), as a call resolves it.
+            active = {c["uuid"]: c for c in fake.connections if c["is_active"]}
+            override = body or {}
+            refs = re.findall(r'"provider_connection_uuid": "([^"]+)"', json.dumps(override))
+            if fake.resolve_status or not all(ref in active for ref in refs):
+                self.reply(fake.resolve_status or 404, {"detail": "Provider connection not found"})
+                return
+
+            def service(selection):
+                return {"provider": active[selection["provider_connection_uuid"]]["provider"], "settings": selection["settings"]}
+
+            self.reply(200, {
+                "configuration": {
+                    "services": {role: service(override[role]) for role in ("llm", "stt") if role in override},
+                    "llm_fallback": {"version": 1, "rules": [
+                        {"condition": rule["condition"], "target": service(rule["target"])}
+                        for rule in (override.get("llm_fallback") or {}).get("rules", [])
+                    ]},
+                },
+                "provenance": [],
+            })
         elif self.command == "GET" and self.path == "/api/v1/credentials/":
             self.reply(
                 200,
@@ -327,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST" and not ident:
                 match = {
                     "id": len(fake.tools) + 1,
-                    "tool_uuid": fake.tool_uuid,
+                    "tool_uuid": fake.created_uuids.get(body["name"], str(uuid4())),
                     "status": "active",
                     "created_at": "2026-11-08T00:00:00Z",
                     "updated_at": None,
@@ -493,7 +519,8 @@ class GoLiveTests(unittest.TestCase):
         return stdout.getvalue(), stderr.getvalue()
 
     def writes(self):
-        return [call for call in self.fake.calls if call[0] != "GET"]
+        # The model check posts to Dograh's read-only preview; it writes nothing.
+        return [call for call in self.fake.calls if call[0] != "GET" and not call[1].endswith("/model-connections/resolve")]
 
     def test_plan_read_only_fresh_private_backup_and_field_diff(self):
         out, err = self.run_cli(["plan", *self.args()])
@@ -509,7 +536,10 @@ class GoLiveTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         saved = json.loads(path.read_text())
         self.assertEqual(saved["format_version"], 3)
-        self.assertEqual(saved["tools"], {"lookup_caller_work_en": None})
+        # Every tool the English template names: the lookup and the line's three End Call tools.
+        self.assertEqual(saved["tools"], dict.fromkeys(
+            ["lookup_caller_work_en", "end_call_other_language", "end_call_recording_declined", "end_call_spanish"]
+        ))
         self.assertEqual(
             saved["workflow_definition"],
             masked(self.fake.original)["workflow_definition"],
@@ -547,23 +577,32 @@ class GoLiveTests(unittest.TestCase):
                 self.assertNotIn(
                     "turn_stop_strategy", self.fake.workflow["workflow_configurations"]
                 )
+                tools = len(self.fake.specs)
+                self.assertEqual(tools, 4 if lang == "en" else 1)
                 self.assertEqual(
                     [(c[0], c[1]) for c in self.writes()],
                     [
                         ("POST", "/api/v1/credentials/"),
-                        ("POST", "/api/v1/tools/"),
+                        *[("POST", "/api/v1/tools/")] * tools,
                         ("PUT", f"/api/v1/workflow/{self.fake.workflow_id}"),
                         ("POST", f"/api/v1/workflow/{self.fake.workflow_id}/publish"),
                     ],
                 )
                 self.assertEqual(
-                    set(self.writes()[2][2]),
+                    set(self.writes()[1 + tools][2]),
                     {"workflow_definition", "workflow_configurations"},
                 )
-                (tool,) = self.fake.tools
-                for field in golive.TOOL_FIELDS:
-                    self.assertEqual(tool[field], self.fake.expected_tool()[field])
+                # Each tool is its template as written, the lookup wired; each node reference is that tool's own UUID.
+                by_name = {t["name"]: t for t in self.fake.tools}
+                self.assertEqual(len(by_name), tools)
+                for spec in self.fake.specs:
+                    wanted = self.fake.expected_tool() if spec is self.fake.specs[0] else spec["tool"]
+                    for field in golive.TOOL_FIELDS:
+                        self.assertEqual(by_name[spec["tool"]["name"]][field], wanted[field])
+                    self.assertEqual(by_name[spec["tool"]["name"]]["tool_uuid"], self.fake.created_uuids[spec["tool"]["name"]])
                 self.assertIn(f"tool lookup_caller_work_{lang}: create", out)
+                if lang == "en":
+                    self.assertIn("tool end_call_recording_declined: create (End Call; its fixed start message only)", out)
                 refs = [
                     ref
                     for node in self.fake.workflow["workflow_definition"]["nodes"]
@@ -597,7 +636,7 @@ class GoLiveTests(unittest.TestCase):
                 self.assertIn("Already wired", out)
                 self.assertIn(f"tool lookup_caller_work_{lang}: unchanged", out)
                 self.assertEqual(len(self.fake.credentials), 1)
-                self.assertEqual(len(self.fake.tools), 1)
+                self.assertEqual(len(self.fake.tools), len(self.fake.specs))
                 self.assertTrue(
                     self.fake.credentials[0]["credential_data"]["header_value"]
                     == self.fake.secret
@@ -650,7 +689,8 @@ class GoLiveTests(unittest.TestCase):
         self.fake.workflow["template_context_variables"] = {"local": "changed"}
         out, _ = self.run_cli(["--rollback", str(path)])
         self.assertIn("tool lookup_caller_work_en: did not exist at backup time; retained", out)
-        self.assertEqual(len(self.fake.tools), 1)
+        self.assertIn("tool end_call_recording_declined: did not exist at backup time; retained", out)
+        self.assertEqual(len(self.fake.tools), len(self.fake.specs))
         self.assertEqual(
             json.dumps(
                 self.fake.workflow["workflow_definition"], ensure_ascii=False
@@ -1028,7 +1068,7 @@ class GoLiveTests(unittest.TestCase):
         )
         out, _ = self.run_cli(self.args("--apply"))
         self.assertIn("Stage: credential rotate", out)
-        self.assertEqual([c[0] for c in self.writes()], ["PUT", "POST", "PUT", "POST"])
+        self.assertEqual([c[0] for c in self.writes()], ["PUT", *["POST"] * len(self.fake.specs), "PUT", "POST"])
         self.assertTrue(
             self.fake.credentials[0]["credential_data"]["header_value"]
             == self.fake.secret
@@ -1260,7 +1300,7 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("No workflow rollback needed", err)
         self.assertIn("A credential change or a newly created tool is retained", err)
         self.assertNotIn("--rollback", err)
-        self.assertEqual([c[0] for c in self.writes()], ["POST", "POST"])
+        self.assertEqual([c[0] for c in self.writes()], ["POST", *["POST"] * len(self.fake.specs)])
 
     def test_old_backup_format_is_refused_before_any_api_access(self):
         self.run_cli(self.args())
@@ -1306,11 +1346,11 @@ class GoLiveTests(unittest.TestCase):
         self.run_cli(
             self.args("--apply", accept_merged=("node 4.data.prompt", "tool.lookup_caller_work_en"))
         )
-        tool_put = [c for c in self.writes() if c[1].startswith("/api/v1/tools/")]
+        tool_put = [c for c in self.writes() if c[0] == "PUT" and c[1].startswith("/api/v1/tools/")]
         self.assertEqual(len(tool_put), 1)
         self.assertEqual(tool_put[0][:2], ("PUT", f"/api/v1/tools/{self.fake.tool_uuid}"))
         self.assertEqual(set(tool_put[0][2]), set(golive.TOOL_UPDATE_FIELDS))
-        (tool,) = self.fake.tools
+        (tool,) = [t for t in self.fake.tools if t["name"] == "lookup_caller_work_en"]
         for field in golive.TOOL_FIELDS:
             self.assertEqual(tool[field], self.fake.expected_tool()[field])
         self.assertEqual(self.fake.workflow["workflow_definition"], self.fake.expected())
@@ -1467,6 +1507,140 @@ class GoLiveTests(unittest.TestCase):
                 self.assertEqual(self.writes(), [])
                 self.assertEqual(self.fake.workflow, self.fake.original)
         self.assertEqual((gemini["provider"], bedrock["provider"]), ("google", "aws_bedrock"))
+
+    def test_the_english_end_call_tools_follow_the_contract(self):
+        """A recording objection or a caller in another language ends the call in one tool-only turn, and only
+        the recording tool marks recording_declined (Synchronize erases a call's details on it)."""
+        specs = {spec["tool"]["name"]: spec for spec in golive.end_call_specs("HEAD", "en")}
+        self.assertEqual(golive.end_call_specs("HEAD", "ko"), [])
+        said = {name: spec["tool"]["definition"]["messages"][0]["text"] for name, spec in specs.items()}
+        self.assertEqual(said, {
+            "end_call_other_language": "I can only help in English on this line. The owner will call you back at this number. "
+                                       "Thank you for calling. Goodbye.",
+            "end_call_recording_declined": "Recording can't be switched off on this line, so I'll end the call now. "
+                                           "The owner will call you back at this number. Thank you for calling. Goodbye.",
+            "end_call_spanish": "El dueño le devolverá la llamada a este número. Gracias por llamar. Adiós.",
+        })
+        for spec in specs.values():
+            definition = spec["tool"]["definition"]
+            # Dograh's End Call type: one start message, no reason (a reason would replace the call's outcome).
+            self.assertEqual((spec["tool"]["category"], definition["type"]), ("end_call", "end_call"))
+            self.assertEqual(definition["config"], golive.END_CALL_CONFIG)
+            self.assertEqual([m["event"] for m in definition["messages"]], ["start"])
+            self.assertIn("in a turn with no speech of your own", spec["tool"]["description"])
+        # What the recording tool is not for lives in its description, the one text the model reads when choosing it.
+        self.assertIn(
+            "not for a caller who only asks whether the call is recorded, wants one detail kept off the recording, "
+            "wants to speak to a person, or takes the objection back",
+            specs["end_call_recording_declined"]["tool"]["description"],
+        )
+        definition = golive.template("HEAD", "en")
+        start = golive.nodes(definition)["1"]["data"]
+        self.assertEqual(
+            start["tool_uuids"][-3:], [spec["placeholder_uuid"] for spec in golive.end_call_specs("HEAD", "en")]
+        )
+        persona = golive.nodes(definition)["4"]["data"]["prompt"]
+        for name in specs:
+            self.assertIn(f"call {name}", persona)
+        # The language rule is for a caller who speaks another language, not one who asks about one.
+        self.assertNotIn("or asks for one", persona)
+        self.assertNotIn("on your next turn call end_call", persona)
+        prompts = {v["name"]: v["prompt"] for v in start["extraction_variables"]}
+        self.assertTrue(prompts["recording_declined"].startswith(
+            "true only when the assistant called the tool end_call_recording_declined"
+        ))
+        self.assertTrue(prompts["caller_language"].startswith(
+            "Only when the assistant called the tool end_call_spanish or end_call_other_language"
+        ))
+        # A template that asks for a reason, or speaks twice, is refused before anything else.
+        good = copy.deepcopy(specs["end_call_spanish"])
+        for change in (
+            lambda spec: spec["tool"]["definition"]["config"].update(endCallReason=True),
+            lambda spec: spec["tool"]["definition"]["messages"].append(
+                {"type": "text", "text": "Hola.", "event": "delayed", "after_ms": 1000}
+            ),
+            lambda spec: spec["tool"].update(category="http_api"),
+        ):
+            bad = copy.deepcopy(good)
+            change(bad)
+            with patch.object(golive, "git_file", return_value=bad), self.assertRaises(golive.GoLiveError):
+                golive.end_call_spec("HEAD", "tool-end-call-spanish-en.json")
+
+    def test_an_end_call_tool_edited_in_dograh_needs_acceptance_and_the_others_are_created(self):
+        self.add_credential()
+        name = "end_call_recording_declined"
+        (spec,) = [spec for spec in self.fake.specs if spec["tool"]["name"] == name]
+        edited = copy.deepcopy(spec["tool"])
+        edited["definition"]["messages"][0]["text"] = "We record every call. Goodbye."
+        self.fake.tools.append({
+            "id": 1, "tool_uuid": self.fake.created_uuids[name], "status": "active",
+            "created_at": "2026-11-01T00:00:00Z", "updated_at": None, "created_by": None, **edited,
+        })
+        out, _ = self.run_cli(["plan", *self.args()])
+        self.assertIn(f"tool {name}: update definition.messages (REPLACES-CUSTOM; values withheld)", out)
+        _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn(f"--accept-merged tool.{name}", err)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply", accept_merged=("node 4.data.prompt", f"tool.{name}")))
+        tool_writes = [(c[0], c[1]) for c in self.writes() if c[1].startswith("/api/v1/tools/")]
+        self.assertEqual(sorted(tool_writes), sorted(
+            [("PUT", f"/api/v1/tools/{self.fake.created_uuids[name]}")] + [("POST", "/api/v1/tools/")] * 3
+        ))
+        (tool,) = [t for t in self.fake.tools if t["name"] == name]
+        self.assertEqual(tool["definition"], spec["tool"]["definition"])
+        self.assertEqual(self.fake.workflow["workflow_definition"], self.fake.expected())
+
+    def test_an_updated_tool_outranks_a_created_one_in_the_recovery(self):
+        self.add_credential()
+        name = "lookup_caller_work_en"
+        self.fake.add_tool(description="An older description")
+        # The lookup is updated first, then the End Call tools are created; the draft save then fails.
+        self.fake.failure = lambda method, path: method == "PUT" and path == "/api/v1/workflow/3"
+        _, err = self.run_cli(
+            self.args("--apply", accept_merged=("node 4.data.prompt", f"tool.{name}")), expected=1
+        )
+        self.assertIn("failed stage: draft save", err)
+        self.assertIn("tool: updated", err)
+        self.assertIn("--rollback", err)
+
+    def test_the_model_check_and_a_stale_connection_stop_the_plan_before_any_write(self):
+        out, _ = self.run_cli(["plan", *self.args()])
+        # Dograh resolves the planned override as a call would, and the plan says what the call will run.
+        self.assertIn(
+            "model check (as a call resolves it): llm google gemini-3.6-flash; stt deepgram nova-3-general en; "
+            "fallback no_output 1500 ms → aws_bedrock us.anthropic.claude-haiku-4-5-20251001-v1:0, "
+            "error → aws_bedrock us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            out,
+        )
+        resolve = [c for c in self.fake.calls if c[1] == "/api/v1/model-connections/resolve"]
+        self.assertEqual(len(resolve), 1)
+        self.assertEqual(resolve[0][2]["llm"]["settings"], {"model": "gemini-3.6-flash"})
+        for status in (404, 422):
+            self.fake.resolve_status = status
+            for args in (["plan", *self.args()], self.args("--apply")):
+                _, err = self.run_cli(args, expected=1)
+                self.assertIn(f"Dograh does not resolve the planned model override (Dograh POST failed: HTTP {status})", err)
+        self.assertEqual(self.writes(), [])
+        self.fake.resolve_status = None
+        # Korea's template sets no model service: no model check.
+        self.fake.select("ko")
+        self.fake.calls.clear()
+        self.run_cli(["plan", *self.args()])
+        self.assertFalse(any("resolve" in c[1] for c in self.fake.calls))
+        # The template did not change, but the line still names a connection that has since been recreated under
+        # the same name: refused, never kept silently.
+        self.fake.select("en")
+        self.fake.workflow["workflow_configurations"] = self.fake.expected_settings()
+        self.fake.workflow["workflow_configurations"]["model_configuration_override"]["stt"]["provider_connection_uuid"] = str(uuid4())
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        self.fake.calls.clear()
+        _, err = self.run_cli(["plan", *self.args(), "--old-ref", "HEAD"], expected=1)
+        self.assertIn(
+            "settings.model_configuration_override.stt: the live line names another provider connection than the active "
+            "one of the template's name (archived or recreated?)",
+            err,
+        )
+        self.assertEqual(self.writes(), [])
 
     def test_a_custom_call_limit_or_model_service_needs_acceptance(self):
         settings = self.fake.workflow["workflow_configurations"]
@@ -1964,6 +2138,7 @@ class GoLiveTests(unittest.TestCase):
             from api.schemas.tool import CreateToolRequest
             from api.schemas.workflow_configurations import WorkflowConfigurationDefaults
         tools = [golive.tool_spec("HEAD", lang)["tool"] for lang in ("ko", "en")]
+        tools += [spec["tool"] for spec in golive.end_call_specs("HEAD", "en")]
         for tool in tools:
             parsed = CreateToolRequest.model_validate(tool)
             # Dograh stores definition.model_dump(); read-back equality needs it canonical.
