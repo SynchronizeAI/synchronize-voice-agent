@@ -4,6 +4,7 @@ import ast
 import contextlib
 import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import io
 import json
 import os
@@ -94,11 +95,15 @@ class FakeDograh(ThreadingHTTPServer):
         self.runtime = f"http://127.0.0.1:{self.server_port}"
         self.api_key, self.secret = uuid4().hex, uuid4().hex
         self.credential_uuid = str(uuid4())
+        self.tool_uuid = str(uuid4())
         self.credentials, self.calls, self.published = [], [], 0
+        self.tools = []
         self.wrong_status = 401
         self.probe_result = {}
         self.completion_status, self.completion_wrong_status = 200, 401
         self.completion_result = {}
+        self.tool_route_status, self.tool_route_wrong_status = 200, 401
+        self.tool_route_result = {"known": False}
         self.credential_error = False
         self.drift = None
         self.redirect = False
@@ -133,6 +138,10 @@ class FakeDograh(ThreadingHTTPServer):
                 "data": {"name": "Local note", "prompt": "Keep"},
             }
         )
+        self.spec = golive.tool_spec("HEAD", lang)
+        self.old_settings = golive.settings_template("940fdef", lang)
+        self.new_settings = golive.settings_template("HEAD", lang)
+        self.tools.clear()
         self.workflow = {
             "id": self.workflow_id,
             "workflow_definition": live,
@@ -142,6 +151,10 @@ class FakeDograh(ThreadingHTTPServer):
                 },
                 "dictionary": "Custom business",
                 "smart_turn_stop_secs": 1.3,
+                # Live settings were entered from the old template.
+                "call_dispositions": copy.deepcopy(
+                    self.old_settings["call_dispositions"]
+                ),
             },
             "template_context_variables": {"local": "value"},
             "version_status": "published",
@@ -163,11 +176,50 @@ class FakeDograh(ThreadingHTTPServer):
                     node["data"][field] = copy.deepcopy(new["data"][field])
                     if old["id"] == "4" and field == "prompt":
                         node["data"][field] += "\nLOCAL CUSTOM LINE: keep this exactly."
+                    if field == "tool_uuids":
+                        node["data"][field] = [
+                            self.tool_uuid if ref == self.spec["placeholder_uuid"] else ref
+                            for ref in node["data"][field]
+                        ]
+        for old in self.old["edges"]:
+            new = next(e for e in self.new["edges"] if e["id"] == old["id"])
+            edge = next(e for e in out["edges"] if e["id"] == old["id"])
+            if old["data"] != new["data"]:
+                edge["data"] = copy.deepcopy(new["data"])
         out["nodes"].append(
             copy.deepcopy(next(n for n in self.new["nodes"] if n["id"] == "6"))
         )
         wire(out, self.runtime, self.credential_uuid)
         return out
+
+    def expected_settings(self):
+        return {
+            **copy.deepcopy(self.original["workflow_configurations"]),
+            "call_dispositions": copy.deepcopy(self.new_settings["call_dispositions"]),
+        }
+
+    def expected_tool(self):
+        tool = copy.deepcopy(self.spec["tool"])
+        tool["definition"]["config"].update(
+            url=self.runtime + "/api/voice/tools/caller-work",
+            credential_uuid=self.credential_uuid,
+        )
+        return tool
+
+    def add_tool(self, **changes):
+        """An existing live tool, by default identical to the planned one."""
+        tool = {
+            "id": len(self.tools) + 1,
+            "tool_uuid": self.tool_uuid,
+            "status": "active",
+            "created_at": "2026-11-01T00:00:00Z",
+            "updated_at": None,
+            "created_by": None,
+            **self.expected_tool(),
+        }
+        tool.update(changes)
+        self.tools.append(tool)
+        return tool
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -202,6 +254,14 @@ class Handler(BaseHTTPRequestHandler):
                 if valid else {"echo": fake.secret},
             )
             return
+        if self.path == "/api/voice/tools/caller-work":
+            fake.probe_headers.append(dict(self.headers))
+            valid = self.headers.get("X-Dograh-Secret") == fake.secret
+            self.reply(
+                fake.tool_route_status if valid else fake.tool_route_wrong_status,
+                fake.tool_route_result if valid else {"echo": fake.secret},
+            )
+            return
         if self.headers.get("X-API-Key") != fake.api_key:
             self.reply(403, {})
             return
@@ -223,6 +283,33 @@ class Handler(BaseHTTPRequestHandler):
                     for c in fake.credentials
                 ],
             )
+        elif self.command == "GET" and self.path == "/api/v1/tools/":
+            # Dograh lists every tool except archived ones by default.
+            self.reply(200, [t for t in fake.tools if t["status"] != "archived"])
+        elif self.path.startswith("/api/v1/tools/"):
+            ident = self.path.removeprefix("/api/v1/tools/")
+            match = next((t for t in fake.tools if t["tool_uuid"] == ident), None)
+            if self.command == "POST" and not ident:
+                match = {
+                    "id": len(fake.tools) + 1,
+                    "tool_uuid": fake.tool_uuid,
+                    "status": "active",
+                    "created_at": "2026-11-08T00:00:00Z",
+                    "updated_at": None,
+                    "created_by": None,
+                    **copy.deepcopy(body),
+                }
+                fake.tools.append(match)
+            elif match is not None and self.command == "PUT":
+                # UpdateToolRequest: name/category are not part of an update here.
+                match.update(
+                    {k: copy.deepcopy(v) for k, v in body.items() if v is not None}
+                )
+                match["updated_at"] = "2026-11-08T00:00:01Z"
+            if match is None or self.command not in ("GET", "POST", "PUT"):
+                self.reply(404, {})
+            else:
+                self.reply(200, match)
         elif self.command in ("POST", "PUT") and self.path.startswith(
             "/api/v1/credentials/"
         ):
@@ -386,7 +473,8 @@ class GoLiveTests(unittest.TestCase):
         (path,) = self.backups.glob("*.json")
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         saved = json.loads(path.read_text())
-        self.assertEqual(saved["format_version"], 2)
+        self.assertEqual(saved["format_version"], 3)
+        self.assertEqual(saved["tools"], {"lookup_caller_work_en": None})
         self.assertEqual(
             saved["workflow_definition"],
             masked(self.fake.original)["workflow_definition"],
@@ -407,10 +495,41 @@ class GoLiveTests(unittest.TestCase):
                 out, _ = self.run_cli(self.args("--apply"))
                 self.assertIn("ROLLBACK FILE:", out)
                 self.assertEqual(self.fake.workflow["workflow_definition"], expected)
-                for key in golive.SETTINGS:
-                    self.assertEqual(self.fake.workflow[key], self.fake.original[key])
-                self.assertEqual([c[0] for c in self.writes()], ["POST", "PUT", "POST"])
-                self.assertEqual(set(self.writes()[1][2]), {"workflow_definition"})
+                # Only the dispositions change; every other setting survives.
+                self.assertEqual(
+                    self.fake.workflow["workflow_configurations"],
+                    self.fake.expected_settings(),
+                )
+                self.assertEqual(
+                    self.fake.workflow["template_context_variables"],
+                    self.fake.original["template_context_variables"],
+                )
+                self.assertNotIn(
+                    "turn_stop_strategy", self.fake.workflow["workflow_configurations"]
+                )
+                self.assertEqual(
+                    [(c[0], c[1]) for c in self.writes()],
+                    [
+                        ("POST", "/api/v1/credentials/"),
+                        ("POST", "/api/v1/tools/"),
+                        ("PUT", f"/api/v1/workflow/{self.fake.workflow_id}"),
+                        ("POST", f"/api/v1/workflow/{self.fake.workflow_id}/publish"),
+                    ],
+                )
+                self.assertEqual(
+                    set(self.writes()[2][2]),
+                    {"workflow_definition", "workflow_configurations"},
+                )
+                (tool,) = self.fake.tools
+                for field in golive.TOOL_FIELDS:
+                    self.assertEqual(tool[field], self.fake.expected_tool()[field])
+                self.assertIn(f"tool lookup_caller_work_{lang}: create", out)
+                self.assertIn("settings.call_dispositions: template-replaced; codes", out)
+                self.assertIn("+ quote_request, booking_request, urgent", out)
+                self.assertIn("node 1.data.tool_uuids" if lang == "en" else "node 2.data.tool_uuids", out)
+                if lang == "ko":
+                    self.assertIn("edge 1-2.data.condition: template-replaced", out)
+                self.assertNotIn(golive.PLACEHOLDER_UUID_PREFIX, json.dumps(expected))
                 first = self.fake.credentials[0]["credential_data"]
                 self.assertTrue(
                     first
@@ -426,7 +545,9 @@ class GoLiveTests(unittest.TestCase):
                 self.assertEqual(self.fake.workflow["workflow_definition"], expected)
                 self.assertEqual(self.writes(), [])
                 self.assertIn("Already wired", out)
+                self.assertIn(f"tool lookup_caller_work_{lang}: unchanged", out)
                 self.assertEqual(len(self.fake.credentials), 1)
+                self.assertEqual(len(self.fake.tools), 1)
                 self.assertTrue(
                     self.fake.credentials[0]["credential_data"]["header_value"]
                     == self.fake.secret
@@ -477,7 +598,9 @@ class GoLiveTests(unittest.TestCase):
         (path,) = self.backups.glob("*.json")
         self.fake.workflow["workflow_configurations"] = {"dictionary": "changed"}
         self.fake.workflow["template_context_variables"] = {"local": "changed"}
-        self.run_cli(["--rollback", str(path)])
+        out, _ = self.run_cli(["--rollback", str(path)])
+        self.assertIn("tool lookup_caller_work_en: did not exist at backup time; retained", out)
+        self.assertEqual(len(self.fake.tools), 1)
         self.assertEqual(
             json.dumps(
                 self.fake.workflow["workflow_definition"], ensure_ascii=False
@@ -605,8 +728,9 @@ class GoLiveTests(unittest.TestCase):
         for status in (401, 403):
             self.fake.wrong_status = status
             self.fake.completion_wrong_status = status
+            self.fake.tool_route_wrong_status = status
             out, err = self.run_cli(args)
-            self.assertEqual(out, f"200\n{status}\n200\n{status}\n")
+            self.assertEqual(out, f"200\n{status}\n200\n{status}\n200\n{status}\n")
             self.assertEqual(err, "")
         for status in (404, 500, 503, 200):
             self.fake.wrong_status = status
@@ -626,7 +750,8 @@ class GoLiveTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(
-            path in ("/api/voice/pre-call", "/api/voice/call-ended")
+            path
+            in ("/api/voice/pre-call", "/api/voice/call-ended", "/api/voice/tools/caller-work")
             for _, path, _ in self.fake.calls
         ))
         self.assertEqual(
@@ -641,11 +766,13 @@ class GoLiveTests(unittest.TestCase):
             "--to-number", "+12025550199", "--workflow-id", "3",
         ]
         out, err = self.run_cli(args)
-        self.assertEqual(out, "200\n401\n200\n401\n")
+        self.assertEqual(out, "200\n401\n200\n401\n200\n401\n")
         self.assertEqual(err, "")
         self.assertEqual(
             [path for _, path, _ in self.fake.calls],
-            ["/api/voice/pre-call"] * 2 + ["/api/voice/call-ended"] * 2,
+            ["/api/voice/pre-call"] * 2
+            + ["/api/voice/call-ended"] * 2
+            + ["/api/voice/tools/caller-work"] * 2,
         )
         for _, _, body in self.fake.calls[2:]:
             self.assertEqual(body, {"workflow_run_id": "2147483647"})
@@ -750,42 +877,17 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("published version 7; published definition id 107", out)
 
     def test_each_failed_stage_reports_recovery_state(self):
+        tool_path = f"/api/v1/tools/{self.fake.tool_uuid}"
         cases = (
-            (
-                "credential create",
-                "POST",
-                "/api/v1/credentials/",
-                "unchanged",
-                "unchanged",
-                "no",
-            ),
-            (
-                "credential rotate",
-                "PUT",
-                "/api/v1/credentials/",
-                "unchanged",
-                "unchanged",
-                "no",
-            ),
-            ("draft save", "PUT", "/api/v1/workflow/3", "created", "unchanged", "no"),
-            (
-                "publish",
-                "POST",
-                "/api/v1/workflow/3/publish",
-                "created",
-                "unchanged",
-                "yes",
-            ),
-            (
-                "read-back",
-                "GET",
-                "/api/v1/workflow/fetch/3",
-                "created",
-                "changed",
-                "no",
-            ),
+            ("credential create", "POST", "/api/v1/credentials/", "unchanged", "unchanged", "no", "unchanged"),
+            ("credential rotate", "PUT", "/api/v1/credentials/", "unchanged", "unchanged", "no", "unchanged"),
+            ("tool create", "POST", "/api/v1/tools/", "created", "unchanged", "no", "unchanged"),
+            ("tool read-back", "GET", tool_path, "created", "unchanged", "no", "created"),
+            ("draft save", "PUT", "/api/v1/workflow/3", "created", "unchanged", "no", "created"),
+            ("publish", "POST", "/api/v1/workflow/3/publish", "created", "unchanged", "yes", "created"),
+            ("read-back", "GET", "/api/v1/workflow/fetch/3", "created", "changed", "no", "created"),
         )
-        for stage, method, path, cred, published, draft in cases:
+        for stage, method, path, cred, published, draft, tool in cases:
             with self.subTest(stage=stage):
                 self.fake.select("en")
                 self.fake.credentials.clear()
@@ -807,6 +909,7 @@ class GoLiveTests(unittest.TestCase):
                 self.assertEqual(err.count("RECOVERY"), 1)
                 self.assertIn(f"failed stage: {stage}", err)
                 self.assertIn(f"credential: {cred}", err)
+                self.assertIn(f"tool: {tool}", err)
                 self.assertIn(f"live published definition: {published}", err)
                 self.assertIn(f"draft left behind: {draft}", err)
                 backup_path = next(
@@ -867,7 +970,7 @@ class GoLiveTests(unittest.TestCase):
         )
         out, _ = self.run_cli(self.args("--apply"))
         self.assertIn("Stage: credential rotate", out)
-        self.assertEqual([c[0] for c in self.writes()], ["PUT", "PUT", "POST"])
+        self.assertEqual([c[0] for c in self.writes()], ["PUT", "POST", "PUT", "POST"])
         self.assertTrue(
             self.fake.credentials[0]["credential_data"]["header_value"]
             == self.fake.secret
@@ -908,11 +1011,19 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("overwrites later edits", out)
         self.assertIn("node 1.data.pre_call_fetch_url", out)
         self.assertIn("[removed node]", out)
-        self.assertEqual(set(self.writes()[0][2]), {"workflow_definition"})
+        # The failed apply's draft carried new dispositions; unchanged
+        # template variables are not sent back through the typed round trip.
+        self.assertEqual(
+            set(self.writes()[0][2]), {"workflow_definition", "workflow_configurations"}
+        )
+        self.assertIn("workflow_configurations: restore backup value", out)
+        self.assertNotIn("template_context_variables: restore", out)
         self.assertEqual(
             self.fake.workflow["workflow_definition"],
             self.fake.original["workflow_definition"],
         )
+        for key in golive.SETTINGS:
+            self.assertEqual(self.fake.workflow[key], self.fake.original[key])
         drafts = [p for p in self.backups.glob("*.json") if p != path]
         _, err = self.run_cli(["--rollback", str(drafts[0])], expected=1)
         self.assertIn("Cannot restore a draft backup", err)
@@ -1015,13 +1126,13 @@ class GoLiveTests(unittest.TestCase):
         self.assertEqual(self.writes(), [])
         for accepted in ((), ("node 1.data.greeting",), ("node 4.data.prompt",)):
             _, err = self.run_cli(self.args("--apply", accept_merged=accepted), expected=1)
-            self.assertIn("Review the MERGED-INTO-CUSTOM diff", err)
+            self.assertIn("Review the MERGED-INTO-CUSTOM/REPLACES-CUSTOM diff", err)
             self.assertIn("--accept-merged", err)
             self.assertEqual(self.writes(), [])
         self.run_cli(self.args("--apply", accept_merged=("typo",)), expected=1)
         self.assertEqual(self.writes(), [])
         self.run_cli(self.args("--apply", accept_merged=("node 1.data.greeting", "node 4.data.prompt")))
-        self.assertEqual([c[0] for c in self.writes()], ["POST", "PUT", "POST"])
+        self.assertEqual([c[0] for c in self.writes()], ["POST", "POST", "PUT", "POST"])
 
     def test_template_replaced_fields_are_labelled_and_need_no_acceptance(self):
         golive.nodes(self.fake.workflow["workflow_definition"])["4"]["data"]["prompt"] = (
@@ -1087,9 +1198,11 @@ class GoLiveTests(unittest.TestCase):
             _, err = self.run_cli(self.args("--apply"), expected=1)
         self.assertIn("failed stage: wiring validation", err)
         self.assertIn("credential: created", err)
+        self.assertIn("tool: created", err)
         self.assertIn("No workflow rollback needed", err)
+        self.assertIn("Any credential or tool change is retained", err)
         self.assertNotIn("--rollback", err)
-        self.assertEqual([c[0] for c in self.writes()], ["POST"])
+        self.assertEqual([c[0] for c in self.writes()], ["POST", "POST"])
 
     def test_old_backup_format_is_refused_before_any_api_access(self):
         self.run_cli(self.args())
@@ -1101,8 +1214,263 @@ class GoLiveTests(unittest.TestCase):
                 path.write_text(json.dumps(saved))
                 self.fake.calls.clear()
                 _, err = self.run_cli(["--rollback", str(path)], expected=1)
-                self.assertIn("require format_version 2; old backups are refused", err)
+                self.assertIn("require format_version 2 or 3; old backups are refused", err)
                 self.assertEqual(self.fake.calls, [])
+
+
+    def add_credential(self):
+        self.fake.credentials.append(
+            {
+                "uuid": self.fake.credential_uuid,
+                "name": "Synchronize reception",
+                "credential_type": "custom_header",
+            }
+        )
+
+    def test_existing_tool_is_updated_in_place_then_left_unchanged(self):
+        self.add_credential()
+        stale = self.fake.expected_tool()
+        stale["definition"]["messages"] = [
+            {"type": "text", "text": "Hold on.", "event": "start"}
+        ]
+        self.fake.add_tool(description="An older description", definition=stale["definition"])
+        out, _ = self.run_cli(["plan", *self.args()])
+        self.assertIn(
+            "tool lookup_caller_work_en: update description, definition.messages (values withheld)",
+            out,
+        )
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply"))
+        tool_put = [c for c in self.writes() if c[1].startswith("/api/v1/tools/")]
+        self.assertEqual(len(tool_put), 1)
+        self.assertEqual(tool_put[0][:2], ("PUT", f"/api/v1/tools/{self.fake.tool_uuid}"))
+        self.assertEqual(set(tool_put[0][2]), set(golive.TOOL_UPDATE_FIELDS))
+        (tool,) = self.fake.tools
+        for field in golive.TOOL_FIELDS:
+            self.assertEqual(tool[field], self.fake.expected_tool()[field])
+        self.assertEqual(self.fake.workflow["workflow_definition"], self.fake.expected())
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertIn("tool lookup_caller_work_en: unchanged", out)
+        self.assertIn("Already wired", out)
+        self.assertEqual(self.writes(), [])
+
+    def test_ambiguous_inactive_or_foreign_tool_blocks_every_write(self):
+        for changes, message in (
+            ({}, "ambiguous"),
+            ({"status": "draft"}, "must be an active HTTP API tool"),
+            ({"category": "end_call"}, "must be an active HTTP API tool"),
+        ):
+            with self.subTest(message=message, changes=changes):
+                self.fake.select("en")
+                self.fake.calls.clear()
+                self.fake.add_tool(**changes)
+                if message == "ambiguous":
+                    self.fake.add_tool(tool_uuid=str(uuid4()))
+                _, err = self.run_cli(self.args("--apply"), expected=1)
+                self.assertIn(message, err)
+                self.assertEqual(self.writes(), [])
+        # An archived tool of the same name is not reused; a new one is created.
+        self.fake.select("en")
+        self.fake.calls.clear()
+        self.fake.add_tool(status="archived", tool_uuid=str(uuid4()))
+        self.run_cli(self.args("--apply"))
+        self.assertIn(("POST", "/api/v1/tools/"), [c[:2] for c in self.writes()])
+
+    def test_only_dispositions_change_and_custom_ones_need_acceptance(self):
+        settings = self.fake.workflow["workflow_configurations"]
+        settings["call_dispositions"] = [{"code": "follow_up", "description": "Custom"}]
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        out, _ = self.run_cli(["plan", *self.args()])
+        self.assertIn("settings.call_dispositions: REPLACES-CUSTOM; codes", out)
+        self.assertIn("  - follow_up\n", out)
+        _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("--accept-merged settings.call_dispositions", err)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(
+            self.args(
+                "--apply",
+                accept_merged=("node 4.data.prompt", "settings.call_dispositions"),
+            )
+        )
+        self.assertEqual(
+            self.fake.workflow["workflow_configurations"], self.fake.expected_settings()
+        )
+        # Never configured: set without acceptance.
+        self.fake.select("en")
+        self.fake.workflow["workflow_configurations"].pop("call_dispositions")
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertIn("settings.call_dispositions: set; codes", out)
+        self.assertEqual(
+            self.fake.workflow["workflow_configurations"], self.fake.expected_settings()
+        )
+        # Already the new dispositions: the draft save carries no settings.
+        self.fake.select("en")
+        self.fake.workflow["workflow_configurations"]["call_dispositions"] = copy.deepcopy(
+            self.fake.new_settings["call_dispositions"]
+        )
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertNotIn("settings.call_dispositions", out)
+        draft = next(c for c in self.writes() if c[1] == "/api/v1/workflow/3")
+        self.assertEqual(set(draft[2]), {"workflow_definition"})
+
+    def test_edge_condition_merges_and_conflicts_abort_before_writes(self):
+        self.fake.select("ko")
+        edge = next(
+            e for e in self.fake.workflow["workflow_definition"]["edges"] if e["id"] == "1-2"
+        )
+        edge["data"]["condition"] = "A locally rewritten condition."
+        _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("edge 1-2.data.condition", err)
+        self.assertIn("exactly once", err)
+        self.assertEqual(self.writes(), [])
+        old, new = golive.template("940fdef", "ko"), golive.template("HEAD", "ko")
+        moved = copy.deepcopy(new)
+        moved["edges"][0]["target"] = "99"
+        with self.assertRaisesRegex(golive.GoLiveError, "only edge data changes"):
+            golive.patched(copy.deepcopy(old), old, moved, self.fake.runtime, golive.PENDING_UUID)
+        removed = copy.deepcopy(new)
+        removed["edges"].pop(0)
+        with self.assertRaisesRegex(golive.GoLiveError, "template/live structure differs"):
+            golive.patched(copy.deepcopy(old), old, removed, self.fake.runtime, golive.PENDING_UUID)
+
+    def test_rollback_restores_an_updated_tool_definition(self):
+        self.add_credential()
+        self.fake.add_tool(description="An older description")
+        self.run_cli(self.args("--apply"))
+        self.assertEqual(self.fake.tools[0]["description"], self.fake.spec["tool"]["description"])
+        (path,) = self.backups.glob("*.json")
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["format_version"], 3)
+        self.assertEqual(
+            saved["tools"]["lookup_caller_work_en"]["description"], "An older description"
+        )
+        self.fake.calls.clear()
+        out, _ = self.run_cli(["--rollback", str(path)])
+        self.assertIn("tool lookup_caller_work_en: restore backup definition", out)
+        self.assertIn("tool definitions restored", out)
+        self.assertEqual(self.fake.tools[0]["description"], "An older description")
+        self.assertEqual(
+            self.fake.workflow["workflow_definition"],
+            self.fake.original["workflow_definition"],
+        )
+        self.assertIn(
+            ("PUT", f"/api/v1/tools/{self.fake.tool_uuid}"), [c[:2] for c in self.writes()]
+        )
+
+    def test_format_2_backups_remain_restorable(self):
+        self.run_cli(self.args("--apply"))
+        (path,) = self.backups.glob("*.json")
+        saved = json.loads(path.read_text())
+        saved["format_version"] = 2
+        saved.pop("tools")
+        path.write_text(json.dumps(saved))
+        out, _ = self.run_cli(["--rollback", str(path)])
+        self.assertIn("ROLLED BACK workflow 3", out)
+        self.assertNotIn("tool lookup", out.split("Rollback overwrites")[1])
+        self.assertEqual(
+            self.fake.workflow["workflow_definition"],
+            self.fake.original["workflow_definition"],
+        )
+
+    def test_placeholder_tool_uuid_is_never_published(self):
+        definition = self.fake.expected()
+        nodes = golive.nodes(definition)
+        nodes["1"]["data"]["tool_uuids"] = [self.fake.spec["placeholder_uuid"]]
+        golive.validate_wiring(definition, definition, self.fake.runtime, self.fake.credential_uuid)
+        with self.assertRaisesRegex(golive.GoLiveError, "Unresolved placeholder"):
+            golive.validate_wiring(
+                definition, definition, self.fake.runtime, self.fake.credential_uuid, final=True
+            )
+        tool = self.fake.expected_tool()
+        golive.validate_tool(tool, self.fake.runtime, self.fake.credential_uuid)
+        tool["definition"]["config"]["credential_uuid"] = golive.PENDING_UUID
+        with self.assertRaisesRegex(golive.GoLiveError, "Tool wiring"):
+            golive.validate_tool(tool, self.fake.runtime, self.fake.credential_uuid)
+
+    def test_caller_work_probe_requires_known_false_and_wrong_secret_refusal(self):
+        args = [
+            "probe", "--runtime-origin", self.fake.runtime,
+            "--to-number", "+12025550199", "--workflow-id", "1",
+        ]
+        for status in (404, 500, 503):
+            self.fake.tool_route_status = status
+            _, err = self.run_cli(args, expected=1)
+            self.assertIn("Authenticated tools/caller-work probe", err)
+        self.fake.tool_route_status = 200
+        for body in ({}, {"known": True}):
+            self.fake.tool_route_result = body
+            _, err = self.run_cli(args, expected=1)
+            self.assertIn('expected {"known": false}', err)
+        self.fake.tool_route_result = []
+        _, err = self.run_cli(args, expected=1)
+        self.assertIn("Authenticated tools/caller-work probe expected HTTP 200 JSON object", err)
+        self.fake.tool_route_result = {"known": False}
+        for status in (200, 404):
+            self.fake.tool_route_wrong_status = status
+            _, err = self.run_cli(args, expected=1)
+            self.assertIn("Wrong-secret tools/caller-work probe", err)
+        self.assertFalse(any(c[1].startswith("/api/v1/") for c in self.fake.calls))
+
+    def test_committed_tool_and_settings_follow_the_contract(self):
+        codes = [
+            "quote_request", "booking_request", "urgent", "complaint",
+            "message", "done", "spam", "wrong_number",
+        ]
+        for lang, node_id in (("ko", "2"), ("en", "1")):
+            spec = golive.tool_spec("HEAD", lang)
+            config = spec["tool"]["definition"]["config"]
+            self.assertEqual(config["method"], "POST")
+            self.assertEqual(config["timeout_ms"], 5000)
+            self.assertIsNone(config["parameters"])
+            self.assertEqual(
+                config["preset_parameters"],
+                [{
+                    "name": "workflow_run_id",
+                    "type": "string",
+                    "value_template": "{{initial_context.workflow_run_id}}",
+                    "required": True,
+                }],
+            )
+            events = [m["event"] for m in spec["tool"]["definition"]["messages"]]
+            self.assertEqual(events, ["start", "delayed"])
+            definition = golive.template("HEAD", lang)
+            holders = [
+                n["id"] for n in definition["nodes"]
+                if spec["placeholder_uuid"] in (n["data"].get("tool_uuids") or [])
+            ]
+            self.assertEqual(holders, [node_id])
+            dispositions = golive.settings_template("HEAD", lang)["call_dispositions"]
+            self.assertEqual([d["code"] for d in dispositions], codes)
+            self.assertTrue(all("{{" not in d["description"] for d in dispositions))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pydantic"), "pydantic is needed to load Dograh's schemas"
+    )
+    def test_committed_tool_and_settings_validate_against_dograh_schemas(self):
+        import sys
+
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgresql://unused/unused", "REDIS_URL": "redis://unused"},
+        ), patch.object(sys, "path", [str(golive.ROOT), *sys.path]):
+            from api.schemas.tool import CreateToolRequest
+            from api.schemas.workflow_configurations import WorkflowConfigurationDefaults
+        for lang in ("ko", "en"):
+            tool = golive.tool_spec("HEAD", lang)["tool"]
+            parsed = CreateToolRequest.model_validate(tool)
+            # Dograh stores definition.model_dump(); read-back equality needs it canonical.
+            self.assertEqual(parsed.definition.model_dump(), tool["definition"])
+            settings = golive.settings_template("HEAD", lang)
+            self.assertEqual(
+                WorkflowConfigurationDefaults.model_validate(settings).model_dump(
+                    mode="json", exclude_unset=True
+                ),
+                settings,
+            )
 
 
 if __name__ == "__main__":

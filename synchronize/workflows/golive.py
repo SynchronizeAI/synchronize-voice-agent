@@ -2,6 +2,9 @@
 
 Successor to the proof workspace's deploy_live.py: the same exact-once line/word
 merge, with local git refs, explicit targets, credential wiring and rollback.
+One run also creates or updates the caller-work HTTP tool (by its unique name),
+resolves its UUID into the nodes and applies the template's call dispositions,
+and only those, to the workflow settings.
 Standard library only. Nothing contacts Railway or fetches git refs.
 """
 
@@ -33,6 +36,15 @@ START_FIELDS = {
 }
 SETTINGS = ("workflow_configurations", "template_context_variables")
 PENDING_UUID = "00000000-0000-4000-8000-000000000000"
+# Templates name objects that do not exist yet by UUIDs of this all-zero family
+# (the tool specs' placeholder_uuid); none of them may ever be published.
+PLACEHOLDER_UUID_PREFIX = "00000000-0000-4000-8000-"
+PLACEHOLDER_ORIGIN = "https://synchronize.example.invalid"
+TOOL_ROUTE = "/api/voice/tools/caller-work"
+TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definition")
+TOOL_UPDATE_FIELDS = ("description", "icon", "icon_color", "definition")
+DISPOSITIONS = "settings.call_dispositions"
+BACKUP_FORMAT = 3  # 3 adds the caller-work tool; format 2 backups stay restorable.
 PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
 # Largest digit-text id accepted by the runtime's _run_id validator. Unlike
 # "0", this exercises the unknown-run lookup path rather than invalid-body handling.
@@ -156,7 +168,9 @@ class Dograh:
                 f"Dograh {method} failed: HTTP {status}; unknown, may have committed"
             )
         require(200 <= status < 300, f"Dograh {method} failed: HTTP {status}")
-        expected = list if method == "GET" and path == "/credentials/" else dict
+        expected = (
+            list if method == "GET" and path in ("/credentials/", "/tools/") else dict
+        )
         if not isinstance(result, expected):
             error = GoLiveError if method == "GET" else UncertainWrite
             raise error(
@@ -166,7 +180,8 @@ class Dograh:
         return result
 
 
-def template(ref, lang):
+def git_file(ref, name, optional=False):
+    """A workflows/ file at a local commit; None when optional and absent there."""
     resolved = subprocess.run(
         [
             "git",
@@ -181,19 +196,73 @@ def template(ref, lang):
         text=True,
     )
     require(resolved.returncode == 0, "Cannot resolve local git commit ref")
+    commit = resolved.stdout.strip()
+    path = f"{commit}:synchronize/workflows/{name}"
+    if optional:
+        # Trees only: absence is an empty listing, any git failure an error.
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-tree", "--name-only", commit, "--",
+             f"synchronize/workflows/{name}"],
+            capture_output=True,
+            text=True,
+        )
+        require(listed.returncode == 0, "Cannot read template from local git ref")
+        if not listed.stdout.strip():
+            return None
     result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "show",
-            f"{resolved.stdout.strip()}:synchronize/workflows/consultation-{lang}.json",
-        ],
-        capture_output=True,
-        text=True,
+        ["git", "-C", str(ROOT), "show", path], capture_output=True, text=True
     )
     require(result.returncode == 0, "Cannot read template from local git ref")
-    return json.loads(result.stdout)["workflow_definition"]
+    return json.loads(result.stdout)
+
+
+def template(ref, lang):
+    return git_file(ref, f"consultation-{lang}.json")["workflow_definition"]
+
+
+def settings_template(ref, lang):
+    return git_file(ref, f"consultation-{lang}-settings.json")["workflow_configurations"]
+
+
+def tool_spec(ref, lang):
+    """The caller-work HTTP tool at a ref, or None for refs from before the tool."""
+    spec = git_file(ref, f"tool-lookup-caller-work-{lang}.json", optional=True)
+    if spec is None:
+        return None
+    placeholder = str(UUID(spec["placeholder_uuid"]))
+    require(
+        placeholder.startswith(PLACEHOLDER_UUID_PREFIX) and placeholder != PENDING_UUID,
+        "Tool placeholder_uuid must be a reserved placeholder UUID",
+    )
+    tool = spec["tool"]
+    config = tool["definition"]["config"]
+    require(
+        tool["category"] == tool["definition"]["type"] == "http_api"
+        and config["url"] == PLACEHOLDER_ORIGIN + TOOL_ROUTE
+        and config["credential_uuid"] == "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
+        and set(tool) == set(TOOL_FIELDS),
+        "Tool template must be an HTTP API tool on the placeholder caller-work route",
+    )
+    return {"placeholder_uuid": placeholder, "tool": tool}
+
+
+def resolve_tool_refs(definition, placeholder, tool_uuid):
+    """Replace a template's placeholder tool UUID in every node's tool_uuids."""
+    out = copy.deepcopy(definition)
+    for node in out["nodes"]:
+        refs = node.get("data", {}).get("tool_uuids")
+        if isinstance(refs, list):
+            node["data"]["tool_uuids"] = [
+                tool_uuid if ref == placeholder else ref for ref in refs
+            ]
+    return out
+
+
+def references(definition, tool_uuid):
+    return any(
+        tool_uuid in (node.get("data", {}).get("tool_uuids") or [])
+        for node in definition["nodes"]
+    )
 
 
 def conflict(label):
@@ -342,6 +411,51 @@ def nodes(definition):
     return result
 
 
+def edge_index(definition):
+    """Edges with an id; a template edge must have one to be merged."""
+    edges = [edge for edge in definition.get("edges", []) if "id" in edge]
+    result = {edge["id"]: edge for edge in edges}
+    require(len(result) == len(edges), "Duplicate edge ids")
+    return result
+
+
+def patch_fields(a, b, target, prefix, field_modes):
+    """Merge the template delta a -> b of one node's or edge's data into target."""
+    for field in sorted(a.keys() | b.keys()):
+        ov, nv = a.get(field, MISSING), b.get(field, MISSING)
+        if ov == nv:
+            continue
+        label = f"{prefix}.data.{field}"
+        live_value = target.get(field, MISSING)
+        value = patch_value(ov, nv, live_value, label)
+        if field_modes is not None and value != live_value:
+            field_modes[label] = (
+                "template-replaced" if live_value == ov else "MERGED-INTO-CUSTOM"
+            )
+        if value is MISSING:
+            target.pop(field, None)
+        else:
+            target[field] = value
+
+
+def template_fields(old, new):
+    """Every node/edge data field whose template value changes, as printed."""
+    fields = set()
+    for kind, index in (("node", nodes), ("edge", edge_index)):
+        before, after = index(old), index(new)
+        for item_id in before.keys() & after.keys():
+            if kind == "node" and item_id == "6":
+                continue
+            a, b = before[item_id].get("data", {}), after[item_id].get("data", {})
+            fields |= {
+                f"{kind} {item_id}.data.{field}"
+                for field in a.keys() | b.keys()
+                if a.get(field, MISSING) != b.get(field, MISSING)
+                and not (kind == "node" and item_id == "1" and field in START_FIELDS)
+            }
+    return fields
+
+
 def patched(live, old, new, runtime, credential_uuid, field_modes=None):
     out = copy.deepcopy(live)
     before, previous, current = nodes(out), nodes(old), nodes(new)
@@ -356,28 +470,43 @@ def patched(live, old, new, runtime, credential_uuid, field_modes=None):
         require(
             a["type"] == b["type"] == target["type"], f"node {node_id}: type differs"
         )
-        for field in sorted(a["data"].keys() | b["data"].keys()):
-            if node_id == "1" and field in START_FIELDS:
-                continue  # Wiring always uses operator values, never template placeholders.
-            ov, nv = a["data"].get(field, MISSING), b["data"].get(field, MISSING)
-            if ov == nv:
-                continue
-            label = f"node {node_id}.data.{field}"
-            live_value = target["data"].get(field, MISSING)
-            value = patch_value(
-                ov,
-                nv,
-                live_value,
-                label,
-            )
-            if field_modes is not None and value != live_value:
-                field_modes[label] = (
-                    "template-replaced" if live_value == ov else "MERGED-INTO-CUSTOM"
-                )
-            if value is MISSING:
-                target["data"].pop(field, None)
-            else:
-                target["data"][field] = value
+        # Wiring always uses operator values, never template placeholders.
+        skip = START_FIELDS if node_id == "1" else set()
+        patch_fields(
+            {k: v for k, v in a["data"].items() if k not in skip},
+            {k: v for k, v in b["data"].items() if k not in skip},
+            target["data"],
+            f"node {node_id}",
+            field_modes,
+        )
+    live_edges, old_edges, new_edges = edge_index(out), edge_index(old), edge_index(new)
+    require(
+        len(old_edges) == len(old.get("edges", []))
+        and len(new_edges) == len(new.get("edges", [])),
+        "Template edges must have ids",
+    )
+    for edge_id in sorted(old_edges.keys() | new_edges.keys()):
+        a, b = old_edges.get(edge_id), new_edges.get(edge_id)
+        if a == b:
+            continue
+        require(
+            a is not None and b is not None and edge_id in live_edges,
+            f"edge {edge_id}: template/live structure differs",
+        )
+        target = live_edges[edge_id]
+        require(
+            {k: v for k, v in a.items() if k != "data"}
+            == {k: v for k, v in b.items() if k != "data"}
+            and all(a.get(k) == target.get(k) for k in ("source", "target")),
+            f"edge {edge_id}: only edge data changes can be merged",
+        )
+        patch_fields(
+            a.get("data", {}),
+            b.get("data", {}),
+            target.setdefault("data", {}),
+            f"edge {edge_id}",
+            field_modes,
+        )
     require(before["1"]["type"] == "startCall", "node 1: expected Start Call")
     require(
         current["1"]["data"]["pre_call_fetch_mode"] == "inbound",
@@ -409,7 +538,8 @@ def patched(live, old, new, runtime, credential_uuid, field_modes=None):
     return out
 
 
-def validate_wiring(definition, original, runtime, credential_uuid):
+def validate_wiring(definition, original, runtime, credential_uuid, final=False):
+    """final: after the credential/tool writes, no placeholder UUID may remain."""
     indexed = nodes(definition)
     require(nodes(original).keys() <= indexed.keys(), "A pre-existing node was lost")
     expected = {
@@ -428,9 +558,119 @@ def validate_wiring(definition, original, runtime, credential_uuid):
     )
     text = json.dumps(definition).lower()
     require(
-        ".invalid" not in text and "<dograh" not in text,
+        ".invalid" not in text
+        and "<dograh" not in text
+        and not (final and PLACEHOLDER_UUID_PREFIX in text),
         "Unresolved placeholder in workflow",
     )
+
+
+def planned_tool(spec, runtime, credential_uuid):
+    tool = copy.deepcopy(spec["tool"])
+    tool["definition"]["config"].update(
+        url=runtime + TOOL_ROUTE, credential_uuid=credential_uuid
+    )
+    return tool
+
+
+def validate_tool(tool, runtime, credential_uuid):
+    config = tool["definition"]["config"]
+    require(
+        tool["category"] == "http_api"
+        and config["url"] == runtime + TOOL_ROUTE
+        and config["credential_uuid"] == credential_uuid,
+        "Tool wiring verification failed",
+    )
+    text = json.dumps(tool).lower()
+    require(
+        ".invalid" not in text
+        and "<dograh" not in text
+        and PLACEHOLDER_UUID_PREFIX not in text,
+        "Unresolved placeholder in tool",
+    )
+
+
+def tool_snapshot(tool):
+    """The tool fields go-live owns, plus its identity and status."""
+    return {
+        "tool_uuid": str(UUID(tool["tool_uuid"])),
+        "status": tool["status"],
+        **{field: tool[field] for field in TOOL_FIELDS},
+    }
+
+
+def lookup_tool(client, name):
+    matches = [tool for tool in client.api("GET", "/tools/") if tool["name"] == name]
+    require(
+        len(matches) <= 1,
+        f"Tool name {name} is ambiguous; archive the duplicate in the Dograh UI first",
+    )
+    return tool_snapshot(matches[0]) if matches else None
+
+
+def tool_change(existing, planned):
+    if existing is None:
+        return "create"
+    require(
+        existing["status"] == "active" and existing["category"] == planned["category"],
+        f"Existing tool {planned['name']} must be an active HTTP API tool",
+    )
+    differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
+    return "update" if differs else None
+
+
+def show_tool(planned, existing, change):
+    name = planned["name"]
+    if change is None:
+        print(f"tool {name}: unchanged")
+        return
+    if change == "create":
+        print(f"tool {name}: create (route {TOOL_ROUTE}; credential reference only)")
+        return
+    differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
+    if "definition" in differs:
+        old_def, new_def = existing["definition"], planned["definition"]
+        differs.remove("definition")
+        differs += [
+            f"definition.{key}"
+            for key in sorted(old_def.keys() | new_def.keys())
+            if key != "config" and old_def.get(key) != new_def.get(key)
+        ] + [
+            f"definition.config.{key}"
+            for key in sorted(
+                old_def.get("config", {}).keys() | new_def.get("config", {}).keys()
+            )
+            if old_def.get("config", {}).get(key) != new_def.get("config", {}).get(key)
+        ]
+    print(f"tool {name}: update {', '.join(differs)} (values withheld)")
+
+
+def planned_settings(live, old, new, field_modes):
+    """Apply only the template's call-disposition delta to the live settings."""
+    old_value = (old or {}).get("call_dispositions", MISSING)
+    new_value = (new or {}).get("call_dispositions", MISSING)
+    live_value = (live or {}).get("call_dispositions", MISSING)
+    if old_value == new_value or live_value == new_value:
+        return copy.deepcopy(live)
+    require(new_value is not MISSING, "Template settings must keep call_dispositions")
+    field_modes[DISPOSITIONS] = (
+        "template-replaced"
+        if live_value == old_value
+        else "set" if live_value in (MISSING, None, []) else "REPLACES-CUSTOM"
+    )
+    return {**copy.deepcopy(live or {}), "call_dispositions": copy.deepcopy(new_value)}
+
+
+def show_settings(live, planned, field_modes):
+    if DISPOSITIONS not in field_modes:
+        return
+    codes = [
+        ", ".join(item["code"] for item in (settings or {}).get("call_dispositions") or [])
+        or "none"
+        for settings in (live, planned)
+    ]
+    print(f"{DISPOSITIONS}: {field_modes[DISPOSITIONS]}; codes")
+    print(f"  - {codes[0]}\n  + {codes[1]}\n  (descriptions withheld)")
 
 
 def backup_directory(path):
@@ -495,13 +735,13 @@ def same_snapshot(workflow, snapshot):
     )
 
 
-def backup(client, workflow_id, directory, *, allow_draft=False):
+def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=()):
     workflow = client.api("GET", f"/workflow/fetch/{workflow_id}")
     require(workflow["id"] == workflow_id, "Fetched workflow id mismatch")
     if not allow_draft:
         require_published(workflow, workflow_id)
     snapshot = {
-        "format_version": 2,
+        "format_version": BACKUP_FORMAT,
         "workflow_id": workflow_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "workflow_definition": workflow["workflow_definition"],
@@ -510,6 +750,8 @@ def backup(client, workflow_id, directory, *, allow_draft=False):
             for field in ("version_status", "version_number", "current_definition_id")
         },
         **{field: workflow[field] for field in SETTINGS},
+        # None records that the named tool did not exist at backup time.
+        "tools": {name: lookup_tool(client, name) for name in tool_names},
     }
     ensure_no_secrets(snapshot)
     path = (
@@ -531,6 +773,8 @@ def backup(client, workflow_id, directory, *, allow_draft=False):
         f"Workflow {workflow_id}: {snapshot['version_status']} version "
         f"{snapshot['version_number']}; published definition id {snapshot['current_definition_id']}"
     )
+    for name, tool in snapshot["tools"].items():
+        print(f"Tool {name}: {'absent' if tool is None else tool['tool_uuid']}")
     return snapshot, path
 
 
@@ -570,26 +814,30 @@ def credential(client, name, secret, ident, state):
 def diff_fields(before, after):
     """Readable field diff without emitting full prompts or HTTP response data."""
     changes = []
-    previous = nodes(before)
-    for node_id in previous.keys() - nodes(after).keys():
-        changes.append((node_id, "[removed node]", previous[node_id]["type"], None))
-    for node_id, node in nodes(after).items():
-        if node_id not in previous:
-            changes.append((node_id, "[added node]", None, node["type"]))
-            if node_id == "6":
-                for field in ("endpoint_url", "credential_uuid"):
-                    changes.append((node_id, field, None, node["data"][field]))
-            continue
-        a, b = previous[node_id]["data"], node["data"]
-        for field in sorted(a.keys() | b.keys()):
-            if a.get(field) != b.get(field) or (field in a) != (field in b):
-                changes.append((node_id, field, a.get(field), b.get(field)))
+    for kind, index in (("node", nodes), ("edge", edge_index)):
+        previous, current = index(before), index(after)
+        for item_id in previous.keys() - current.keys():
+            changes.append(
+                (f"{kind} {item_id}", f"[removed {kind}]", previous[item_id].get("type"), None)
+            )
+        for item_id, item in current.items():
+            where = f"{kind} {item_id}"
+            if item_id not in previous:
+                changes.append((where, f"[added {kind}]", None, item.get("type")))
+                if kind == "node" and item_id == "6":
+                    for field in ("endpoint_url", "credential_uuid"):
+                        changes.append((where, field, None, item["data"][field]))
+                continue
+            a, b = previous[item_id].get("data", {}), item.get("data", {})
+            for field in sorted(a.keys() | b.keys()):
+                if a.get(field) != b.get(field) or (field in a) != (field in b):
+                    changes.append((where, field, a.get(field), b.get(field)))
     return changes
 
 
 def show_plan(changes, field_modes=None):
-    for node_id, field, old, new in changes:
-        label = f"node {node_id}.data.{field}"
+    for where, field, old, new in changes:
+        label = f"{where}.data.{field}"
         mode = (
             field_modes.get(label, "wiring")
             if field_modes is not None else "restore-backup"
@@ -621,8 +869,11 @@ def show_plan(changes, field_modes=None):
             )
         elif field in START_FIELDS | {
             "credential_uuid",
+            "tool_uuids",
             "[added node]",
             "[removed node]",
+            "[added edge]",
+            "[removed edge]",
         }:
             print(f"  - {json.dumps(old)}\n  + {json.dumps(new)}")
         elif isinstance(old, str) and isinstance(new, str):
@@ -642,25 +893,39 @@ def show_plan(changes, field_modes=None):
             )
 
 
-def verify_snapshot(workflow, expected_definition, snapshot):
+def verify_snapshot(workflow, expected_definition, expected):
+    """expected holds the SETTINGS values the published release must carry."""
     require(
         workflow["workflow_definition"] == expected_definition,
         "Published definition differs from planned definition",
     )
     for field in SETTINGS:
-        require(workflow[field] == snapshot[field], f"{field}: changed during publish")
+        require(workflow[field] == expected[field], f"{field}: changed during publish")
     require(workflow.get("version_status") == "published", "Workflow is not published")
 
 
-def summary(status, workflow_id, changes, existing_count):
+def verify_tool(client, tool_uuid, expected):
+    fetched = tool_snapshot(client.api("GET", f"/tools/{tool_uuid}"))
+    require(
+        fetched["tool_uuid"] == tool_uuid
+        and fetched["status"] == expected.get("status", "active")
+        and all(fetched[field] == expected[field] for field in TOOL_FIELDS),
+        "Tool read-back differs from the planned tool",
+    )
+    return fetched
+
+
+def summary(status, workflow_id, changes, existing_count, settings=None):
     print(
         f"{status} workflow {workflow_id}: {len(changes)} field/node changes; {existing_count} existing nodes preserved"
     )
     grouped = {}
-    for node_id, field, _, _ in changes:
-        grouped.setdefault(node_id, []).append(field)
-    for node_id, fields in grouped.items():
-        print(f"  node {node_id}: {', '.join(fields)}")
+    for where, field, _, _ in changes:
+        grouped.setdefault(where, []).append(field)
+    for where, fields in grouped.items():
+        print(f"  {where}: {', '.join(fields)}")
+    if settings:
+        print(f"  settings: {settings}")
 
 
 class WriteState:
@@ -669,6 +934,7 @@ class WriteState:
     def __init__(self, path, draft="no"):
         self.path, self.stage = path, "pre-write"
         self.credential, self.published, self.draft = "unchanged", "unchanged", draft
+        self.tool = "unchanged"
         self.attempted = False
 
     def __enter__(self):
@@ -679,6 +945,7 @@ class WriteState:
             print(
                 f"RECOVERY — failed stage: {self.stage}\n"
                 f"  credential: {self.credential}\n"
+                f"  tool: {self.tool}\n"
                 f"  live published definition: {self.published}\n"
                 f"  draft left behind: {self.draft}",
                 file=sys.stderr,
@@ -686,7 +953,7 @@ class WriteState:
             if self.published == "unchanged" and self.draft == "no":
                 print(
                     "  No workflow rollback needed: published definition unchanged; no draft saved. "
-                    "Any credential change is retained.",
+                    "Any credential or tool change is retained.",
                     file=sys.stderr,
                 )
             else:
@@ -710,6 +977,8 @@ class WriteState:
             if isinstance(error, UncertainWrite) or not isinstance(error, GoLiveError):
                 if stage.startswith("credential"):
                     self.credential = "unknown, may have been created/rotated"
+                elif stage.startswith("tool"):
+                    self.tool = "unknown, may have been written"
                 elif stage == "draft save":
                     self.draft = "unknown, may have committed"
                 elif stage == "publish":
@@ -718,6 +987,8 @@ class WriteState:
             raise
         if stage.startswith("credential"):
             self.credential = outcome
+        elif stage.startswith("tool"):
+            self.tool = outcome
         elif stage == "draft save":
             self.draft = "yes"
         elif stage == "publish":
@@ -755,46 +1026,80 @@ def deploy(args):
             "Before apply: deploy the runtime with this secret active and run golive probe first."
         )
     old, new = template(args.old_ref, args.lang), template(args.new_ref, args.lang)
+    old_settings = settings_template(args.old_ref, args.lang)
+    new_settings = settings_template(args.new_ref, args.lang)
+    spec, old_spec = tool_spec(args.new_ref, args.lang), tool_spec(args.old_ref, args.lang)
+    require(
+        not old_spec or (spec and old_spec["tool"]["name"] == spec["tool"]["name"]),
+        "Removing or renaming the caller-work tool is not supported by go-live",
+    )
+    if spec:
+        require(
+            references(new, spec["placeholder_uuid"]),
+            "Template does not reference its tool placeholder",
+        )
     client = Dograh()
-    snapshot, path = backup(client, args.workflow_id, backup_directory(args.backup_dir))
-    live = snapshot["workflow_definition"]
+    snapshot, path = backup(
+        client,
+        args.workflow_id,
+        backup_directory(args.backup_dir),
+        tool_names=(spec["tool"]["name"],) if spec else (),
+    )
+    live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
     existing = find_credential(client, args.credential_name)
+    existing_tool = change = tool = None
+    if spec:
+        existing_tool = snapshot["tools"][spec["tool"]["name"]]
+        tool = planned_tool(spec, runtime, existing or PENDING_UUID)
+        change = tool_change(existing_tool, tool)
+        # Until the tool exists, the template placeholder stands for it.
+        tool_ref = existing_tool["tool_uuid"] if existing_tool else spec["placeholder_uuid"]
+        new = resolve_tool_refs(new, spec["placeholder_uuid"], tool_ref)
+        if old_spec:
+            old = resolve_tool_refs(old, old_spec["placeholder_uuid"], tool_ref)
     field_modes = {}
     planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes)
-    ensure_no_secrets(planned)
+    settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
+    for value in (planned, settings, tool):
+        ensure_no_secrets(value)
     changes = diff_fields(live, planned)
     show_plan(changes, field_modes)
+    show_settings(live_settings, settings, field_modes)
+    if spec:
+        show_tool(tool, existing_tool, change)
     merged = {
-        field for field, mode in field_modes.items() if mode == "MERGED-INTO-CUSTOM"
+        field
+        for field, mode in field_modes.items()
+        if mode in ("MERGED-INTO-CUSTOM", "REPLACES-CUSTOM")
     }
-    new_nodes = nodes(new)
-    known_fields = {
-        f"node {node_id}.data.{field}"
-        for node_id, node in nodes(old).items()
-        if node_id in new_nodes and node_id != "6"
-        for field in node["data"].keys() | new_nodes[node_id]["data"].keys()
-        if node["data"].get(field, MISSING)
-        != new_nodes[node_id]["data"].get(field, MISSING)
-        and not (node_id == "1" and field in START_FIELDS)
-    }
+    known_fields = template_fields(old, new) | (
+        {DISPOSITIONS}
+        if (old_settings or {}).get("call_dispositions")
+        != (new_settings or {}).get("call_dispositions")
+        else set()
+    )
     require(
         set(args.accept_merged) <= known_fields,
         "--accept-merged must name a changed template field exactly as printed",
     )
-    already_wired = planned == live and existing is not None
+    settings_changed = settings != live_settings
+    already_wired = (
+        planned == live and not settings_changed and change is None and existing is not None
+    )
     print(
         "Already wired; no remote writes"
         if already_wired
         else "Would create/update credential (secret not shown)"
     )
+    settings_note = "call_dispositions" if settings_changed else None
     if not args.apply:
-        summary("PLAN", args.workflow_id, changes, len(nodes(live)))
+        summary("PLAN", args.workflow_id, changes, len(nodes(live)), settings_note)
         print("No remote writes")
         return
     unaccepted = merged - set(args.accept_merged)
     require(
         not unaccepted,
-        "Review the MERGED-INTO-CUSTOM diff, then explicitly accept each field: "
+        "Review the MERGED-INTO-CUSTOM/REPLACES-CUSTOM diff, then explicitly accept each field: "
         + " ".join(f"--accept-merged {shlex.quote(field)}" for field in sorted(unaccepted)),
     )
     # Fresh backup and all exact-once patches must succeed before ANY write,
@@ -802,33 +1107,83 @@ def deploy(args):
     fresh = client.api("GET", f"/workflow/fetch/{args.workflow_id}")
     require_published(fresh, args.workflow_id)
     require(same_snapshot(fresh, snapshot), "Workflow changed since backup; rerun plan")
+    if spec:
+        require(
+            lookup_tool(client, spec["tool"]["name"]) == existing_tool,
+            "Tool changed since backup; rerun plan",
+        )
     require(path.is_file(), "Fresh backup missing")
     print(f"ROLLBACK FILE: {path}")
     if already_wired:
         return
     with WriteState(path) as state:
         ident = credential(client, args.credential_name, secret, existing, state)
-        # Only substitute the UUID: do not re-run the merge after a remote write.
+        # Only substitute UUIDs: do not re-run the merge after a remote write.
+        if spec:
+            tool = planned_tool(spec, runtime, ident)
+            validate_tool(tool, runtime, ident)
+            written = None
+            if existing_tool is None:
+                written = state.write(
+                    "tool create", "created", lambda: client.api("POST", "/tools/", tool)
+                )
+            elif tool_change(existing_tool, tool):
+                written = state.write(
+                    "tool update",
+                    "updated",
+                    lambda: client.api(
+                        "PUT",
+                        f"/tools/{existing_tool['tool_uuid']}",
+                        {field: tool[field] for field in TOOL_UPDATE_FIELDS},
+                    ),
+                )
+            tool_uuid = (
+                str(UUID(written["tool_uuid"])) if written else existing_tool["tool_uuid"]
+            )
+            state.stage = "tool read-back"
+            print("Stage: tool read-back")
+            verify_tool(client, tool_uuid, tool)
+            planned = resolve_tool_refs(planned, spec["placeholder_uuid"], tool_uuid)
         planned_nodes = nodes(planned)
         planned_nodes["1"]["data"]["pre_call_fetch_credential_uuid"] = ident
         planned_nodes["6"]["data"]["credential_uuid"] = ident
         state.stage = "wiring validation"
         print("Stage: wiring validation")
-        validate_wiring(planned, live, runtime, ident)
-        fetched = publish(
-            client, args.workflow_id, {"workflow_definition": planned}, state
+        validate_wiring(planned, live, runtime, ident, final=True)
+        require(
+            not spec or references(planned, tool_uuid),
+            "Tool reference missing from the planned definition",
         )
-        verify_snapshot(fetched, planned, snapshot)
-        validate_wiring(fetched["workflow_definition"], live, runtime, ident)
-    summary("APPLIED", args.workflow_id, changes, len(nodes(live)))
-    print("Published and verified; settings/model override unchanged")
+        expected = {
+            "workflow_configurations": settings,
+            "template_context_variables": snapshot["template_context_variables"],
+        }
+        if planned != live or settings_changed:
+            body = {"workflow_definition": planned}
+            if settings_changed:
+                body["workflow_configurations"] = settings
+            fetched = publish(client, args.workflow_id, body, state)
+            verify_snapshot(fetched, planned, expected)
+            validate_wiring(fetched["workflow_definition"], live, runtime, ident, final=True)
+    summary("APPLIED", args.workflow_id, changes, len(nodes(live)), settings_note)
+    if planned == live and not settings_changed:
+        print("Workflow definition and settings already current; nothing published")
+    else:
+        print(
+            "Published and verified; "
+            + (
+                "call_dispositions applied, other settings/model override unchanged"
+                if settings_changed
+                else "settings/model override unchanged"
+            )
+        )
 
 
 def rollback(args):
     snapshot = json.loads(args.rollback.read_text(encoding="utf-8"))
     require(
-        snapshot.get("format_version") == 2,
-        "Unsupported backup format: require format_version 2; old backups are refused",
+        snapshot.get("format_version") in (2, BACKUP_FORMAT),
+        "Unsupported backup format: require format_version 2 or 3; old backups are refused",
     )
     require(
         snapshot.get("version_status") == "published",
@@ -841,9 +1196,12 @@ def rollback(args):
     ensure_no_secrets(snapshot)
     directory = backup_directory(args.backup_dir or args.rollback.resolve().parent)
     client = Dograh()
+    saved_tools = snapshot.get("tools") or {}
     # Recovery must work when a failed apply left a draft. Preserve it for
     # inspection, clearly labelled; never allow that draft backup as a restore target.
-    current, _ = backup(client, workflow_id, directory, allow_draft=True)
+    current, _ = backup(
+        client, workflow_id, directory, allow_draft=True, tool_names=tuple(saved_tools)
+    )
     print("Rollback overwrites later edits, including any unpublished draft.")
     show_plan(
         diff_fields(current["workflow_definition"], snapshot["workflow_definition"])
@@ -855,6 +1213,22 @@ def rollback(args):
     for field in SETTINGS:
         if field in body:
             print(f"{field}: restore backup value (content withheld)")
+    restores = []
+    for name, saved in saved_tools.items():
+        now = current["tools"][name]
+        if saved is None:
+            # Like the credential: a tool created later is kept, and the
+            # restored definition no longer references it.
+            print(f"tool {name}: did not exist at backup time; retained")
+        elif now is None or now["tool_uuid"] != saved["tool_uuid"]:
+            print(
+                f"tool {name}: backed-up tool {saved['tool_uuid']} is not an active tool of that "
+                "name any more; restore it in the Dograh UI (Tools)",
+                file=sys.stderr,
+            )
+        elif any(now[field] != saved[field] for field in TOOL_UPDATE_FIELDS):
+            restores.append(saved)
+            print(f"tool {name}: restore backup definition (values withheld)")
     fresh = client.api("GET", f"/workflow/fetch/{workflow_id}")
     require(
         same_snapshot(fresh, current), "Workflow changed since backup; rerun rollback"
@@ -865,8 +1239,23 @@ def rollback(args):
     ) as state:
         fetched = publish(client, workflow_id, body, state)
         verify_snapshot(fetched, snapshot["workflow_definition"], snapshot)
+        for saved in restores:
+            state.write(
+                "tool restore",
+                "restored",
+                lambda saved=saved: client.api(
+                    "PUT",
+                    f"/tools/{saved['tool_uuid']}",
+                    {field: saved[field] for field in TOOL_UPDATE_FIELDS},
+                ),
+            )
+            state.stage = "tool read-back"
+            print("Stage: tool read-back")
+            verify_tool(client, saved["tool_uuid"], saved)
     print(
-        f"ROLLED BACK workflow {workflow_id}: definition and settings equal backup; credential retained"
+        f"ROLLED BACK workflow {workflow_id}: definition and settings equal backup; "
+        + ("tool definitions restored; " if restores else "")
+        + "credential retained"
     )
 
 
@@ -891,6 +1280,8 @@ def probe(args):
     for route, payload, headers in (
         ("pre-call", body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
         ("call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
+        # The HTTP tool sends its one preset as text, like the completion webhook.
+        ("tools/caller-work", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
     ):
         status, data = request(
             "POST",
@@ -905,6 +1296,11 @@ def probe(args):
         )
         if route == "call-ended":
             require(data == {}, "Unknown-run call-ended probe expected empty JSON object")
+        if route == "tools/caller-work":
+            require(
+                data == {"known": False},
+                'Unknown-run caller-work probe expected {"known": false}',
+            )
         status, _ = request(
             "POST",
             runtime + "/api/voice/" + route,
