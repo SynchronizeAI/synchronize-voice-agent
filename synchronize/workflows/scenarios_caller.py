@@ -425,9 +425,11 @@ CASES = {
     # Near misses: none of them is a request not to be recorded, so the call goes on and nothing is marked.
     "recording_question": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("message",), False),
-        "lines": {"en": ["Hi, is this call being recorded?", "Okay, that's fine. I have a question about an invoice you sent me.",
+        "lines": {"en": ["Hi, is this call being recorded?", "Can you switch the recording off?",
+                         "Okay, that's fine. I have a question about an invoice you sent me.",
                          "Jamie Lee.", "Invoice 1042 looks higher than the estimate.", "No, that's all."]},
-        "judged": "Asked whether the call is recorded, it says yes and carries on; it does not end the call.",
+        "judged": "Asked whether the call is recorded and whether that can be switched off, it says it is recorded and cannot be "
+        "switched off, and carries on; it does not end the call.",
         "gate": ("RECORDING_MISHANDLED",),
     },
     "recording_one_detail": {
@@ -468,6 +470,16 @@ CASES = {
         "lines": {"en": ["Hola, necesito un presupuesto para pintar mi casa."]},
         "judged": "At once the call ends through the Spanish tool, whose fixed Spanish sentence says the owner will call back at "
         "this number; the agent asks nothing in either language.",
+        "gate": ("LANGUAGE_NOT_HANDLED",),
+    },
+    # Near miss: a Spanish hello is not a Spanish call. The caller is asked once more and tells the matter in English.
+    "spanish_greeting_english_matter": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
+        "outcome": (("quote_request", "booking_request"), False),
+        "lines": {"en": ["¿Bueno?", "Hi, sorry, I need a quote for a new fence.", "Maria Lopez.", "It's 418 Oak Street in Berkeley.",
+                         "Yes, that's right.", "About a hundred feet of wood fence, sometime next month.", "No, that's all."]},
+        "judged": "A Spanish hello alone: it asks once more what the caller is calling about, then goes on in English with the "
+        "matter told in English; no End Call tool ends the call.",
         "gate": ("LANGUAGE_NOT_HANDLED",),
     },
     "other_language_caller": {
@@ -535,10 +547,12 @@ FLAGS_EN = {
     "since when; for moving a visit the day and time window wanted instead; for cancelling a visit, after offering once to find another time, why.",
     "RECORDING_MISHANDLED": "the caller said they do not want this call recorded and the call did not end at once through "
     "end_call_recording_declined (the assistant spoke itself, said the recording was off, asked anything more or went on); or the call "
-    "ended that way although the caller only asked whether it is recorded, wanted one detail kept off the recording, wanted a person "
-    "rather than a recording, or took the objection back.",
-    "LANGUAGE_NOT_HANDLED": "the caller spoke a language other than English and the call did not end at once through end_call_spanish (Spanish) "
-    "or end_call_other_language (any other language), or the assistant asked anything more or went on with the call in either language.",
+    "ended that way although the caller only asked about the recording (whether it is on, or whether it can be switched off), wanted one "
+    "detail kept off the recording, wanted a person rather than a recording, or took the objection back.",
+    "LANGUAGE_NOT_HANDLED": "the caller told their matter in a language other than English and the call did not end at once through "
+    "end_call_spanish (Spanish) or end_call_other_language (any other language), or the assistant asked anything more or went on with the "
+    "call in either language; or the call ended that way although the caller told their matter in English (a greeting, a name, a place or "
+    "a word in another language, or an accent, alone is not another language).",
     # English wording of a shared flag, as the English call review has it (consultation-en.json, Call QA).
     "WRONG_LANGUAGE": "the assistant spoke another language to a caller who spoke English and did not ask for one. The phone system's fixed "
     "sentence in the caller's own language when it ends the call, and the fixed goodbye, are not this flag.",
@@ -571,7 +585,8 @@ RUBRIC_LINE = {
     "ko": "",
     "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
     "urgent for the owner, who will call them back; it promises no time. It asks each kind of call, one question per turn, only what the owner "
-    "needs for it. A caller who says they do not want this call recorded, or who speaks another language, is not answered by the receptionist: "
+    "needs for it. A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
+    "word alone does not count), is not answered by the receptionist: "
     "the call ends at once through one of the line's End Call tools, whose fixed message (in Spanish for a Spanish speaker, otherwise in English) "
     "says the owner will call them back at this number. A [CALL ENDED BY ...] line names the tool that ended a call.",
 }
@@ -673,6 +688,15 @@ CANARIES = {
             ("Jamie Lee", "Jamie, how did you hear about us?", None),
             ("A neighbor told me", "I'll pass on that you'd like a new deck. Is there anything to add?", None),
         ], "Call back about a new deck"),
+        # Ended at once by the recording tool: the rule, not a promise or a curt goodbye.
+        ("good_recording_handled", [], None, [
+            ("Hi, I'd like a quote to replace my windows.", "May I have your name?", None),
+            ("Wait, I don't want this call recorded.", None, {"end": "end_call_recording_declined"}),
+        ], "Call back about replacing the windows; the caller does not want the call recorded"),
+        # A Spanish hello before an English matter is an English call: ending it in Spanish is the flag.
+        ("bad_language_ended_too_soon", ["LANGUAGE_NOT_HANDLED"], None, [
+            ("Hola, buenos días. Hi, I need a quote for a new fence.", None, {"end": "end_call_spanish"}),
+        ], "Call back about a new fence"),
         ("bad_recording_ignored", ["RECORDING_MISHANDLED"], None, [
             ("Hi, I'd like a quote to replace my windows.", "May I have your name?", None),
             ("Wait, I don't want this call recorded.", "No problem, I've turned the recording off. May I have your name?", None),

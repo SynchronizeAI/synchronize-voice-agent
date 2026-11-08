@@ -280,6 +280,8 @@ class CallerScenariosTest(unittest.TestCase):
                 "recording_objection", "ai_robot_question", "spanish_caller", "other_language_caller",
                 # Near misses of the recording objection: none of them ends the call or marks it.
                 "recording_question", "recording_one_detail", "recording_person_request", "recording_objection_withdrawn",
+                # Near miss of the language rule: a Spanish hello, then the matter in English.
+                "spanish_greeting_english_matter",
             } if lang == "en" else set()
             self.assertEqual(
                 set(cases) - facts - urgent - us,
@@ -327,6 +329,7 @@ class CallerScenariosTest(unittest.TestCase):
                         "recording_one_detail": (("message",), False),
                         "recording_person_request": (("message",), False),
                         "recording_objection_withdrawn": (("quote_request", "booking_request"), False),
+                        "spanish_greeting_english_matter": (("quote_request", "booking_request"), False),
                     } if lang == "en" else {}),
                     "outcome_quote_request": (("quote_request",), False),
                     "outcome_urgent_leak": (("booking_request", "message"), True),
@@ -380,7 +383,7 @@ class CallerScenariosTest(unittest.TestCase):
                     "recording_objection", "recording_question", "recording_one_detail", "recording_person_request",
                     "recording_objection_withdrawn",
                 },
-                "LANGUAGE_NOT_HANDLED": {"spanish_caller", "other_language_caller"},
+                "LANGUAGE_NOT_HANDLED": {"spanish_caller", "other_language_caller", "spanish_greeting_english_matter"},
             }
             for flag, gated in line_flags.items():
                 self.assertEqual(flag in manifest["flags"], lang == "en")
@@ -410,6 +413,10 @@ class CallerScenariosTest(unittest.TestCase):
                         self.assertEqual(len(c["lines"]), ends[1] + 1, case)
                 for case in ("recording_question", "recording_one_detail", "recording_person_request", "recording_objection_withdrawn"):
                     self.assertNotIn("don't want this call recorded", " ".join(cases[case]["lines"]), case)
+                # Asking about the recording, also whether it can be switched off, is not an objection.
+                self.assertIn("Can you switch the recording off?", cases["recording_question"]["lines"])
+                # The language near miss opens with a Spanish hello alone and tells the matter in English.
+                self.assertEqual(cases["spanish_greeting_english_matter"]["lines"][:2], ["¿Bueno?", "Hi, sorry, I need a quote for a new fence."])
                 # A non-project reason keeps the read-back gate away from the new-project intake.
                 self.assertIn("invoice", cases["callback_other_number"]["lines"][0])
                 self.assertTrue(cases["spanish_caller"]["lines"][0].startswith("Hola"))
@@ -578,6 +585,8 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertTrue({"recording_declined", "caller_language", "end_tool"} <= set(group["checks"]), case)
         for case in ("recording_question", "recording_one_detail", "recording_person_request", "recording_objection_withdrawn"):
             self.assertEqual((cases[case]["checks"]["end_tool"], cases[case]["checks"]["recording_declined"]), (1, 1), case)
+        near = cases["spanish_greeting_english_matter"]["checks"]
+        self.assertEqual((near["end_tool"], near["caller_language"]), (1, 1))
         row = json.loads((self.out / "en_recording_objection-r1.json").read_text())
         self.assertTrue(row["completed_naturally"])
         self.assertIs(row["grade"]["review"]["extraction"]["recording_declined"], True)
@@ -912,14 +921,21 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertIn(f"- {flag}: ", text)
             self.assertEqual(planted[f"CANARY_{canary}"], [flag])
         # One Spanish sentence and the fixed goodbye are the rule: that canary is clean, so a judge reading it as
-        # WRONG_LANGUAGE is not counted.
+        # WRONG_LANGUAGE is not counted; so is a correct objection ending, and a Spanish hello ended in Spanish is flagged.
         self.assertEqual(planted["CANARY_good_language_handled"], [])
+        self.assertEqual(planted["CANARY_good_recording_handled"], [])
+        self.assertIn("[CALL ENDED BY end_call_recording_declined]\nBOT: Recording can't be switched off on this line",
+                      by_case["CANARY_good_recording_handled"])
+        self.assertEqual(planted["CANARY_bad_language_ended_too_soon"], ["LANGUAGE_NOT_HANDLED"])
+        self.assertIn("CALLER: Hola, buenos días. Hi, I need a quote for a new fence.\n[CALL ENDED BY end_call_spanish]",
+                      by_case["CANARY_bad_language_ended_too_soon"])
+        self.assertIn("or the call ended that way although the caller told their matter in English", text)
         self.assertIn("[CALL ENDED BY end_call_spanish]\nBOT: El dueño le devolverá la llamada a este número.",
                       by_case["CANARY_good_language_handled"])
         # The canary's turn renders like a real Spanish session's.
         self.assertEqual(by_case["CANARY_good_language_handled"].split("CALLER: ", 1)[1].split("\nAFTER THE CALL")[0],
                          by_case["spanish_caller"].split("CALLER: ", 1)[1].split("\nAFTER THE CALL")[0])
-        self.assertEqual(len(scenarios_caller.CANARIES["en"]), 13)
+        self.assertEqual(len(scenarios_caller.CANARIES["en"]), 15)
         # A lookup shows as a lookup, an End Call tool as the end of the call; nothing else a session records reaches a judge.
         self.assertEqual(
             {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
