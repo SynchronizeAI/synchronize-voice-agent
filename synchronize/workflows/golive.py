@@ -6,7 +6,9 @@ One run also creates or updates the caller-work HTTP tool (by its unique name),
 resolves its UUID into the nodes and applies the template's call dispositions,
 and only those, to the workflow settings. The English transfer tool is handled the
 same way, but only with --with-transfer: without it go-live neither attaches,
-updates nor removes it (the go-live gate is in the runbook).
+updates nor removes it. The go-live gate (runbook step 9) first wires it on a
+Dograh duplicate of the English workflow that only a test number reaches
+(--copy-of 3), so no customer's call can be transferred before the gate passes.
 Standard library only. Nothing contacts Railway or fetches git refs.
 """
 
@@ -42,6 +44,7 @@ PENDING_UUID = "00000000-0000-4000-8000-000000000000"
 # (the tool specs' placeholder_uuid); none of them may ever be published.
 PLACEHOLDER_UUID_PREFIX = "00000000-0000-4000-8000-"
 PLACEHOLDER_ORIGIN = "https://synchronize.example.invalid"
+PRE_CALL_ROUTE = "/api/voice/pre-call"
 TOOL_ROUTE = "/api/voice/tools/caller-work"
 TRANSFER_ROUTE = "/api/voice/tools/transfer"
 # Where each tool category posts, and the field holding that URL and the credential (wiring()).
@@ -56,6 +59,12 @@ TRANSFER_TIMEOUT = 18
 TRANSFER_DISPOSITION = "transferred"
 TRANSFER_REASONS = ("person", "urgent")
 TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definition")
+# scenarios_caller.py gives every tool it creates (the failing lookup copy, the transfer copy) this icon. A copy keeps the
+# live tool's name, because that name is the function the model calls; the icon is the one field neither the model
+# (custom_tool.py:156 builds the function from name and description) nor Dograh's UI (it draws a tool's icon from its
+# category, ui/src/app/tools/config.tsx) reads, so the mark changes nothing a call does. Go-live never takes a marked
+# tool for the line's own (tool_change): an eval copy is archived when its run ends.
+TEST_COPY_ICON = "synchronize-test-copy"
 TOOL_UPDATE_FIELDS = ("description", "icon", "icon_color", "definition")
 DISPOSITIONS = "settings.call_dispositions"
 BACKUP_FORMAT = 3  # 3 adds the caller-work tool; format 2 backups stay restorable.
@@ -83,6 +92,14 @@ RUN_PRESET = [{
     "required": True,
 }]
 MISSING = object()
+
+
+def pre_call_url(runtime, lang):
+    """The Start node's pre-call URL. Dograh 1.51's pre-call body is fixed (pre_call_fetch.py:109-123),
+    so the URL carries the workflow's language as a constant, like the lookup's body template does;
+    Synchronize words hours_today and next_open only in the language it names (voice_api.py
+    _call_language, voice_hours.business_context) and sends neither without it."""
+    return f"{runtime}{PRE_CALL_ROUTE}?language={lang}"
 
 
 class GoLiveError(Exception):
@@ -558,7 +575,7 @@ def template_fields(old, new, wired=()):
     return fields
 
 
-def patched(live, old, new, runtime, credential_uuid, field_modes=None, wired=()):
+def patched(live, old, new, runtime, credential_uuid, lang, field_modes=None, wired=()):
     out = copy.deepcopy(live)
     before, previous, current = nodes(out), nodes(old), nodes(new)
     for node_id in sorted(previous.keys() | current.keys()):
@@ -619,7 +636,7 @@ def patched(live, old, new, runtime, credential_uuid, field_modes=None, wired=()
     )
     before["1"]["data"].update(
         pre_call_fetch_mode=current["1"]["data"]["pre_call_fetch_mode"],
-        pre_call_fetch_url=runtime + "/api/voice/pre-call",
+        pre_call_fetch_url=pre_call_url(runtime, lang),
         pre_call_fetch_credential_uuid=credential_uuid,
     )
     if "6" not in before:
@@ -639,17 +656,17 @@ def patched(live, old, new, runtime, credential_uuid, field_modes=None, wired=()
     webhook["data"].update(
         endpoint_url=runtime + "/api/voice/call-ended", credential_uuid=credential_uuid
     )
-    validate_wiring(out, live, runtime, credential_uuid)
+    validate_wiring(out, live, runtime, credential_uuid, lang)
     return out
 
 
-def validate_wiring(definition, original, runtime, credential_uuid, final=False):
+def validate_wiring(definition, original, runtime, credential_uuid, lang, final=False):
     """final: after the credential/tool writes, no placeholder UUID may remain."""
     indexed = nodes(definition)
     require(nodes(original).keys() <= indexed.keys(), "A pre-existing node was lost")
     expected = {
         "pre_call_fetch_mode": "inbound",
-        "pre_call_fetch_url": runtime + "/api/voice/pre-call",
+        "pre_call_fetch_url": pre_call_url(runtime, lang),
         "pre_call_fetch_credential_uuid": credential_uuid,
     }
     require(
@@ -716,6 +733,11 @@ def lookup_tool(client, name):
 def tool_change(existing, planned):
     if existing is None:
         return "create"
+    require(
+        existing["icon"] != TEST_COPY_ICON,
+        f"Tool {planned['name']} is a copy scenarios_caller.py made for an eval run, not the line's own: let that run "
+        "finish, or run scenarios_caller.py cleanup for a run that crashed, then re-plan",
+    )
     require(
         existing["status"] == "active" and existing["category"] == planned["category"],
         f"Existing tool {planned['name']} must be an active "
@@ -928,7 +950,8 @@ def same_snapshot(workflow, snapshot):
     )
 
 
-def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=()):
+def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=(), copy_of=None):
+    """copy_of: the line workflow a --copy-of target duplicates (recorded, so rollback accepts that backup)."""
     workflow = client.api("GET", f"/workflow/fetch/{workflow_id}")
     require(workflow["id"] == workflow_id, "Fetched workflow id mismatch")
     if not allow_draft:
@@ -945,6 +968,7 @@ def backup(client, workflow_id, directory, *, allow_draft=False, tool_names=()):
         **{field: workflow[field] for field in SETTINGS},
         # None records that the named tool did not exist at backup time.
         "tools": {name: lookup_tool(client, name) for name in tool_names},
+        **({"copy_of": copy_of} if copy_of is not None else {}),
     }
     ensure_no_secrets(snapshot)
     path = (
@@ -1028,7 +1052,8 @@ def diff_fields(before, after):
     return changes
 
 
-def show_plan(changes, field_modes=None):
+def show_plan(changes, field_modes=None, lang=None):
+    """lang: the line's language for a plan; None for a rollback, which restores the backup's URLs."""
     for where, field, old, new in changes:
         label = f"{where}.data.{field}"
         mode = (
@@ -1053,12 +1078,13 @@ def show_plan(changes, field_modes=None):
         print(f"{label}: {mode}; -{removed}/+{added} changed lines")
         if field in {"pre_call_fetch_url", "endpoint_url"}:
             path = (
-                "/api/voice/pre-call"
+                pre_call_url("", lang)
                 if field == "pre_call_fetch_url"
                 else "/api/voice/call-ended"
             )
             print(
-                f"  - {'configured URL' if old else 'unset'}\n  + runtime origin + {path}"
+                f"  - {'configured URL' if old else 'unset'}\n  + "
+                + (f"runtime origin + {path}" if lang else "backup URL")
             )
         elif field in START_FIELDS | {
             "credential_uuid",
@@ -1226,10 +1252,21 @@ def publish(client, workflow_id, body, state):
 
 
 def deploy(args):
+    # --copy-of N: the target is a Dograh duplicate of line workflow N (the runbook's transfer gate copy, which only a
+    # test number routes to); it is planned and wired exactly as workflow N would be.
     require(
-        TARGETS.get(args.workflow_id) == args.lang,
+        TARGETS.get(args.workflow_id if args.copy_of is None else args.copy_of) == args.lang,
         "Use workflow 3/en or 1/ko; workflow 2 is excluded",
     )
+    if args.copy_of is not None:
+        require(
+            args.with_transfer,
+            "--copy-of is for the transfer gate copy only: add --with-transfer",
+        )
+        require(
+            args.workflow_id not in {*TARGETS, 2},
+            "--copy-of: --workflow-id must be the duplicate, not a line's own workflow",
+        )
     runtime = origin(args.runtime_origin)
     secret = env_value("DOGRAH_WEBHOOK_SECRET", required=args.apply)
     if args.apply:
@@ -1288,6 +1325,7 @@ def deploy(args):
         args.workflow_id,
         backup_directory(args.backup_dir),
         tool_names=tuple(s["tool"]["name"] for s, _ in managed),
+        copy_of=args.copy_of,
     )
     live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
     existing = find_credential(client, args.credential_name)
@@ -1316,14 +1354,14 @@ def deploy(args):
         plans.append(
             {"spec": spec, "existing": existing_tool, "tool": tool, "change": change, "ref": tool_ref}
         )
-    planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes, wired)
+    planned = patched(live, old, new, runtime, existing or PENDING_UUID, args.lang, field_modes, wired)
     for plan in plans:
         planned = wire_tool_refs(client, planned, templates, plan["spec"], plan["ref"])
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
     for value in (planned, settings, *(plan["tool"] for plan in plans)):
         ensure_no_secrets(value)
     changes = diff_fields(live, planned)
-    show_plan(changes, field_modes)
+    show_plan(changes, field_modes, args.lang)
     show_settings(live_settings, settings, field_modes)
     for plan in plans:
         name = plan["tool"]["name"]
@@ -1422,7 +1460,7 @@ def deploy(args):
         planned_nodes["6"]["data"]["credential_uuid"] = ident
         state.stage = "wiring validation"
         print("Stage: wiring validation")
-        validate_wiring(planned, live, runtime, ident, final=True)
+        validate_wiring(planned, live, runtime, ident, args.lang, final=True)
         require(
             all(references(planned, plan["uuid"]) for plan in plans),
             "Tool reference missing from the planned definition",
@@ -1437,7 +1475,7 @@ def deploy(args):
                 body["workflow_configurations"] = settings
             fetched = publish(client, args.workflow_id, body, state)
             verify_snapshot(fetched, planned, expected)
-            validate_wiring(fetched["workflow_definition"], live, runtime, ident, final=True)
+            validate_wiring(fetched["workflow_definition"], live, runtime, ident, args.lang, final=True)
     summary("APPLIED", args.workflow_id, changes, len(nodes(live)), settings_note)
     if planned == live and not settings_changed:
         print("Workflow definition and settings already current; nothing published")
@@ -1463,7 +1501,11 @@ def rollback(args):
         "Cannot restore a draft backup or a backup without published-version evidence",
     )
     workflow_id = snapshot["workflow_id"]
-    require(workflow_id in TARGETS, "Backup target must be workflow 1 or 3")
+    copy_of = snapshot.get("copy_of")
+    require(
+        workflow_id in TARGETS or (copy_of in TARGETS and workflow_id not in {*TARGETS, 2}),
+        "Backup target must be workflow 1 or 3, or a --copy-of duplicate of one",
+    )
     if args.workflow_id is not None:
         require(args.workflow_id == workflow_id, "Rollback target differs from backup")
     ensure_no_secrets(snapshot)
@@ -1473,7 +1515,7 @@ def rollback(args):
     # Recovery must work when a failed apply left a draft. Preserve it for
     # inspection, clearly labelled; never allow that draft backup as a restore target.
     current, _ = backup(
-        client, workflow_id, directory, allow_draft=True, tool_names=tuple(saved_tools)
+        client, workflow_id, directory, allow_draft=True, tool_names=tuple(saved_tools), copy_of=copy_of
     )
     print("Rollback overwrites later edits, including any unpublished draft.")
     show_plan(
@@ -1552,19 +1594,22 @@ def probe(args):
     wrong = "wrong-" + uuid4().hex
     while wrong == secret:
         wrong = "wrong-" + uuid4().hex
-    for route, payload, headers in (
-        ("pre-call", body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
-        ("call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
+    lang = TARGETS[args.workflow_id]
+    for route, url, payload, headers in (
+        # The URL go-live wires, with the line's language (pre_call_url).
+        ("pre-call", pre_call_url(runtime, lang), body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
+        ("call-ended", runtime + "/api/voice/call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
         # The tool's body template keeps the run id's integer type (custom_tool.py:278-295).
         (
             "tools/caller-work",
-            {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID), "language": TARGETS[args.workflow_id]},
+            runtime + TOOL_ROUTE,
+            {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID), "language": lang},
             {},
         ),
     ):
         status, data = request(
             "POST",
-            runtime + "/api/voice/" + route,
+            url,
             {**headers, "X-Dograh-Secret": secret},
             payload,
         )
@@ -1582,7 +1627,7 @@ def probe(args):
             )
         status, _ = request(
             "POST",
-            runtime + "/api/voice/" + route,
+            url,
             {**headers, "X-Dograh-Secret": wrong},
             payload,
         )
@@ -1628,6 +1673,12 @@ def main(argv=None):
     parser.add_argument("--backup-dir", type=Path)
     parser.add_argument("--to-number")
     parser.add_argument(
+        "--copy-of",
+        type=int,
+        metavar="WORKFLOW_ID",
+        help="plan/apply --with-transfer on --workflow-id, a Dograh duplicate of this line workflow (runbook step 9's gate copy)",
+    )
+    parser.add_argument(
         "--with-transfer",
         action="store_true",
         help="also create/update and attach the English transfer tool (probe: also its route)",
@@ -1642,6 +1693,10 @@ def main(argv=None):
         require(
             not args.accept_merged or (args.command == "plan" and not args.rollback),
             "--accept-merged is only for plan/apply",
+        )
+        require(
+            args.copy_of is None or (args.command == "plan" and not args.rollback),
+            "--copy-of is only for plan/apply",
         )
         if args.command == "probe":
             require(
