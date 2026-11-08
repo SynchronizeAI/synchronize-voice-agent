@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import unittest
@@ -151,9 +152,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = (
                     {"status": "error", "error": "Request timed out after 0.001 seconds"}
                     if tool["definition"]["config"]["timeout_ms"] == 1
-                    else {"status": "success", "data": {"known": False}}
+                    else {"status": "success", "status_code": 200, "data": {"known": False}}
                 )
+                (start,) = [m["text"] for m in tool["definition"]["messages"] if m["event"] == "start"]
                 events.append({"type": "tool_call_started", "payload": {"function_name": tool["name"], "arguments": {}}})
+                events.append({"type": "bot_speech", "payload": {"text": start}})
                 events.append({"type": "tool_call_result", "payload": {"function_name": tool["name"], "result": result}})
                 reply = "지금은 기록을 확인할 수 없어서 담당자가 확인해서 연락드리겠습니다."
             else:
@@ -258,6 +261,9 @@ class CallerScenariosTest(unittest.TestCase):
                     "outcome_complaint": (("message",), False),
                     "outcome_sales_call": (("spam",), False),
                     "outcome_wrong_number": (("wrong_number",), False),
+                    # A visit question the agent hands over leaves the owner a call back, never done.
+                    "known_caller_visit": (("message", "booking_request"), False),
+                    "lookup_failure": (("message", "booking_request"), False),
                 },
             )
             self.assertTrue({code for codes, _ in outcomes.values() for code in codes} <= set(scenarios_caller.CODES))
@@ -289,6 +295,12 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertIn("NUMBER_NOT_READ_BACK", cases["callback_other_number"]["gate"])
             self.assertIn("CLOSING_ANSWERED", cases["closing_price_question"]["gate"])
             self.assertIn("LOOKUP_NOT_HANDLED", cases["lookup_failure"]["gate"])
+            # Every restored criterion has a flag that can fail it.
+            self.assertIn("NO_CALLBACK_TIME", cases["rude_caller"]["gate"])
+            self.assertTrue({"NOT_ASKED_AGAIN", "GUESSED_VALUE"} <= set(cases["mumbling"]["gate"]))
+            self.assertIn("AI_ANSWER_APOLOGIZED", manifest["flags"])
+            # Asking whether the caller is the record's name is the designed first reply, not a leak.
+            self.assertIn("Asking once whether the caller is the person named on the record", manifest["flags"]["RECORD_UNCONFIRMED"])
         self.assertEqual(self.fake.calls, [])
 
     def test_test_workflow_has_the_live_tool_and_no_production_side_effects(self):
@@ -355,7 +367,7 @@ class CallerScenariosTest(unittest.TestCase):
         # The live workflow is read for its model only; nothing writes to it.
         self.assertFalse(any(c[0] != "GET" and "/workflow/1" in c[1] for c in self.fake.calls))
         row = json.loads((self.out / "ko_known_caller_visit-r1.json").read_text())
-        self.assertEqual(row["grade"]["tool_results"], [{"status": "success", "data": {"known": False}}])
+        self.assertEqual(row["grade"]["tool_results"], [{"status": "success", "status_code": 200, "data": {"known": False}}])
         row = json.loads((self.out / "ko_lookup_failure-r1.json").read_text())
         self.assertEqual(row["grade"]["tool_results"][0]["status"], "error")
         self.assertIn("follow_up", row["grade"]["review"]["extraction"])
@@ -486,6 +498,19 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertIn("[LOOKUP RESULT: {\"status\": \"error\"", text)
         self.assertIn("CALLER RECORD NAME: 홍길동", text)
         self.assertIn("AFTER THE CALL, FOR THE OWNER: follow_up:", text)
+        # Canaries look like real sessions: the same lookup lines, Dograh's result shape, the
+        # tool's start message; no line format only a canary has.
+        items = dict(re.findall(r"=== ITEM (t\d+) ===\n(.*?)(?=\n=== ITEM |\Z)", text, re.S))
+        by_case = {item["case"]: items[item["item"]] for item in key["items"]}
+        canary, real = by_case["CANARY_good_lookup_handled"], by_case["known_caller_visit"]
+        self.assertNotIn("RECORD LOOKUP RAN. RESULT", text)
+        for transcript in (canary, real):
+            self.assertIn("[RECORD LOOKUP RAN, ARGUMENTS: {}]\n[LOOKUP RESULT: {\"status\": \"success\", \"status_code\": 200", transcript)
+            self.assertIn("BOT: 확인해 보겠습니다. ", transcript)
+        self.assertEqual(
+            {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
+            {"[RECORD LOOKUP RAN, ARGUMENTS", "[LOOKUP RESULT"},
+        )
         # Canaries are mixed in, not appended.
         canary_positions = [i for i, item in enumerate(key["items"]) if item["canary"]]
         self.assertNotEqual(canary_positions, list(range(len(key["items"]) - len(canary_positions), len(key["items"]))))
@@ -497,7 +522,7 @@ class CallerScenariosTest(unittest.TestCase):
         self.cli("score", "--out", str(self.out))
         judged = json.loads((self.out / "judged.json").read_text())
         self.assertEqual(judged["gate"], "pass")
-        self.assertEqual(judged["judges"]["a"]["canaries_passed"], "4/4")
+        self.assertEqual(judged["judges"]["a"]["canaries_passed"], "5/5")
 
         target = next(item["item"] for item in key["items"] if item["case"] == "human_request")
         # One judge alone flagging a gating flag does not fail the gate; both do.
@@ -508,6 +533,19 @@ class CallerScenariosTest(unittest.TestCase):
         judged = json.loads((self.out / "judged.json").read_text())
         self.assertEqual(judged["gate"], "fail")
         self.assertEqual(judged["cases"]["human_request"]["gate_failures"], [{"rep": 1, "flags": ["NO_CALLBACK_TIME"]}])
+        # Two judges who each apply a different gate flag of the case still fail it.
+        price = next(item["item"] for item in key["items"] if item["case"] == "closing_price_question")
+        (self.out / "judge.a.out").write_text(self.answer(key, lambda item: ["PROMISE"] if item["item"] == price else []))
+        (self.out / "judge.b.out").write_text(self.answer(key, lambda item: ["CLOSING_ANSWERED", "MULTI_QUESTION"] if item["item"] == price else []))
+        self.cli("score", "--out", str(self.out), expected=1)
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertEqual(judged["gate"], "fail")
+        self.assertEqual(
+            judged["cases"]["closing_price_question"]["gate_failures"], [{"rep": 1, "flags": ["CLOSING_ANSWERED", "PROMISE"]}]
+        )
+        # One judge with a gate flag and the other with only a flag that does not gate the case passes.
+        (self.out / "judge.b.out").write_text(self.answer(key, lambda item: ["MULTI_QUESTION"] if item["item"] == price else []))
+        self.cli("score", "--out", str(self.out))
         # A flag that does not gate this case is reported but does not fail it.
         other = next(item["item"] for item in key["items"] if item["case"] == "mumbling")
         both = lambda item: ["NUMBER_NOT_READ_BACK"] if item["item"] == other else []
@@ -534,7 +572,7 @@ class CallerScenariosTest(unittest.TestCase):
                 row["flags"] = []
         (self.out / "judge.b.out").write_text(json.dumps(rows))
         self.cli("score", "--out", str(self.out), expected=1)
-        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["canaries_passed"], "3/4")
+        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["canaries_passed"], "4/5")
         (self.out / "judge.b.out").write_text("I could not decide.")
         self.cli("score", "--out", str(self.out), expected=1)
         self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["reason"], "no parseable JSON array")

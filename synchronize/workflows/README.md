@@ -365,24 +365,31 @@ Behaviours: a price and schedule question at the close, a request for the owner 
 a person asked for (with the callback time above), an angry caller, mumbling, a card number, 반말, and an elderly caller asking to repeat
 (English has no 10-31 line for the last, so it has its own). Outcomes: a quote request, a leak, a gas smell, a complaint, a sales call and a
 wrong number. A known contact with no name gets no `caller_name` from the pre-call, so in text chat it is the unknown caller.
+The two lookup cases that hand over (`known_caller_visit`, `lookup_failure`) also check the code: a visit question the agent could not answer
+leaves the owner a call back, so it is `message` or `booking_request`, never `done`.
 `manifest` (offline) prints every case, its criteria and the flags that gate it. `run` builds isolated test workflows from this checkout's
 committed templates (`HEAD`) with the live lookup tool (or the failing copy), the live line's model configuration and the template settings;
 it removes the pre-call fetch, the completion webhook and the QA node, archives everything it created at the end, and never writes to the
 live workflow or the live tool. It scores the objective checks: the opening text; for a known caller the name in the first reply and
 `customer_name` equal to the confirmed name (empty when the caller does not confirm); the lookup called exactly once and never before the
 confirmation line when a known caller asks about a visit, also when it fails, and not called when they never ask, will not confirm, or are
-unknown; for each outcome case the code (the leak and the gas smell may be `booking_request` or `message`, a complaint is `message`) and the
-`urgent` flag. Every session file keeps a review block: the replies, the lookup's arguments and results, and the extraction for the owner.
+unknown; for each outcome case and the two hand-over lookup cases the code (the leak and the gas smell may be `booking_request` or
+`message`, a complaint is `message`) and the `urgent` flag. Every session file keeps a review block: the replies, the lookup's arguments and results, and the extraction for the owner.
 `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`, workflows and the failing copy).
 
 The judged criteria go to independent judge models, in the format of the 10-31 blinded-judge harness (`build_judge.py`, `score.py` in
 `~/work/voice-polite-proof-20261031`). `judge --out DIR` writes `judge.md`: a fixed flag rubric (the 10-31 flags plus record, lookup,
-callback and closing flags) and every transcript as a numbered item with the caller record name, the lookup results and the after-call
-`follow_up`, in a deterministic shuffle with four planted canaries (a price stated at the close, a record invented after a failed lookup,
-반말 or curt speech, and one clean call), and no case name or criterion; `judge-key.json` maps items back and must not reach a judge.
+callback, closing, mumbled-call, guessed-value and AI-answer flags) and every transcript as a numbered item with the caller record name, the
+lookup calls and results and the after-call `follow_up`, in a deterministic shuffle with five planted canaries (a price stated at the close,
+a record invented after a failed lookup, 반말 or curt speech, and two clean calls: a failed lookup handled, and a caller who declines the
+record's name after the agent asked once whether they are that person), and no case name or criterion; `judge-key.json` maps items back and
+must not reach a judge. Canaries go through the same rendering as the real sessions, with Dograh's result shape and the tool's spoken start
+message, so no line format marks them. The judges run in an empty directory (runbook step 6), as the 10-31 judges did, because the fork
+holds every case and canary word for word.
 `score --out DIR` reads each judge's answer from `judge.<name>.out` (a JSON array), counts a judge only when it answered every item, caught
-every bad canary and left the clean one unflagged, and fails a session only when every counted judge applied one of that case's gate flags;
-it needs two counted judges to decide. The 10-31 harness compared two versions pairwise; this one has a single version, so each transcript
+every bad canary and left the clean ones without a gate flag, and fails a session when every counted judge applied at least one of that
+case's gate flags, not necessarily the same one (one defect often fits two flags, such as a price at the close: PROMISE or CLOSING_ANSWERED);
+it needs two counted judges to decide. Flags that gate no case are counted per judge in `judged.json`. The 10-31 harness compared two versions pairwise; this one has a single version, so each transcript
 gets flags instead of a winner.
 
 A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the visit case measures that the
