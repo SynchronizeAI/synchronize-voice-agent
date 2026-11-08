@@ -1,0 +1,25 @@
+{
+  "placeholder_uuid": "00000000-0000-4000-8000-000000000103",
+  "tool": {
+    "name": "end_call_other_language",
+    "description": "Ends the call for a caller who speaks a language other than English or Spanish. Call it at once, in a turn with no speech of your own: the phone system itself then tells them, in English, that this line helps only in English and that the owner will call them back at this number, and says goodbye.",
+    "category": "end_call",
+    "icon": "phone-off",
+    "icon_color": "#EF4444",
+    "definition": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "type": "text",
+          "text": "I can only help in English on this line. The owner will call you back at this number. Thank you for calling. Goodbye.",
+          "event": "start"
+        }
+      ],
+      "type": "end_call",
+      "config": {
+        "endCallReason": false,
+        "endCallReasonDescription": null
+      }
+    }
+  }
+}
