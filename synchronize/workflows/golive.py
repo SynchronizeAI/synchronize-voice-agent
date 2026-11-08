@@ -168,9 +168,8 @@ class Dograh:
                 f"Dograh {method} failed: HTTP {status}; unknown, may have committed"
             )
         require(200 <= status < 300, f"Dograh {method} failed: HTTP {status}")
-        expected = (
-            list if method == "GET" and path in ("/credentials/", "/tools/") else dict
-        )
+        listing = path.split("?", 1)[0] in ("/credentials/", "/tools/")
+        expected = list if method == "GET" and listing else dict
         if not isinstance(result, expected):
             error = GoLiveError if method == "GET" else UncertainWrite
             raise error(
@@ -619,7 +618,73 @@ def tool_change(existing, planned):
     return "update" if differs else None
 
 
-def show_tool(planned, existing, change):
+def tool_label(name):
+    return f"tool.{name}"
+
+
+def tool_owned(tool):
+    """The tool fields a template owns; the URL and credential are go-live's wiring."""
+    owned = copy.deepcopy({field: tool[field] for field in TOOL_UPDATE_FIELDS})
+    config = owned["definition"].get("config")
+    if isinstance(config, dict):
+        config.pop("url", None)
+        config.pop("credential_uuid", None)
+    return owned
+
+
+def tool_mode(existing, old_planned, planned):
+    """Like the field modes: only a tool still equal to a template is replaced unasked."""
+    if tool_owned(existing) == tool_owned(planned):
+        return "wiring"
+    if old_planned is not None and tool_owned(existing) == tool_owned(old_planned):
+        return "template-replaced"
+    return "REPLACES-CUSTOM"
+
+
+def wire_tool_refs(client, definition, templates, spec, tool_ref):
+    """The caller-work tool reference is wiring, like the URLs.
+
+    Every node the new template gives the tool references tool_ref once. A reference to an
+    inactive tool of the same name (archived in the Dograh UI) is replaced where it stands;
+    other tools on the node stay; a reference Dograh cannot return is refused. Read-only.
+    """
+    name, placeholder = spec["tool"]["name"], spec["placeholder_uuid"]
+    literal = {
+        ref
+        for template in templates
+        for node in template["nodes"]
+        for ref in node.get("data", {}).get("tool_uuids") or []
+        if not ref.startswith(PLACEHOLDER_UUID_PREFIX)
+    }
+    out = copy.deepcopy(definition)
+    indexed = nodes(out)
+    for node_id, node in nodes(templates[-1]).items():
+        if placeholder not in (node.get("data", {}).get("tool_uuids") or []):
+            continue
+        data = indexed[node_id]["data"]
+        refs = []
+        for ref in data.get("tool_uuids") or []:
+            if ref != tool_ref and ref not in literal and not ref.startswith(PLACEHOLDER_UUID_PREFIX):
+                try:
+                    other = client.api("GET", f"/tools/{ref}")
+                except UncertainWrite:
+                    raise
+                except GoLiveError:
+                    raise GoLiveError(
+                        f"node {node_id}: tool reference {ref} is not a tool Dograh returns; remove it "
+                        "from the node in the Dograh UI, publish, then re-plan"
+                    ) from None
+                if other.get("name") == name and other.get("status") != "active":
+                    ref = tool_ref
+            if ref != tool_ref or ref not in refs:
+                refs.append(ref)
+        if tool_ref not in refs:
+            refs.append(tool_ref)
+        data["tool_uuids"] = refs
+    return out
+
+
+def show_tool(planned, existing, change, mode=None):
     name = planned["name"]
     if change is None:
         print(f"tool {name}: unchanged")
@@ -642,7 +707,12 @@ def show_tool(planned, existing, change):
             )
             if old_def.get("config", {}).get(key) != new_def.get("config", {}).get(key)
         ]
-    print(f"tool {name}: update {', '.join(differs)} (values withheld)")
+    print(f"tool {name}: update {', '.join(differs)} ({mode}; values withheld)")
+    if mode == "REPLACES-CUSTOM":
+        print(
+            f"  the live tool equals neither template (edited in Dograh → Tools?); apply overwrites it "
+            f"only with --accept-merged {tool_label(name)}"
+        )
 
 
 def planned_settings(live, old, new, field_modes):
@@ -950,13 +1020,22 @@ class WriteState:
                 f"  draft left behind: {self.draft}",
                 file=sys.stderr,
             )
-            if self.published == "unchanged" and self.draft == "no":
+            # An updated tool is live at once for every workflow that references it.
+            tool_live = self.tool not in ("unchanged", "created")
+            workflow_unchanged = self.published == "unchanged" and self.draft == "no"
+            if workflow_unchanged and not tool_live:
                 print(
                     "  No workflow rollback needed: published definition unchanged; no draft saved. "
-                    "Any credential or tool change is retained.",
+                    "A credential change or a newly created tool is retained.",
                     file=sys.stderr,
                 )
             else:
+                if workflow_unchanged:
+                    print(
+                        f"  The published workflow already uses the changed tool ({self.tool}); "
+                        "this restores the backed-up tool:",
+                        file=sys.stderr,
+                    )
                 print(
                     f"  python3 {shlex.quote(str(Path(__file__).resolve()))} --rollback {shlex.quote(str(self.path))}",
                     file=sys.stderr,
@@ -1048,17 +1127,23 @@ def deploy(args):
     live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
     existing = find_credential(client, args.credential_name)
     existing_tool = change = tool = None
+    field_modes = {}
+    templates = (old, new)
     if spec:
         existing_tool = snapshot["tools"][spec["tool"]["name"]]
         tool = planned_tool(spec, runtime, existing or PENDING_UUID)
         change = tool_change(existing_tool, tool)
+        if change == "update":
+            old_tool = planned_tool(old_spec, runtime, existing or PENDING_UUID) if old_spec else None
+            field_modes[tool_label(tool["name"])] = tool_mode(existing_tool, old_tool, tool)
         # Until the tool exists, the template placeholder stands for it.
         tool_ref = existing_tool["tool_uuid"] if existing_tool else spec["placeholder_uuid"]
         new = resolve_tool_refs(new, spec["placeholder_uuid"], tool_ref)
         if old_spec:
             old = resolve_tool_refs(old, old_spec["placeholder_uuid"], tool_ref)
-    field_modes = {}
     planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes)
+    if spec:
+        planned = wire_tool_refs(client, planned, templates, spec, tool_ref)
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
     for value in (planned, settings, tool):
         ensure_no_secrets(value)
@@ -1066,7 +1151,7 @@ def deploy(args):
     show_plan(changes, field_modes)
     show_settings(live_settings, settings, field_modes)
     if spec:
-        show_tool(tool, existing_tool, change)
+        show_tool(tool, existing_tool, change, field_modes.get(tool_label(tool["name"])))
     merged = {
         field
         for field, mode in field_modes.items()
@@ -1077,7 +1162,7 @@ def deploy(args):
         if (old_settings or {}).get("call_dispositions")
         != (new_settings or {}).get("call_dispositions")
         else set()
-    )
+    ) | {label for label in field_modes if label.startswith("tool.")}
     require(
         set(args.accept_merged) <= known_fields,
         "--accept-merged must name a changed template field exactly as printed",

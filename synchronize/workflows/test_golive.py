@@ -286,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.command == "GET" and self.path == "/api/v1/tools/":
             # Dograh lists every tool except archived ones by default.
             self.reply(200, [t for t in fake.tools if t["status"] != "archived"])
+        elif self.command == "GET" and self.path.startswith("/api/v1/tools/?status="):
+            wanted = self.path.removeprefix("/api/v1/tools/?status=").split(",")
+            self.reply(200, [t for t in fake.tools if t["status"] in wanted])
         elif self.path.startswith("/api/v1/tools/"):
             ident = self.path.removeprefix("/api/v1/tools/")
             match = next((t for t in fake.tools if t["tool_uuid"] == ident), None)
@@ -1235,12 +1238,19 @@ class GoLiveTests(unittest.TestCase):
         ]
         self.fake.add_tool(description="An older description", definition=stale["definition"])
         out, _ = self.run_cli(["plan", *self.args()])
+        # The old ref has no tool template, so the live tool is a customisation.
         self.assertIn(
-            "tool lookup_caller_work_en: update description, definition.messages (values withheld)",
+            "tool lookup_caller_work_en: update description, definition.messages "
+            "(REPLACES-CUSTOM; values withheld)",
             out,
         )
         self.assertEqual(self.writes(), [])
-        self.run_cli(self.args("--apply"))
+        _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("--accept-merged tool.lookup_caller_work_en", err)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(
+            self.args("--apply", accept_merged=("node 4.data.prompt", "tool.lookup_caller_work_en"))
+        )
         tool_put = [c for c in self.writes() if c[1].startswith("/api/v1/tools/")]
         self.assertEqual(len(tool_put), 1)
         self.assertEqual(tool_put[0][:2], ("PUT", f"/api/v1/tools/{self.fake.tool_uuid}"))
@@ -1340,7 +1350,9 @@ class GoLiveTests(unittest.TestCase):
     def test_rollback_restores_an_updated_tool_definition(self):
         self.add_credential()
         self.fake.add_tool(description="An older description")
-        self.run_cli(self.args("--apply"))
+        self.run_cli(
+            self.args("--apply", accept_merged=("node 4.data.prompt", "tool.lookup_caller_work_en"))
+        )
         self.assertEqual(self.fake.tools[0]["description"], self.fake.spec["tool"]["description"])
         (path,) = self.backups.glob("*.json")
         saved = json.loads(path.read_text())
@@ -1360,6 +1372,67 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn(
             ("PUT", f"/api/v1/tools/{self.fake.tool_uuid}"), [c[:2] for c in self.writes()]
         )
+
+    def test_tool_edited_outside_go_live_needs_acceptance_and_wiring_does_not(self):
+        spec = self.fake.spec
+        new = golive.planned_tool(spec, self.fake.runtime, self.fake.credential_uuid)
+        old = copy.deepcopy(new)
+        old["description"] = "The previous template's description"
+        live = {**copy.deepcopy(old), "tool_uuid": self.fake.tool_uuid, "status": "active"}
+        self.assertEqual(golive.tool_mode(live, old, new), "template-replaced")
+        live["definition"]["messages"][0]["text"] = "Hold on, I'm checking."
+        self.assertEqual(golive.tool_mode(live, old, new), "REPLACES-CUSTOM")
+        self.assertEqual(golive.tool_mode(live, None, new), "REPLACES-CUSTOM")
+        moved = golive.planned_tool(spec, "https://voice.example.test", str(uuid4()))
+        self.assertEqual(golive.tool_mode(moved, None, new), "wiring")
+
+    def test_updated_tool_then_failed_draft_save_prints_the_rollback(self):
+        self.add_credential()
+        self.fake.add_tool(description="An older description")
+        self.fake.failure = lambda m, p: m == "PUT" and p == "/api/v1/workflow/3"
+        out, err = self.run_cli(
+            self.args("--apply", accept_merged=("node 4.data.prompt", "tool.lookup_caller_work_en")),
+            expected=1,
+        )
+        self.assertIn("tool: updated", err)
+        self.assertIn("live published definition: unchanged", err)
+        self.assertIn("already uses the changed tool", err)
+        path = next(
+            line.removeprefix("ROLLBACK FILE: ")
+            for line in out.splitlines()
+            if line.startswith("ROLLBACK FILE: ")
+        )
+        self.assertIn("--rollback " + path, err)
+        self.assertNotIn("No workflow rollback needed", err)
+
+    def test_reference_to_an_archived_lookup_tool_is_rewired_before_any_write(self):
+        self.fake.select("ko")
+        archived = self.fake.add_tool(status="archived", tool_uuid=str(uuid4()))
+        other = self.fake.add_tool(tool_uuid=str(uuid4()), name="my_own_tool")
+        node = golive.nodes(self.fake.workflow["workflow_definition"])["2"]
+        node["data"]["tool_uuids"] = [other["tool_uuid"], archived["tool_uuid"]]
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        # An old ref that already has the tool: the template delta alone would keep the stale reference.
+        args = ["plan", *self.args("--old-ref", "HEAD", accept_merged=())]
+        out, _ = self.run_cli(args)
+        self.assertIn("node 2.data.tool_uuids: wiring", out)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply", "--old-ref", "HEAD", accept_merged=()))
+        node = golive.nodes(self.fake.workflow["workflow_definition"])["2"]
+        self.assertEqual(node["data"]["tool_uuids"], [other["tool_uuid"], self.fake.tool_uuid])
+        # A reference Dograh cannot return is refused before any write.
+        self.fake.select("ko")
+        node = golive.nodes(self.fake.workflow["workflow_definition"])["2"]
+        node["data"]["tool_uuids"] = [str(uuid4())]
+        self.fake.calls.clear()
+        _, err = self.run_cli(self.args("--apply", "--old-ref", "HEAD", accept_merged=()), expected=1)
+        self.assertIn("is not a tool Dograh returns", err)
+        self.assertEqual(self.writes(), [])
+
+    def test_tool_listing_with_a_status_query_returns_archived_tools(self):
+        self.fake.add_tool(status="archived")
+        listed = golive.Dograh().api("GET", "/tools/?status=active,archived,draft")
+        self.assertEqual([t["status"] for t in listed], ["archived"])
 
     def test_format_2_backups_remain_restorable(self):
         self.run_cli(self.args("--apply"))
