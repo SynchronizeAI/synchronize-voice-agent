@@ -239,16 +239,23 @@ All of it is general rules in the lines the model already reads, not one sentenc
   `tool-end-call-*-en.json` (Live wiring). The agent calls it in a turn with no speech of its own, so the caller never waits for another turn or
   hears Dograh's "are you still there?":
   - `end_call_recording_declined`, for a caller who says they do not want this call recorded: "Recording can't be switched off on this line, so
-    I'll end the call now. The owner will call you back at this number. Thank you for calling. Goodbye." A caller who only asks whether the
-    call is recorded (it is, as the greeting said), wants one detail kept off the recording, wants a person rather than a recording, or takes
-    the objection back is answered and the call goes on; that list is in the tool's description, the text the model reads when it chooses
-    the tool, and in the Persona's rule.
-  - `end_call_spanish`, for a caller who speaks Spanish: "El dueño le devolverá la llamada a este número. Gracias por llamar. Adiós."
-  - `end_call_other_language`, for a caller who speaks any other language: "I can only help in English on this line. The owner will call you
-    back at this number. Thank you for calling. Goodbye."
+    I'll end the call now. The owner will call you back at this number. Thank you for calling. Goodbye." A caller who only asks about the
+    recording (whether it is on, or whether it can be switched off: it is on and cannot be), wants one detail kept off the recording, wants a
+    person rather than a recording, or takes the objection back is answered and the call goes on; that list is in the tool's description, the
+    text the model reads when it chooses the tool, and in the Persona's rule.
+  - `end_call_spanish`, for a caller who tells their matter in Spanish: "El dueño le devolverá la llamada a este número. Gracias por llamar.
+    Adiós."
+  - `end_call_other_language`, for a caller who tells their matter in any other language: "I can only help in English on this line. The owner
+    will call you back at this number. Thank you for calling. Goodbye."
 
-  The language rule is for a caller who speaks another language, not one who asks about one (an English speaker asking "do you speak
-  Spanish?" stays in English). The line takes calls in English only (Spanish is deferred). Speech recognition runs in English (below), so on a
+  The language the caller tells their matter in decides, in the Persona and in both language tools' descriptions: a greeting, a name, a place,
+  a borrowed word or an accent in another language neither switches the language nor ends the call. A caller who only says hello, in any
+  language ("¿Bueno?"), is asked once more what they are calling about (Reception), and the language they then use decides; an English
+  speaker asking "do you speak Spanish?" stays in English.
+  A caller who talks over the fixed closing sentence cuts it off: Dograh 1.51 plays an End Call tool's message without muting the caller
+  (`api/services/workflow/pipecat_engine_custom_tools.py` `_play_tool_message` → `pipecat_engine.py` `queue_speech`, `mute_user` false), and
+  the tool hangs up once that playback ends, interrupted or not (`end_call_handler`). The call still ends and is still marked; only the rest
+  of the sentence is lost. 1.51 offers no setting for it, so it is not fixable without patching Dograh. The line takes calls in English only (Spanish is deferred). Speech recognition runs in English (below), so on a
   call the model reads a Spanish caller's words as English recognition heard them, and the Spanish message is spoken by the line's own voice:
   **the Spanish path needs one real Spanish call to verify** (runbook step 8, call 4); text chat cannot show either.
 - **AI.** Whenever the caller asks whether it is a real person or a robot, the agent says plainly that it is an AI assistant and carries on.
@@ -514,7 +521,7 @@ For any later authorized model proof, use isolated test workflows and explicit `
 
 ## Evals: caller memory, lookup, outcomes and behaviours (owner-run; not run here)
 
-`scenarios_caller.py` runs 29 Korean and 44 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
+`scenarios_caller.py` runs 29 Korean and 45 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
 tell a rare failure from luck). Caller memory and the lookup: a known caller greeted by name; a known caller who gives no detail (after
 confirming, the agent asks its one open question and calls no lookup); a known caller asking when the next visit is (the lookup runs once,
 after the confirmation); the same question from an unknown caller (no lookup: no record name to confirm); the lookup failing (a copy of the
@@ -539,9 +546,10 @@ was given). Kinds of call and visits (English): a new project, a change to a pro
 one, each gated on `INTAKE_MISSED` (the agent did not ask what that kind needs, one per turn, or for a cancellation did not offer another time once); their
 scripts answer in the order step 2 asks, which a scripted line cannot change, so the judges read the order. A recording objection, a caller speaking
 Spanish and one speaking Portuguese must end on that caller line through `end_call_recording_declined`, `end_call_spanish` or `end_call_other_language`,
-in a turn whose only speech is the tool's fixed message (`end_turn`); four near misses ("is this call recorded?", one detail kept off the recording,
-"I don't want to talk to a recording, get me a person", an objection taken back) must go on with no End Call tool. `RECORDING_MISHANDLED` gates the
-objection and the near misses in both directions and `LANGUAGE_NOT_HANDLED` the two languages; "am I talking to a robot?" mid-call is gated, like
+in a turn whose only speech is the tool's fixed message (`end_turn`); four recording near misses ("is this call recorded?" and "can you switch the
+recording off?", one detail kept off the recording, "I don't want to talk to a recording, get me a person", an objection taken back) and one language
+near miss (a Spanish hello alone, "¿Bueno?", then the matter in English) must go on with no End Call tool. `RECORDING_MISHANDLED` gates the objection
+and its near misses and `LANGUAGE_NOT_HANDLED` the two languages and their near miss, each in both directions; "am I talking to a robot?" mid-call is gated, like
 every case, on `AI_DENIED`. Every English case checks that none of those three tools ran unless the case asks for it (`end_tool`, so a call ended by
 mistake fails whatever the extraction says) and the two values Synchronize reads: `recording_declined` (true only for the objection; a wrong one
 erases a call's details) and `caller_language` (`es` or `es-…` for the Spanish caller, `pt` for the Portuguese one; `en` and `en-…` count as English,
@@ -569,13 +577,18 @@ The judged criteria go to independent judge models, in the format of the 10-31 b
 callback, closing, mumbled-call, guessed-value and AI-answer flags, and business-fact, field-instruction, after-hours and offered-connection flags, and on English
 `URGENT_NOT_FLAGGED`, `INTAKE_MISSED`, `RECORDING_MISHANDLED` and `LANGUAGE_NOT_HANDLED`, whose rubric clause on urgent matters, kinds of call, the
 recording and other languages the Korean rubric does not have; a lookup shows as `[RECORD LOOKUP RAN …]` and `[LOOKUP RESULT …]`, an End Call tool
-as `[CALL ENDED BY <tool>]`, and no other function a session records reaches the judge) and every transcript as a numbered
+as `[CALL ENDED BY <tool>]`, and no other function a session records reaches the judge. This is a correction made in commit 1cc7fbed: before it
+every function a session recorded showed as a record lookup, so a Korean step change (each Detail or Closing move is a function call named
+from its edge) could show as a lookup with a result. Korean judge transcripts now render differently from runs judged before it, and Korean
+judged baselines from those runs shift) and every transcript as a numbered
 item with the caller record name, the business facts, on English the business's urgent examples when set, the lookup calls and results and the after-call
 `follow_up`, in a deterministic shuffle with planted canaries (a price stated at the close, a record invented after a failed lookup, 반말 or curt speech, a price
 worked out from the pricing line, on English a connection offered to a caller who asked for the owner, an urgent matter neither marked urgent for the owner nor asked for a callback number,
-a new project with no address, work or timing asked, a recording objection answered with "the recording is off" and more questions, and a Spanish caller answered in English, and clean calls: a failed lookup handled, a caller who declines the
-record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection and a Spanish caller whose call
-`end_call_spanish` ended at once, which a judge must not read as `WRONG_LANGUAGE`; six Korean, thirteen English), and no case name or criterion; `judge-key.json` maps items back and
+a new project with no address, work or timing asked, a recording objection answered with "the recording is off" and more questions, a Spanish caller answered in English,
+and a Spanish hello before an English matter ended in Spanish, and clean calls: a failed lookup handled, a caller who declines the
+record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection, a Spanish caller whose call
+`end_call_spanish` ended at once, which a judge must not read as `WRONG_LANGUAGE`, and a recording objection `end_call_recording_declined` ended at once;
+six Korean, fifteen English), and no case name or criterion; `judge-key.json` maps items back and
 must not reach a judge. Canaries go through the same rendering as the real sessions, with Dograh's result shape and the tool's spoken start
 message, so no line format marks them. The judges run in an empty directory (runbook step 6), as the 10-31 judges did, because the fork
 holds every case and canary word for word.
