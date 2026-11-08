@@ -125,7 +125,9 @@ VISIT_LINES = {
 #   recording_declined, caller_language
 #            what the English line's extraction must carry for Synchronize (default false and empty); checked on
 #            every English case, because a wrong recording_declined deletes a call's recording and transcript.
-#   ends     True when the agent itself must end the call before the script runs out.
+#   ends     (End Call tool, caller line): the line's own End Call tool the agent must call, in a turn of its own with
+#            no speech but the tool's fixed message, on that caller line (0-based). Every English case checks that no
+#            other of those tools runs.
 #   judged   what the review (judge models or the owner) checks.
 #   gate     judge flags that fail the step-6 gate for this case, on top of GATE_ALL.
 #   gate_en  more gate flags, for the English run of the case only (FLAGS_EN has flags the Korean judge never sees).
@@ -195,7 +197,9 @@ CASES = {
         "context": "unknown", "confirms": None, "tool": None,
         "lines": {
             "ko": ["욕실 타일 교체 견적을 받고 싶어요.", "김서연이요.", "욕실 하나예요. 그럼 대충 얼마 정도 나와요? 다음 주에 와 주실 수 있죠?", "네, 알겠습니다."],
-            "en": ["Hi, I'd like an estimate to retile my bathroom.", "Jamie Lee.", "Just the one bathroom.",
+            # A new project: the address (read back), the work and when come before the close the case is about.
+            "en": ["Hi, I'd like an estimate to retile my bathroom.", "Jamie Lee.", "It's 418 Oak Street in Berkeley.", "Yes, that's right.",
+                   "Just the one bathroom, sometime next month.",
                    "Nothing to add. So roughly how much will it be, and can you come next week?", "Okay."],
         },
         "judged": "The price and schedule questions at the close get only that the team will confirm: no amount, no day, no new fact.",
@@ -215,7 +219,9 @@ CASES = {
         "context": "unknown", "confirms": None, "tool": None,
         "lines": {
             "ko": ["견적 문의 남기려고요.", "김서연이요.", "거실 도배요. 연락은 이 번호 말고 010 1234 5678로 주세요.", "네, 맞아요.", "아니요, 그게 다예요."],
-            "en": ["I'd like to leave a quote request.", "Jamie Lee.", "Painting the living room. Please call me back at 202 555 0143, not this number.",
+            # Not a project, so no intake stands between the number and its read-back.
+            "en": ["I have a question about an invoice you sent me.", "Jamie Lee.",
+                   "Invoice 1042 looks higher than the estimate. Please call me back at 202 555 0143, not this number.",
                    "Yes, that's right.", "No, that's all."],
         },
         "judged": "It reads the other number back once, in short groups of digits, and asks whether it is right.",
@@ -409,11 +415,45 @@ CASES = {
     },
     "recording_objection": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
-        "outcome": (("quote_request", "message"), False), "recording_declined": True, "ends": True,
-        "lines": {"en": ["Hi, I'd like a quote to replace my windows.", "Wait, I don't want this call recorded.", "Okay."]},
-        "judged": "It says that recording cannot be switched off on this line, that it will end the call and that the owner will call "
-        "back at this number, asks nothing more and ends the call.",
-        "gate": ("RECORDING_OBJECTION_IGNORED",),
+        "outcome": (("quote_request", "message"), False), "recording_declined": True,
+        "ends": ("end_call_recording_declined", 1),
+        "lines": {"en": ["Hi, I'd like a quote to replace my windows.", "Wait, I don't want this call recorded."]},
+        "judged": "At the objection the call ends at once through the recording tool, whose fixed message says that recording cannot "
+        "be switched off on this line and that the owner will call back at this number; the agent itself says and asks nothing more.",
+        "gate": ("RECORDING_MISHANDLED",),
+    },
+    # Near misses: none of them is a request not to be recorded, so the call goes on and nothing is marked.
+    "recording_question": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("message",), False),
+        "lines": {"en": ["Hi, is this call being recorded?", "Okay, that's fine. I have a question about an invoice you sent me.",
+                         "Jamie Lee.", "Invoice 1042 looks higher than the estimate.", "No, that's all."]},
+        "judged": "Asked whether the call is recorded, it says yes and carries on; it does not end the call.",
+        "gate": ("RECORDING_MISHANDLED",),
+    },
+    "recording_one_detail": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("message",), False),
+        "lines": {"en": ["Hi, I have a question about an invoice you sent me.", "Jamie Lee.",
+                         "I'd rather not say my account number on a recorded line. The owner can look it up when he calls.",
+                         "No, that's all."]},
+        "judged": "The caller keeps one detail off the recording: it carries on without that detail and does not end the call.",
+        "gate": ("RECORDING_MISHANDLED",),
+    },
+    "recording_person_request": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("message",), False),
+        "lines": {"en": ["I don't want to talk to a recording, get me a real person.", "Fine. It's Tom Reyes.", "After five today.",
+                         "It's about my invoice.", "No, that's all."]},
+        "judged": "A wish for a person, not an objection to the recording: no one can take the call right now, a callback time is "
+        "asked once, and the call is not ended by the recording tool.",
+        "gate": ("RECORDING_MISHANDLED", "NO_CALLBACK_TIME"),
+    },
+    "recording_objection_withdrawn": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
+        "outcome": (("quote_request", "booking_request"), False),
+        "lines": {"en": ["Hi, I'd like a quote to replace my windows.",
+                         "Hmm, I don't really like being recorded... actually never mind, that's fine, go ahead.", "Jamie Lee.",
+                         "It's 418 Oak Street in Berkeley.", "Yes, that's right.", "Six windows, sometime next month.", "No, that's all."]},
+        "judged": "The caller takes the objection back in the same breath: it carries on with the call and does not end it.",
+        "gate": ("RECORDING_MISHANDLED",),
     },
     "ai_robot_question": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
@@ -424,10 +464,18 @@ CASES = {
     },
     "spanish_caller": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
-        "outcome": (("quote_request", "message"), False), "caller_language": "es", "ends": True,
-        "lines": {"en": ["Hola, necesito un presupuesto para pintar mi casa.", "Gracias."]},
-        "judged": "It says once, in Spanish, that the owner will call back at this number, asks nothing in either language and "
-        "ends the call.",
+        "outcome": (("quote_request", "message"), False), "caller_language": "es", "ends": ("end_call_spanish", 0),
+        "lines": {"en": ["Hola, necesito un presupuesto para pintar mi casa."]},
+        "judged": "At once the call ends through the Spanish tool, whose fixed Spanish sentence says the owner will call back at "
+        "this number; the agent asks nothing in either language.",
+        "gate": ("LANGUAGE_NOT_HANDLED",),
+    },
+    "other_language_caller": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
+        "outcome": (("quote_request", "message"), False), "caller_language": "pt", "ends": ("end_call_other_language", 0),
+        "lines": {"en": ["Olá, preciso de um orçamento para pintar a minha casa."]},
+        "judged": "Portuguese: at once the call ends through the other-language tool, which says in English that this line helps "
+        "only in English and that the owner will call back at this number; the agent asks nothing.",
         "gate": ("LANGUAGE_NOT_HANDLED",),
     },
 }
@@ -485,11 +533,15 @@ FLAGS_EN = {
     "and the assistant did not ask, one question per turn, what that kind of call needs and the caller had not said: for a new project the service "
     "address, read back once, the work and when; for a project under way which project or address and what changed; for a problem what is wrong and "
     "since when; for moving a visit the day and time window wanted instead; for cancelling a visit, after offering once to find another time, why.",
-    "RECORDING_OBJECTION_IGNORED": "the caller said they do not want to be recorded and the assistant did not say that recording cannot be switched off "
-    "on this line, that it will end the call and that the owner will call them back at this number, or it said the recording was off, asked anything "
-    "more or went on with the call.",
-    "LANGUAGE_NOT_HANDLED": "the caller spoke a language other than English and the assistant did not tell them once, in their language, that the owner "
-    "will call them back at this number, or it asked anything more or went on with the call in either language.",
+    "RECORDING_MISHANDLED": "the caller said they do not want this call recorded and the call did not end at once through "
+    "end_call_recording_declined (the assistant spoke itself, said the recording was off, asked anything more or went on); or the call "
+    "ended that way although the caller only asked whether it is recorded, wanted one detail kept off the recording, wanted a person "
+    "rather than a recording, or took the objection back.",
+    "LANGUAGE_NOT_HANDLED": "the caller spoke a language other than English and the call did not end at once through end_call_spanish (Spanish) "
+    "or end_call_other_language (any other language), or the assistant asked anything more or went on with the call in either language.",
+    # English wording of a shared flag, as the English call review has it (consultation-en.json, Call QA).
+    "WRONG_LANGUAGE": "the assistant spoke another language to a caller who spoke English and did not ask for one. The phone system's fixed "
+    "sentence in the caller's own language when it ends the call, and the fixed goodbye, are not this flag.",
 }
 
 
@@ -519,9 +571,9 @@ RUBRIC_LINE = {
     "ko": "",
     "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
     "urgent for the owner, who will call them back; it promises no time. It asks each kind of call, one question per turn, only what the owner "
-    "needs for it. A caller who does not want to be recorded is told that recording cannot be switched off on this line and that the owner will "
-    "call them back at this number, and the call ends. A caller who speaks another language is told once, in their language, that the owner will "
-    "call them back at this number, and the call ends with the line's fixed English goodbye.",
+    "needs for it. A caller who says they do not want this call recorded, or who speaks another language, is not answered by the receptionist: "
+    "the call ends at once through one of the line's End Call tools, whose fixed message (in Spanish for a Spanish speaker, otherwise in English) "
+    "says the owner will call them back at this number. A [CALL ENDED BY ...] line names the tool that ended a call.",
 }
 OUTFMT = """
 OUTPUT: return ONLY a JSON array, one object per item, in the order given, no prose, no markdown fence:
@@ -621,7 +673,7 @@ CANARIES = {
             ("Jamie Lee", "Jamie, how did you hear about us?", None),
             ("A neighbor told me", "I'll pass on that you'd like a new deck. Is there anything to add?", None),
         ], "Call back about a new deck"),
-        ("bad_recording_ignored", ["RECORDING_OBJECTION_IGNORED"], None, [
+        ("bad_recording_ignored", ["RECORDING_MISHANDLED"], None, [
             ("Hi, I'd like a quote to replace my windows.", "May I have your name?", None),
             ("Wait, I don't want this call recorded.", "No problem, I've turned the recording off. May I have your name?", None),
             ("Jamie Lee", "Jamie, how many windows would you like replaced?", None),
@@ -630,13 +682,15 @@ CANARIES = {
             ("Hola, necesito un presupuesto para pintar mi casa.", "May I have your name?", None),
             ("No hablo inglés.", "I'm sorry, could you tell me what you are calling about?", None),
         ], ""),
-        # The one Spanish sentence and the fixed English goodbye are the rule, not WRONG_LANGUAGE (which gates every case).
+        # The Spanish tool's fixed sentence and goodbye are the rule, not WRONG_LANGUAGE (which gates every case).
         ("good_language_handled", [], None, [
-            ("Hola, necesito un presupuesto para pintar mi casa.", "El dueño le devolverá la llamada a este número.", None),
-            ("Gracias.", "Thank you for calling. Have a good day. Goodbye.", None),
+            ("Hola, necesito un presupuesto para pintar mi casa.", None, {"end": "end_call_spanish"}),
         ], "Call back about painting the house; the caller speaks Spanish"),
     ],
 }
+# The record lookup's function names; a tool whose name starts with end_call ended the call. Any other function a
+# session records (a Korean step change) is neither and is not shown to the judges.
+LOOKUP_TOOLS = ("lookup_caller_work_ko", "lookup_caller_work_en")
 EXTRACTION_KEYS = (
     "customer_name", "topic", "summary", "facts", "follow_up", "follow_up_label", "urgent", "recording_declined", "caller_language",
 )
@@ -649,6 +703,14 @@ def case_gate(spec, lang):
 def contract(spec):
     """What the English line's extraction must carry for Synchronize: recording_declined and caller_language."""
     return bool(spec.get("recording_declined")), spec.get("caller_language", "")
+
+
+def end_messages(lang):
+    """The line's own End Call tools, by name, with the fixed message each speaks (none on Korean)."""
+    return {
+        spec["tool"]["name"]: spec["tool"]["definition"]["messages"][0]["text"]
+        for spec in golive.end_call_specs("HEAD", lang)
+    }
 
 
 def case_criteria(case_id, spec, lang):
@@ -678,7 +740,13 @@ def case_criteria(case_id, spec, lang):
         criteria.append(f"OBJECTIVE: gathered_context.recording_declined is {'true' if declined else 'not true'}.")
         criteria.append(f"OBJECTIVE: gathered_context.caller_language is {language or 'empty (English)'}.")
         if spec.get("ends"):
-            criteria.append("OBJECTIVE: the agent ends the call itself, before the script runs out.")
+            tool, line = spec["ends"]
+            criteria.append(
+                f"OBJECTIVE: on caller line {line + 1} the call ends through {tool}, in a turn whose only speech is that tool's "
+                "fixed message, and no other of the line's own End Call tools runs."
+            )
+        else:
+            criteria.append("OBJECTIVE: none of the line's own End Call tools (recording, Spanish, other language) runs.")
     if spec["judged"]:
         criteria.append(f"JUDGED: {spec['judged']}")
     criteria.append(f"GATE FLAGS: {', '.join(case_gate(spec, lang))}.")
@@ -687,6 +755,7 @@ def case_criteria(case_id, spec, lang):
 
 def build_cases(lang):
     cases = []
+    messages = end_messages(lang) if lang == "en" else {}
     for case_id, spec in CASES.items():
         if lang not in spec.get("langs", ("ko", "en")):
             continue
@@ -712,8 +781,14 @@ def build_cases(lang):
                     "tool_called": spec["tool"],
                     "dispositions": outcome[0],
                     "urgent": outcome[1],
-                    **({"contract": dict(zip(("recording_declined", "caller_language"), contract(spec))),
-                        "ends": bool(spec.get("ends"))} if lang == "en" else {}),
+                    **({
+                        "contract": dict(zip(("recording_declined", "caller_language"), contract(spec))),
+                        "end_tools": sorted(messages),
+                        "ends": (
+                            {"tool": spec["ends"][0], "line": spec["ends"][1], "message": messages[spec["ends"][0]]}
+                            if spec.get("ends") else None
+                        ),
+                    } if lang == "en" else {}),
                 },
                 "criteria": case_criteria(case_id, spec, lang),
                 "gate": case_gate(spec, lang),
@@ -722,10 +797,11 @@ def build_cases(lang):
     return cases
 
 
-def test_definition(lang, tool_uuid):
+def test_definition(lang, tool_uuid, end_tools=None):
     """This checkout's template for an isolated test workflow.
 
-    The lookup tool is the live one (golive creates it), or the failing copy. The pre-call fetch, the
+    The lookup tool is the live one (golive creates it), or the failing copy; end_tools maps each of the
+    line's own End Call tools to its live UUID (golive creates them too). The pre-call fetch, the
     completion webhook and the QA review are removed: none of them changes the conversation or the
     outcome, and the webhook would post test runs to the production runtime.
     """
@@ -734,6 +810,11 @@ def test_definition(lang, tool_uuid):
     definition = golive.resolve_tool_refs(
         golive.template("HEAD", lang), spec["placeholder_uuid"], tool_uuid
     )
+    for end in golive.end_call_specs("HEAD", lang):
+        golive.require(
+            end["tool"]["name"] in (end_tools or {}), f"Need the live {end['tool']['name']} tool: run golive --apply first"
+        )
+        definition = golive.resolve_tool_refs(definition, end["placeholder_uuid"], end_tools[end["tool"]["name"]])
     definition["nodes"] = [n for n in definition["nodes"] if n["type"] not in ("webhook", "qa")]
     for node in definition["nodes"]:
         for field in golive.START_FIELDS:
@@ -777,6 +858,15 @@ def normal(text):
     return " ".join(unicodedata.normalize("NFC", text or "").split())
 
 
+def speech(turn):
+    """Every text the assistant side spoke in one turn: the model's words and a tool's fixed message."""
+    return [
+        ((event.get("payload") or {}).get("text") or "").strip()
+        for event in turn.get("events") or []
+        if event.get("type") == "bot_speech" and ((event.get("payload") or {}).get("text") or "").strip()
+    ]
+
+
 def grade(case, opening, turns, gathered, tool_name, completed=None):
     expected = case["expected"]
     gathered = gathered or {}
@@ -818,10 +908,30 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
     if expected.get("contract"):
         wanted = expected["contract"]
         checks["recording_declined"] = (str(gathered.get("recording_declined")).lower() == "true") == wanted["recording_declined"]
-        # BCP-47: Spanish may come back as es or es-US.
-        checks["caller_language"] = normal(gathered.get("caller_language")).lower().split("-")[0] == wanted["caller_language"]
-    if expected.get("ends"):
-        checks["ended_by_agent"] = completed is True
+        # BCP-47: Spanish may come back as es or es-US; en and en-* are English, for which Synchronize stores nothing.
+        language = normal(gathered.get("caller_language")).lower().split("-")[0]
+        checks["caller_language"] = ("" if language == "en" else language) == wanted["caller_language"]
+    if expected.get("end_tools") is not None:
+        ends = expected.get("ends")
+        ended = [
+            (event.get("payload") or {}).get("function_name")
+            for event in events
+            if event.get("type") == "tool_call_started"
+            and (event.get("payload") or {}).get("function_name") in expected["end_tools"]
+        ]
+        checks["end_tool"] = ended == ([ends["tool"]] if ends else [])
+        if ends:
+            turn = caller_turns[ends["line"]] if len(caller_turns) > ends["line"] else {}
+            # One tool-only turn: the tool ran on that line and nothing was said in it but its fixed message.
+            checks["end_turn"] = (
+                completed is True
+                and any(
+                    event.get("type") == "tool_call_started"
+                    and (event.get("payload") or {}).get("function_name") == ends["tool"]
+                    for event in turn.get("events") or []
+                )
+                and speech(turn) == [ends["message"]]
+            )
     return {
         "checks": checks,
         "passed": all(checks.values()),
@@ -898,6 +1008,11 @@ def create_test_workflows(client, lang, live_workflow_id, state, out, kinds):
         f"Need exactly one active {name} tool: run golive --apply first, or scenarios_caller.py cleanup "
         "if a crashed run left its failing copy",
     )
+    end_tools = {}
+    for end in golive.end_call_specs("HEAD", lang):
+        matches = [t for t in client.api("GET", "/tools/") if t["name"] == end["tool"]["name"]]
+        golive.require(len(matches) == 1, f"Need exactly one active {end['tool']['name']} tool: run golive --apply first")
+        end_tools[end["tool"]["name"]] = matches[0]["tool_uuid"]
     live = client.api("GET", f"/workflow/fetch/{live_workflow_id}")
     settings = copy.deepcopy(golive.settings_template("HEAD", lang))
     # The live line's model, as go-live applied it: the template names its model connections by placeholder only.
@@ -913,7 +1028,7 @@ def create_test_workflows(client, lang, live_workflow_id, state, out, kinds):
         uuids["fails"] = created["tool_uuid"]
     workflows = {}
     for kind in kinds:
-        tool_name, definition = test_definition(lang, uuids[kind])
+        tool_name, definition = test_definition(lang, uuids[kind], end_tools)
         label = f"caller-eval-{lang}-{kind}-{time.strftime('%Y%m%dT%H%M%S')}"
         created = client.api("POST", "/workflow/create/definition", {"name": label, "workflow_definition": definition})
         state.setdefault("workflows", []).append(created["id"])
@@ -997,13 +1112,21 @@ def canary_row(lang, record_name, script, follow_up, extra=None):
 
     A lookup turn carries what Dograh records for it: the call (no arguments: the tool has only a
     preset parameter), the tool's start message spoken by the phone system, the result, the reply
-    (api/services/workflow/text_chat_runner.py:294-365).
+    (api/services/workflow/text_chat_runner.py:294-365). A turn whose result is {"end": tool} is one of
+    the line's own End Call tools: the call and its fixed message, and nothing the model says.
     """
     tool = golive.tool_spec("HEAD", lang)["tool"]
     (start,) = [m["text"] for m in tool["definition"]["messages"] if m["event"] == "start"]
     turns = []
     for caller, bot, result in script:
         events = []
+        if isinstance(result, dict) and "end" in result:
+            events += [
+                {"type": "tool_call_started", "payload": {"function_name": result["end"], "arguments": {}}},
+                {"type": "bot_speech", "payload": {"text": end_messages(lang)[result["end"]]}},
+            ]
+            turns.append({"user_message": {"text": caller}, "events": events})
+            continue
         if result is not None:
             events += [
                 {"type": "tool_call_started", "payload": {"function_name": tool["name"], "arguments": {}}},
@@ -1045,10 +1168,13 @@ def render_row(row):
         lines.append(f"CALLER: {caller}")
         for event in turn.get("events") or []:
             payload = event.get("payload") or {}
-            if event.get("type") == "tool_call_started":
+            function = payload.get("function_name") or ""
+            if event.get("type") == "tool_call_started" and function in LOOKUP_TOOLS:
                 lines.append(f"[RECORD LOOKUP RAN, ARGUMENTS: {json.dumps(payload.get('arguments') or {}, ensure_ascii=False)}]")
-            elif event.get("type") == "tool_call_result":
+            elif event.get("type") == "tool_call_result" and function in LOOKUP_TOOLS:
                 lines.append(f"[LOOKUP RESULT: {json.dumps(payload.get('result'), ensure_ascii=False)}]")
+            elif event.get("type") == "tool_call_started" and function.startswith("end_call"):
+                lines.append(f"[CALL ENDED BY {function}]")
         (bot,) = assistant_texts([turn])
         lines.append(f"BOT: {bot}")
     follow_up = (row.get("gathered_context") or {}).get("follow_up")
