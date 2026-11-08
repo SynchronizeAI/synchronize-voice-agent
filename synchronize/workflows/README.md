@@ -70,19 +70,26 @@ nothing to say: `caller_name` (exactly one contact of the called company has the
 lines: open matters with their due day, the site, the last contact date). The Persona lists them under `전화한 분` / `Caller` as data, with the fallbacks `모름` / `없음`
 and `unknown` / `none`, so an unknown caller gets today's prompts. The greeting does not change: Dograh's renderer has no conditional text, so a name in the
 greeting would leave a broken sentence for an unknown caller, and a pre-call `greeting_override` is read before the fetch is merged (`../UPGRADE-1.51.md`). A known
-caller is asked to confirm that name instead of giving one (Korean edge `name_given` counts the confirmation), the Detail step can refer to the open matter, and the
-Persona shares what a record says only with the person it names once they confirmed it.
+caller is asked to confirm that name instead of giving one (Korean edge `name_given` counts the confirmation), and `customer_name` takes a confirmed name as
+well as a spoken one (the post-call extraction reads only the conversation, never `initial_context`, and Synchronize names the call by `customer_name`). When the
+confirmed caller's reason is not clearly something else, the one Detail question (English: the step 2 question) names the open matter from the record and asks
+whether the call is about it, the "지난번 견적 문의하셨죠?" reply. The Persona states the record rule once, under `하지 않는 것` / `What you never do`: what the
+caller record or a lookup shows may be told, as what the record shows, to a caller who confirmed their name; nothing else about status, price or dates.
 
 During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under `tool`,
 written with every field Dograh stores so the read-back is exact). It posts `{"workflow_run_id": "<digits>"}` from the preset `{{initial_context.workflow_run_id}}`
 (run-owned in Dograh, the caller cannot set it; the model supplies nothing) to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom
 Header credential, times out after 5000 ms, says `확인해 보겠습니다.` / "Let me check." when it starts and `잠시만 기다려 주세요.` / "One moment, please." if the answer takes
 over 2.5 s. Synchronize answers facts only (`known`, `name`, `open_work`, `upcoming_visits`, `estimates` with status, no amounts or addresses). The tool is on the Korean
-Detail node (after the name step, so nothing is told to an unconfirmed caller) and on the English Reception node. Tools are organization objects referenced by UUID: the
-templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) / `…0102` (en), which `golive.py` replaces with the real tool's UUID; Dograh
-would silently drop the placeholder, and go-live refuses to publish it. The Persona's never-promise rule now allows repeating what the lookup returned and nothing more;
-the QA tag `PROMISED_UNCONFIRMED` says the same. Added prompt text: the `전화한 분` / `Caller` section, the role line naming that record, the confirm-the-name sentence in the
-start step, one Detail / Reception sentence on when to look up, and the QA sentence. None of it is measured yet.
+Detail node (after the name step, so nothing is told to an unconfirmed caller) and on the English Reception node, where the prompt places it after step 1. When to use it
+lives only in the tool's description; the node line says only the order (look up before the node's question, ask that question on the next turn). Tools are organization
+objects referenced by UUID: the templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) / `…0102` (en), which `golive.py` replaces
+with the real tool's UUID; Dograh would silently drop the placeholder, and go-live refuses to publish it. Call QA cannot check that a relayed record is faithful: Dograh's
+QA transcript shows a lookup only as `[tool_call]: <name>` and never shows the caller record (`../UPGRADE-1.51.md`, Call QA transcript). `PROMISED_UNCONFIRMED` therefore
+lets a neutral "the record shows …" sentence pass and still tags any commitment; faithfulness is checked only by the runbook's test calls 1 and 2. Added prompt text: the
+`전화한 분` / `Caller` section, the role line naming that record, the record exception in `하지 않는 것` / `What you never do`, the confirm-the-name sentence in the start
+step, the confirmed-name clause of `customer_name`, the Detail / Reception lines on lookup order and on naming the open matter, and the QA sentence. Only the text-chat
+evals below measure it.
 
 The settings carry eight outcomes, each with a classifier description in the workflow's language: `quote_request` (new quote or price), `booking_request` (visit,
 measurement or appointment, including one needed for a quote), `urgent` (damage or danger now; chosen before anything else that fits), `complaint`, `message` (anything
@@ -127,9 +134,13 @@ Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and
 merge the same way; a template that adds, removes or re-targets an edge is refused before any write.
 
 The caller-work tool (`tool-lookup-caller-work-{lang}.json` at the new ref) is found by its unique name among the organization's non-archived tools: absent → created,
-different description/icon/definition → updated in place (name and category never change), equal → untouched. Its URL is the runtime origin + `/api/voice/tools/caller-work`
-and its credential is the named `--credential-name` credential. A duplicate name, or a tool of that name that is not an active HTTP API tool, aborts before any write.
-The template's placeholder UUID resolves to the tool's UUID; the published definition and the tool are both read back.
+equal → untouched, different description/icon/definition → updated in place (name and category never change) with a mode like the fields': `wiring` when only the URL or
+credential differs, `template-replaced` when the live tool equals the old ref's tool, and `REPLACES-CUSTOM` otherwise (edited in Dograh → Tools, or an old ref without the
+tool), which needs `--accept-merged tool.<name>`. Its URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named `--credential-name`
+credential. A duplicate name, or a tool of that name that is not an active HTTP API tool, aborts before any write. The tool reference is wiring too: every node the new
+template gives the tool references it once, a reference to an archived tool of that name is replaced where it stands, other tools on the node stay, and a reference Dograh
+cannot return aborts the plan. The published definition and the tool are both read back. A failed apply after a tool update prints the `--rollback` command even when the
+workflow is unchanged, because an updated tool is live at once.
 
 Text deltas use exact-once line/character merges. Insert/delete hunks use up to two unchanged context lines on each side;
 a new fragment elsewhere is insufficient evidence that a change was already applied. A single-line greeting becoming multiline uses an anchored character delta,
@@ -288,12 +299,15 @@ For any later authorized model proof, use isolated test workflows and explicit `
 
 ## Evals: caller memory, lookup and outcomes (owner-run; not run here)
 
-`scenarios_caller.py` runs eight cases per language through the text-chat API: a known caller greeted by name, a known caller asking `견적 어떻게 됐어요?` /
+`scenarios_caller.py` runs nine cases per language through the text-chat API: a known caller greeted by name, a known caller who gives no detail
+(`여쭤볼 게 있어서 전화드렸어요.` / "I'm calling with a question.": after confirming, the agent names the open matter from the record), a known caller asking `견적 어떻게 됐어요?` /
 "How's my quote coming along?" (the lookup tool is called, the result is relayed without promises), the same question from an unknown caller (today's greeting),
 and the outcome of a quote request, an urgent leak, a complaint, a sales call and a wrong number. `manifest` (offline) prints every case and its criteria.
 `run` builds one isolated test workflow from this checkout's committed templates (`HEAD`) with the live lookup tool, the live line's model configuration and the
 template settings; it removes the pre-call fetch, the completion webhook and the QA node, archives the test workflow at the end, and never touches the live workflow
-beyond reading its model configuration. It scores the objective checks (opening text, the name in the first reply, the tool call, the outcome code) and writes every
+beyond reading its model configuration. It scores the objective checks (opening text; for a known caller the name in the first reply, no record word before the
+confirmation and `customer_name` equal to the confirmed name; the open matter named after the confirmation; the tool call, never before the confirmation line; the
+outcome code) and writes every
 transcript with a review block for the judged criteria (no promise, no re-asked name). `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`).
 A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the lookup case measures that the tool is called and
 that the agent relays "nothing found, the owner will check" without promising; relaying real records is checked on the second test call of the runbook.
