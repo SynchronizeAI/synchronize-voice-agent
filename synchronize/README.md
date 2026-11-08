@@ -22,7 +22,8 @@ workflow and enter its settings (`workflows/README.md`); add the Twilio telephon
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 
 Shared reception uses Synchronize's `POST /api/voice/pre-call` for per-called-number business context and the known caller's name, an HTTP API
-tool for `POST /api/voice/tools/caller-work` (during the call: the caller's open item count, next due date and visit dates), and a
+tool for `POST /api/voice/tools/caller-work` (during the call: the caller's next visit days, already in spoken form, for a caller who
+confirmed the name on the record), and a
 completion Webhook node for `POST /api/voice/call-ended`. All three authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
 Custom Header credential, never the workflow JSON. Deployment URL/credential substitutions, failure/retry behavior and the separate real-model proof are in
 `workflows/README.md`. Dograh renders the run id as text and adds `call_disposition` (one of six outcomes, `workflows/README.md`); Synchronize's receiver accepts that body as it is.
@@ -42,7 +43,8 @@ text-chat API (`POST /workflow/{id}/text-chat/sessions`), each reply graded for 
 length. The first real Deepgram call showed the failure the scripted checks missed (restating every turn, interrogating the caller's subject); after the
 step-per-job rewrite, 12 Korean calls gave restating in 13 of 40 replies against 46 of 54 before, and questions about the matter 0 against 16. What
 remains is mostly the three short sentences of the goodbye. Not measured: how the OpenAI and ElevenLabs Korean voices sound compared by ear, and any
-real call with the new structure.
+real call with the new structure. The runbook's step 8 ends with the block that measures it: server response time from the run log,
+the caller's side from the test phone's recording, and a blind `eleven_v4_turbo` / Flash v2.5 comparison (`workflows/voice_ab.py`).
 
 ## Upstream
 
