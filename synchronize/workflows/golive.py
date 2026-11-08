@@ -48,9 +48,10 @@ TRANSFER_ROUTE = "/api/voice/tools/transfer"
 ROUTES = {"http_api": TOOL_ROUTE, "transfer_call": TRANSFER_ROUTE}
 ROUTE_LABELS = {"http_api": "caller-work", "transfer_call": "transfer"}
 CATEGORY_LABELS = {"http_api": "HTTP API", "transfer_call": "Transfer Call"}
-# Ring time for the owner's phone. 1.51's REST transfer leg waits 60 s when no timeout is set, so the
-# template always sets it; 18 s ends before US carriers usually hand an unanswered cell call to voicemail
-# (about 20-25 s), which 1.51 would count as answered (telephony.py:1225-1233, no machine detection).
+# Ring time for the owner's phone, sent as the Twilio call's Timeout (twilio/provider.py:667). Always set:
+# Dograh's default is 30 s (schemas/tool.py:403-404) and Twilio's own for a REST call 60 s, both past the
+# 20-25 s after which US carriers usually hand an unanswered cell call to voicemail, which 1.51 would count
+# as answered (routes/telephony.py:1225-1233, no machine detection). 18 s ends before that.
 TRANSFER_TIMEOUT = 18
 TRANSFER_DISPOSITION = "transferred"
 TRANSFER_REASONS = ("person", "urgent")
@@ -311,7 +312,7 @@ def check_transfer(spec):
     run only, the reason the model gives, an explicit ring time and the outcome a connected call records.
 
     The run id is a preset: at 1.51 the resolver body is the model's arguments with the presets laid over
-    them (transfer_resolver.py:260-271), and the preset renders from the run's own context, which the
+    them (transfer_resolver.py:260-273), and the preset renders from the run's own context, which the
     model's arguments never enter, so the model cannot name another run.
     """
     config = spec["tool"]["definition"]["config"]

@@ -109,7 +109,7 @@ TRANSFER_URGENT = {
 }
 PERSON_LINES = ["Can I talk to the owner, please?", "Tom Reyes.", "It's about the contract for my kitchen.",
                 "After three this afternoon.", "No, that's all."]
-# What Dograh 1.51 answers a transfer in text chat (pipecat_engine_custom_tools.py:661-672): always a failure,
+# What Dograh 1.51 answers a transfer in text chat (pipecat_engine_custom_tools.py:663-672): always a failure,
 # so every transfer case also measures the failure path.
 TEXTCHAT_TRANSFER = {
     "status": "transfer_failed", "reason": "textchat_not_supported",
@@ -819,7 +819,7 @@ def transfer_tool(client, lang, live_lookup, state, out):
     """The transfer tool for the "transfer" test workflow: the organization's own when golive --with-transfer
     made it (read only), else a copy of this checkout's template, wired to the live lookup's runtime origin and
     credential, archived at the end. Text chat fails every transfer before the resolver is called
-    (pipecat_engine_custom_tools.py:661-672), so the copy never reaches Synchronize."""
+    (pipecat_engine_custom_tools.py:663-672), so the copy never reaches Synchronize."""
     spec = golive.transfer_spec("HEAD", lang)
     golive.require(spec is not None, f"The {lang} line has no transfer tool")
     name = spec["tool"]["name"]

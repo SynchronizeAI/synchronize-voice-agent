@@ -1698,7 +1698,7 @@ class GoLiveTests(unittest.TestCase):
             return spec
 
         for label, change in (
-            ("Dograh's 60 s default ring", lambda c: c.pop("timeout")),
+            ("Dograh's 30 s default ring", lambda c: c.pop("timeout")),
             ("a ring into voicemail", lambda c: c.update(timeout=30)),
             ("no run id preset", lambda c: c["resolver"].update(preset_parameters=None)),
             ("a run id the model gives", lambda c: c["resolver"]["parameters"].append(
@@ -2096,7 +2096,7 @@ class TransferResolverBodyTests(unittest.TestCase):
     """The resolver request Dograh 1.51 builds from this checkout's transfer template.
 
     resolve_transfer_config runs unchanged; only the network, the database and logging are stubbed.
-    The body is the model's arguments with the presets laid over them (transfer_resolver.py:260-271), and
+    The body is the model's arguments with the presets laid over them (transfer_resolver.py:260-273), and
     the preset renders from the run's own context, which the model's arguments never enter.
     """
 
