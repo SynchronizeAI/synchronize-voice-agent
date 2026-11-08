@@ -25,17 +25,25 @@ class FakeChat(ThreadingHTTPServer):
         self.tool_uuid = str(uuid4())
         self.calls, self.workflows, self.sessions = [], {}, {}
         self.override = {"model_configuration_uuid": str(uuid4())}
-        self.tools = [
-            {"tool_uuid": self.tool_uuid, "name": f"lookup_caller_work_{lang}", "status": "active"}
-            for lang in ("ko", "en")
-        ]
+        self.tools = [live_tool(lang, self.tool_uuid) for lang in ("ko", "en")]
+
+
+def live_tool(lang, tool_uuid):
+    """The live lookup tool as Dograh lists it: the committed template, wired."""
+    tool = copy.deepcopy(golive.tool_spec("HEAD", lang)["tool"])
+    tool["definition"]["config"].update(url="https://runtime.example/api/voice/tools/caller-work", credential_uuid=str(uuid4()))
+    return {**tool, "tool_uuid": tool_uuid, "status": "active"}
+
+
+# Words of a question about a visit; the fake looks up only a caller who confirmed the name.
+VISIT_WORDS = ("방문", "오시는지", "visit", "coming out")
 
 
 def outcome(lines):
     """The fake classifier: a code, and the separate urgent flag."""
     text = " ".join(lines)
     for words, code in (
-        (("천장", "ceiling"), "booking_request"),
+        (("천장", "ceiling", "가스", "gas smell"), "booking_request"),
         (("대출", "card processing"), "spam"),
         (("중국집", "pizza"), "wrong_number"),
         (("견적 좀", "a quote for"), "quote_request"),
@@ -58,6 +66,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self.handle_request()
 
+    def do_DELETE(self):
+        self.handle_request()
+
     def handle_request(self):
         fake = self.server
         length = int(self.headers.get("Content-Length", "0"))
@@ -68,7 +79,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.removeprefix("/api/v1")
         parts = path.strip("/").split("/")
         if self.command == "GET" and path == "/tools/":
-            return self.reply(200, fake.tools)
+            return self.reply(200, [t for t in fake.tools if t["status"] == "active"])
+        if self.command == "POST" and path == "/tools/":
+            tool = {**body, "tool_uuid": str(uuid4()), "status": "active"}
+            fake.tools.append(tool)
+            return self.reply(200, tool)
+        if self.command == "DELETE" and parts[0] == "tools":
+            (tool,) = [t for t in fake.tools if t["tool_uuid"] == parts[1]]
+            tool["status"] = "archived"
+            return self.reply(200, {"status": "archived", "tool_uuid": parts[1]})
         if self.command == "GET" and path.startswith("/workflow/fetch/"):
             return self.reply(200, {
                 "id": int(parts[-1]),
@@ -121,14 +140,21 @@ class Handler(BaseHTTPRequestHandler):
             name = session["initial_context"].get("caller_name")
             if len(session["lines"]) == 1 and name:
                 reply = f"네, 혹시 {name}님 맞으세요?"
-            elif len(session["lines"]) == 2 and name and (
-                "견적 어떻게" in session["lines"][0] or "How's my quote" in session["lines"][0]
+            elif len(session["lines"]) == 2 and confirmed(session) and any(
+                word in session["lines"][0] for word in VISIT_WORDS
             ):
                 # Only a caller who confirmed the record's name is looked up.
-                tool = f"lookup_caller_work_{'ko' if '견적' in session['lines'][0] else 'en'}"
-                events.append({"type": "tool_call_started", "payload": {"function_name": tool}})
-                events.append({"type": "tool_call_result", "payload": {"function_name": tool, "result": {"status": "success", "data": {"known": False}}}})
-                reply = "기록에서 찾지 못해 담당자가 확인해서 연락드리겠습니다."
+                (uuid,) = [u for n in fake.workflows[workflow_id]["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []
+                           if any(t["tool_uuid"] == u for t in fake.tools)]
+                (tool,) = [t for t in fake.tools if t["tool_uuid"] == uuid]
+                result = (
+                    {"status": "error", "error": "Request timed out after 0.001 seconds"}
+                    if tool["definition"]["config"]["timeout_ms"] == 1
+                    else {"status": "success", "data": {"known": False}}
+                )
+                events.append({"type": "tool_call_started", "payload": {"function_name": tool["name"], "arguments": {}}})
+                events.append({"type": "tool_call_result", "payload": {"function_name": tool["name"], "result": result}})
+                reply = "지금은 기록을 확인할 수 없어서 담당자가 확인해서 연락드리겠습니다."
             else:
                 reply = "네."
             events.append({"type": "bot_speech", "payload": {"text": reply}})
@@ -140,9 +166,8 @@ class Handler(BaseHTTPRequestHandler):
             session["gathered_context"] = {
                 "call_disposition": code, "mapped_call_disposition": code, "urgent": urgent,
             }
-            name = session["initial_context"].get("caller_name")
-            if name:
-                session["gathered_context"]["customer_name"] = name
+            if confirmed(session):
+                session["gathered_context"]["customer_name"] = session["initial_context"]["caller_name"]
         return self.reply(200, session)
 
     def reply(self, status, body):
@@ -152,6 +177,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+
+def confirmed(session):
+    """The fake caller confirmed the record's name on their second line."""
+    lines = session["lines"]
+    return bool(session["initial_context"].get("caller_name")) and len(lines) >= 2 and lines[1].startswith(("네", "Yes"))
 
 
 class CallerScenariosTest(unittest.TestCase):
@@ -188,15 +219,27 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(result, expected, output)
         return output
 
+
     def test_manifest_is_offline_and_covers_every_requested_case(self):
         for lang in ("ko", "en"):
             output = self.cli("manifest", "--lang", lang)
-            cases = {case["case"]: case for case in json.loads(output)["cases"]}
+            manifest = json.loads(output)
+            # At least five repeats unless the owner asks for fewer.
+            self.assertEqual(manifest["repeats"], 5)
+            cases = {case["case"]: case for case in manifest["cases"]}
             self.assertEqual(
                 set(cases),
                 {
-                    "known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status",
-                    "unknown_caller_quote_status",
+                    "known_caller_greeting", "known_caller_no_detail", "known_caller_visit",
+                    "unknown_caller_visit",
+                    # New in A2: the lookup failing, a refused confirmation, an injection,
+                    # a closing price question, a different callback number, a gas report.
+                    "lookup_failure", "refuse_name_confirmation", "prompt_injection",
+                    "closing_price_question", "callback_other_number", "outcome_urgent_gas",
+                    # The 10-31 call types: AI?, a person asked for, angry, mumbling, card
+                    # number, 반말, an elderly caller asking to repeat.
+                    "ai_question", "human_request", "angry_caller", "mumbling", "card_number",
+                    "rude_caller", "elder_repeat",
                     "outcome_quote_request", "outcome_urgent_leak", "outcome_complaint",
                     "outcome_sales_call", "outcome_wrong_number",
                 },
@@ -210,19 +253,41 @@ class CallerScenariosTest(unittest.TestCase):
                 {
                     "outcome_quote_request": (("quote_request",), False),
                     "outcome_urgent_leak": (("booking_request", "message"), True),
+                    "outcome_urgent_gas": (("booking_request", "message"), True),
                     "outcome_complaint": (("message",), False),
                     "outcome_sales_call": (("spam",), False),
                     "outcome_wrong_number": (("wrong_number",), False),
                 },
             )
             self.assertTrue({code for codes, _ in outcomes.values() for code in codes} <= set(scenarios_caller.CODES))
-            # Pre-call carries the known caller's name only (amendment A1, section 1).
-            for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status"):
-                self.assertEqual(set(cases[case]["initial_context"]), {"business_name", "caller_name"})
-            self.assertIs(cases["known_caller_no_detail"]["expected"]["tool_called"], False)
-            self.assertEqual(set(cases["unknown_caller_quote_status"]["initial_context"]), {"business_name"})
-            # No record name, nobody to confirm: the lookup must not run.
-            self.assertIs(cases["unknown_caller_quote_status"]["expected"]["tool_called"], False)
+            known = {"known_caller_greeting", "known_caller_no_detail", "known_caller_visit", "lookup_failure",
+                     "refuse_name_confirmation", "prompt_injection"}
+            for case, c in cases.items():
+                # Pre-call carries the known caller's name only (amendment A1, section 1).
+                expected_keys = {"business_name", "caller_name"} if case in known else {"business_name"}
+                self.assertEqual(set(c["initial_context"]), expected_keys, case)
+            self.assertEqual(
+                {case: c["expected"]["tool_called"] for case, c in cases.items() if c["expected"]["tool_called"] is not None},
+                {
+                    "known_caller_no_detail": False, "known_caller_visit": True, "unknown_caller_visit": False,
+                    # No record name, nobody to confirm; or a caller who did not confirm it.
+                    "lookup_failure": True, "refuse_name_confirmation": False,
+                },
+            )
+            self.assertIs(cases["refuse_name_confirmation"]["expected"]["confirms"], False)
+            self.assertEqual(cases["lookup_failure"]["lookup"], "fails")
+            self.assertEqual({c["lookup"] for case, c in cases.items() if case != "lookup_failure"}, {"live"})
+            # The restored 10-31 types keep that measurement's caller lines.
+            if lang == "ko":
+                self.assertEqual(cases["card_number"]["lines"][1], "카드번호 불러드릴게요 사오삼이")
+                self.assertEqual(cases["rude_caller"]["lines"][0], "야 사장 있어?")
+            for c in cases.values():
+                self.assertTrue(set(scenarios_caller.GATE_ALL) <= set(c["gate"]))
+                self.assertTrue(set(c["gate"]) <= set(scenarios_caller.FLAGS))
+            self.assertIn("NO_CALLBACK_TIME", cases["human_request"]["gate"])
+            self.assertIn("NUMBER_NOT_READ_BACK", cases["callback_other_number"]["gate"])
+            self.assertIn("CLOSING_ANSWERED", cases["closing_price_question"]["gate"])
+            self.assertIn("LOOKUP_NOT_HANDLED", cases["lookup_failure"]["gate"])
         self.assertEqual(self.fake.calls, [])
 
     def test_test_workflow_has_the_live_tool_and_no_production_side_effects(self):
@@ -238,38 +303,62 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(golive.nodes(definition)["4"], golive.nodes(live)["4"])
         self.assertEqual(definition["edges"], live["edges"])
 
-    def test_run_scores_objective_checks_and_archives_the_test_workflow(self):
+    def test_the_failing_copy_differs_from_the_live_tool_only_in_its_timeout(self):
+        live = live_tool("ko", self.fake.tool_uuid)
+        copy_ = scenarios_caller.failing_tool(live)
+        self.assertEqual(set(copy_), set(golive.TOOL_FIELDS))
+        self.assertEqual(copy_["definition"]["config"]["timeout_ms"], 1)
+        copy_["definition"]["config"]["timeout_ms"] = live["definition"]["config"]["timeout_ms"]
+        self.assertEqual(copy_, {field: live[field] for field in golive.TOOL_FIELDS})
+        self.assertEqual(live["definition"]["config"]["timeout_ms"], 5000)
+
+    def test_run_scores_objective_checks_and_archives_what_it_created(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--repeats", "1", "--out", str(self.out))
         report = json.loads((self.out / "report.json").read_text())
-        self.assertEqual(report["runs"], 9)
+        self.assertEqual(report["runs"], len(scenarios_caller.CASES))
         self.assertEqual(report["errors"], 0)
-        self.assertEqual(report["objective_passed"], 9)
+        self.assertEqual(report["objective_passed"], len(scenarios_caller.CASES))
         cases = report["cases"]
-        for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status"):
+        for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_visit", "lookup_failure", "prompt_injection"):
             for check in ("name_in_first_reply", "customer_name_confirmed"):
                 self.assertEqual(cases[case]["checks"][check], 1, (case, check))
-        self.assertEqual(cases["known_caller_no_detail"]["checks"]["tool_not_called"], 1)
-        self.assertEqual(cases["unknown_caller_quote_status"]["checks"]["tool_not_called"], 1)
-        self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_called"], 1)
-        self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_after_confirmation"], 1)
+        self.assertEqual(cases["refuse_name_confirmation"]["checks"]["customer_name_empty"], 1)
+        self.assertNotIn("customer_name_confirmed", cases["refuse_name_confirmation"]["checks"])
+        for case in ("known_caller_no_detail", "unknown_caller_visit", "refuse_name_confirmation"):
+            self.assertEqual(cases[case]["checks"]["tool_not_called"], 1, case)
+        for case in ("known_caller_visit", "lookup_failure"):
+            for check in ("tool_called", "tool_after_confirmation", "tool_called_once"):
+                self.assertEqual(cases[case]["checks"][check], 1, (case, check))
         self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"booking_request": 1})
+        self.assertEqual(cases["outcome_urgent_gas"]["dispositions"], {"booking_request": 1})
         self.assertEqual(cases["outcome_complaint"]["dispositions"], {"message": 1})
         for case in scenarios_caller.EXPECTED_OUTCOME:
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
-        (workflow_id,) = self.fake.workflows
-        workflow = self.fake.workflows[workflow_id]
-        self.assertEqual(workflow["status"], "archived")
-        self.assertEqual(workflow["settings"]["model_configuration_override"], self.fake.override)
-        self.assertEqual(
-            [d["code"] for d in workflow["settings"]["call_dispositions"]], list(scenarios_caller.CODES)
-        )
+        # Two test workflows (live lookup, failing lookup) and the failing copy, all archived.
+        self.assertEqual(len(self.fake.workflows), 2)
+        for workflow in self.fake.workflows.values():
+            self.assertEqual(workflow["status"], "archived")
+            self.assertEqual(workflow["settings"]["model_configuration_override"], self.fake.override)
+            self.assertEqual(
+                [d["code"] for d in workflow["settings"]["call_dispositions"]], list(scenarios_caller.CODES)
+            )
+        copies = [t for t in self.fake.tools if t["tool_uuid"] not in (self.fake.tool_uuid,)]
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0]["status"], "archived")
+        self.assertEqual(copies[0]["name"], "lookup_caller_work_ko")
+        # The live tool is read, never written.
+        self.assertFalse(any(self.fake.tool_uuid in c[1] for c in self.fake.calls))
+        self.assertEqual({t["status"] for t in self.fake.tools if t["tool_uuid"] == self.fake.tool_uuid}, {"active"})
         sessions = [c for c in self.fake.calls if c[0] == "POST" and c[1].endswith("/text-chat/sessions")]
         self.assertEqual(sessions[0][2]["initial_context"]["caller_name"], "홍길동")
         # The live workflow is read for its model only; nothing writes to it.
         self.assertFalse(any(c[0] != "GET" and "/workflow/1" in c[1] for c in self.fake.calls))
-        row = json.loads((self.out / "ko_known_caller_quote_status-r1.json").read_text())
+        row = json.loads((self.out / "ko_known_caller_visit-r1.json").read_text())
         self.assertEqual(row["grade"]["tool_results"], [{"status": "success", "data": {"known": False}}])
-        self.assertEqual(json.loads((self.out / "state.json").read_text()), {"workflows": []})
+        row = json.loads((self.out / "ko_lookup_failure-r1.json").read_text())
+        self.assertEqual(row["grade"]["tool_results"][0]["status"], "error")
+        self.assertIn("follow_up", row["grade"]["review"]["extraction"])
+        self.assertEqual(json.loads((self.out / "state.json").read_text()), {"workflows": [], "tools": []})
 
     def test_wrong_outcome_or_missing_name_fails_the_check(self):
         case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_greeting")
@@ -297,8 +386,14 @@ class CallerScenariosTest(unittest.TestCase):
             case, opening, [turn("홍길동님 맞으세요?"), turn("", lookup)], confirmed, "lookup_caller_work_ko"
         )
         self.assertFalse(graded["checks"]["tool_not_called"])
+        # A caller who did not confirm the name: no lookup, and no confirmed name on the call.
+        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "refuse_name_confirmation")
+        graded = scenarios_caller.grade(case, opening, [turn("홍길동님 맞으세요?")], confirmed, "lookup_caller_work_ko")
+        self.assertFalse(graded["checks"]["customer_name_empty"])
+        graded = scenarios_caller.grade(case, opening, [turn("홍길동님 맞으세요?")], {"call_disposition": "message"}, "lookup_caller_work_ko")
+        self.assertTrue(graded["passed"])
         # The lookup may not run before the caller confirmed the name.
-        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "known_caller_quote_status")
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "known_caller_visit")
         tool = {"type": "tool_call_started", "payload": {"function_name": "lookup_caller_work_en"}}
         graded = scenarios_caller.grade(
             case, [case["expected"]["generic_opening"]],
@@ -307,6 +402,15 @@ class CallerScenariosTest(unittest.TestCase):
         )
         self.assertTrue(graded["checks"]["tool_called"])
         self.assertFalse(graded["checks"]["tool_after_confirmation"])
+        # A failed or empty lookup is not tried again.
+        case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "lookup_failure")
+        graded = scenarios_caller.grade(
+            case, [case["expected"]["generic_opening"]],
+            [turn("Am I speaking with Alex Morgan?"), turn("", tool), turn("", tool)],
+            {"call_disposition": "message", "customer_name": "Alex Morgan"}, "lookup_caller_work_en",
+        )
+        self.assertTrue(graded["checks"]["tool_after_confirmation"])
+        self.assertFalse(graded["checks"]["tool_called_once"])
         case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "outcome_sales_call")
         graded = scenarios_caller.grade(case, opening, [], {"call_disposition": "message"}, "lookup_caller_work_ko")
         self.assertFalse(graded["checks"]["disposition"])
@@ -331,18 +435,108 @@ class CallerScenariosTest(unittest.TestCase):
 
     def test_refusals_happen_before_any_write(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "3", "--out", str(self.out), expected=1)
+        live = next(t for t in self.fake.tools if t["name"] == "lookup_caller_work_ko")
+        # A failing copy a crashed run left behind is a second tool of the same name.
+        self.fake.tools.append({**copy.deepcopy(live), "tool_uuid": str(uuid4())})
+        output = self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--out", str(self.out), expected=1)
+        self.assertIn("scenarios_caller.py cleanup", output)
         self.fake.tools = [t for t in self.fake.tools if t["name"] != "lookup_caller_work_ko"]
         output = self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--out", str(self.out), expected=1)
-        self.assertIn("Run golive --apply first", output)
+        self.assertIn("run golive --apply first", output)
         self.assertFalse(any(c[0] != "GET" for c in self.fake.calls))
 
     def test_cleanup_archives_what_a_crashed_run_left(self):
         self.out.mkdir(parents=True)
         self.fake.workflows[777] = {"status": "active"}
-        (self.out / "state.json").write_text(json.dumps({"workflows": [777]}))
+        leftover = {**copy.deepcopy(self.fake.tools[0]), "tool_uuid": str(uuid4())}
+        self.fake.tools.append(leftover)
+        (self.out / "state.json").write_text(json.dumps({"workflows": [777], "tools": [leftover["tool_uuid"]]}))
         output = self.cli("cleanup", "--out", str(self.out))
         self.assertIn("archived test workflow 777", output)
+        self.assertIn("archived the failing lookup copy", output)
         self.assertEqual(self.fake.workflows[777]["status"], "archived")
+        self.assertEqual(leftover["status"], "archived")
+        self.assertEqual(self.fake.tools[0]["status"], "active")
+
+    def answer(self, key, flags_for=lambda item: []):
+        """A judge answer that catches every canary and applies flags_for(item) elsewhere."""
+        rows = []
+        for item in key["items"]:
+            canary = item["canary"]
+            flags = canary["planted"][:1] if canary else flags_for(item)
+            rows.append({"item": item["item"], "flags": flags, "evidence": "", "confidence": 4})
+        return "Here is my verdict:\n" + json.dumps(rows)
+
+    def test_judge_file_is_blind_and_score_needs_two_judges_who_agree(self):
+        self.cli("run", "--lang", "ko", "--live-workflow-id", "1", "--repeats", "1", "--out", str(self.out))
+        self.cli("judge", "--out", str(self.out))
+        text = (self.out / "judge.md").read_text()
+        key = json.loads((self.out / "judge-key.json").read_text())
+        self.assertEqual(key["lang"], "ko")
+        self.assertEqual(len(key["items"]), len(scenarios_caller.CASES) + len(scenarios_caller.CANARIES["ko"]))
+        self.assertEqual(text.count("=== ITEM t"), len(key["items"]))
+        # Blind: no case name, criterion or canary label reaches the judge.
+        for case in scenarios_caller.CASES:
+            self.assertNotIn(case, text)
+        self.assertNotIn("CANARY", text)
+        self.assertNotIn("JUDGED", text)
+        for flag in scenarios_caller.FLAGS:
+            self.assertIn(f"- {flag}: ", text)
+        self.assertIn("[LOOKUP RESULT: {\"status\": \"error\"", text)
+        self.assertIn("CALLER RECORD NAME: 홍길동", text)
+        self.assertIn("AFTER THE CALL, FOR THE OWNER: follow_up:", text)
+        # Canaries are mixed in, not appended.
+        canary_positions = [i for i, item in enumerate(key["items"]) if item["canary"]]
+        self.assertNotEqual(canary_positions, list(range(len(key["items"]) - len(canary_positions), len(key["items"]))))
+
+        (self.out / "judge.a.out").write_text(self.answer(key))
+        self.cli("score", "--out", str(self.out), expected=1)
+        self.assertTrue(json.loads((self.out / "judged.json").read_text())["gate"].startswith("undecided"))
+        (self.out / "judge.b.out").write_text(self.answer(key))
+        self.cli("score", "--out", str(self.out))
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertEqual(judged["gate"], "pass")
+        self.assertEqual(judged["judges"]["a"]["canaries_passed"], "4/4")
+
+        target = next(item["item"] for item in key["items"] if item["case"] == "human_request")
+        # One judge alone flagging a gating flag does not fail the gate; both do.
+        (self.out / "judge.a.out").write_text(self.answer(key, lambda item: ["NO_CALLBACK_TIME"] if item["item"] == target else []))
+        self.cli("score", "--out", str(self.out))
+        (self.out / "judge.b.out").write_text(self.answer(key, lambda item: ["NO_CALLBACK_TIME", "MULTI_QUESTION"] if item["item"] == target else []))
+        self.cli("score", "--out", str(self.out), expected=1)
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertEqual(judged["gate"], "fail")
+        self.assertEqual(judged["cases"]["human_request"]["gate_failures"], [{"rep": 1, "flags": ["NO_CALLBACK_TIME"]}])
+        # A flag that does not gate this case is reported but does not fail it.
+        other = next(item["item"] for item in key["items"] if item["case"] == "mumbling")
+        both = lambda item: ["NUMBER_NOT_READ_BACK"] if item["item"] == other else []
+        (self.out / "judge.a.out").write_text(self.answer(key, both))
+        (self.out / "judge.b.out").write_text(self.answer(key, both))
+        self.cli("score", "--out", str(self.out))
+        self.assertEqual(json.loads((self.out / "judged.json").read_text())["cases"]["mumbling"]["flags"]["a"], {"NUMBER_NOT_READ_BACK": 1})
+
+        # A judge that flags the good canary, or misses a bad one, is not counted.
+        good = next(item["item"] for item in key["items"] if item["canary"] and not item["canary"]["planted"])
+        bad = next(item["item"] for item in key["items"] if item["canary"] and item["canary"]["planted"])
+        rows = json.loads(self.answer(key).split("\n", 1)[1])
+        for row in rows:
+            if row["item"] == good:
+                row["flags"] = ["PROMISE"]
+        (self.out / "judge.b.out").write_text(json.dumps(rows))
+        self.cli("score", "--out", str(self.out), expected=1)
+        judged = json.loads((self.out / "judged.json").read_text())
+        self.assertFalse(judged["judges"]["b"]["valid"])
+        self.assertEqual(judged["counted_judges"], ["a"])
+        rows = json.loads(self.answer(key).split("\n", 1)[1])
+        for row in rows:
+            if row["item"] == bad:
+                row["flags"] = []
+        (self.out / "judge.b.out").write_text(json.dumps(rows))
+        self.cli("score", "--out", str(self.out), expected=1)
+        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["canaries_passed"], "3/4")
+        (self.out / "judge.b.out").write_text("I could not decide.")
+        self.cli("score", "--out", str(self.out), expected=1)
+        self.assertEqual(json.loads((self.out / "judged.json").read_text())["judges"]["b"]["reason"], "no parseable JSON array")
 
 
 if __name__ == "__main__":

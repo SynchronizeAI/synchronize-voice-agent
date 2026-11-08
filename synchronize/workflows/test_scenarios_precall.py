@@ -99,6 +99,15 @@ class PreCallScenariosTest(unittest.TestCase):
             )["natural_completion"]
         )
 
+    def test_default_is_five_repeats(self):
+        self.assertEqual(scenarios.DEFAULT_REPEATS, 5)
+        report = scenarios.completion_report([])
+        _, languages = scenarios.selection()
+        self.assertEqual(
+            report["expected_runs"],
+            5 * len(scenarios.ARM_REFS) * sum(map(len, languages.values())),
+        )
+
     def test_completion_report_fails_on_missing_evidence(self):
         rows = []
         arms, languages = scenarios.selection()
