@@ -118,6 +118,19 @@ class FakeDograh(ThreadingHTTPServer):
         self.failure = None
         self.probe_headers = []
         self.qa_key = "qa-" + uuid4().hex
+        # Provider connections as Dograh lists them: the three the English settings template names, plus one
+        # unrelated; secrets are never listed (configured_credentials names the keys only).
+        self.connection_uuids = {ref: str(uuid4()) for ref in golive.MODEL_CONNECTIONS}
+        self.connections = [
+            {
+                "uuid": self.connection_uuids[ref], "name": name, "provider": provider, "connection_settings": {},
+                "configured_credentials": ["api_key"], "revision": 1, "is_active": True,
+            }
+            for ref, (provider, name) in golive.MODEL_CONNECTIONS.items()
+        ] + [{
+            "uuid": str(uuid4()), "name": "OpenAI default", "provider": "openai", "connection_settings": {},
+            "configured_credentials": ["api_key"], "revision": 1, "is_active": True,
+        }]
         self.select("en")
 
     def select(self, lang):
@@ -200,10 +213,19 @@ class FakeDograh(ThreadingHTTPServer):
         return out
 
     def expected_settings(self):
-        return {
+        out = {
             **copy.deepcopy(self.original["workflow_configurations"]),
             "call_dispositions": copy.deepcopy(self.new_settings["call_dispositions"]),
         }
+        if self.lang == "en":
+            # The call limit, and the template's services laid over the live override (its named configuration stays),
+            # each connection placeholder replaced by that connection's UUID.
+            text = json.dumps(self.new_settings["model_configuration_override"])
+            for ref, uuid in self.connection_uuids.items():
+                text = text.replace(ref, uuid)
+            out["max_call_duration"] = 1200
+            out["model_configuration_override"] = {**(out.get("model_configuration_override") or {}), **json.loads(text)}
+        return out
 
     def expected_tool(self):
         tool = copy.deepcopy(self.spec["tool"])
@@ -283,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             if fake.on_get:
                 fake.on_get()
             self.reply(200, masked(fake.workflow))
+        elif self.command == "GET" and self.path == "/api/v1/model-connections/provider-connections":
+            self.reply(200, fake.connections)
         elif self.command == "GET" and self.path == "/api/v1/credentials/":
             self.reply(
                 200,
@@ -1346,17 +1370,125 @@ class GoLiveTests(unittest.TestCase):
         self.assertEqual(
             self.fake.workflow["workflow_configurations"], self.fake.expected_settings()
         )
-        # Already the new dispositions: the draft save carries no settings.
+        # Already the new dispositions (and the English call limit and model services): the draft save carries no settings.
         self.fake.select("en")
-        self.fake.workflow["workflow_configurations"]["call_dispositions"] = copy.deepcopy(
-            self.fake.new_settings["call_dispositions"]
-        )
+        self.fake.workflow["workflow_configurations"] = self.fake.expected_settings()
         self.fake.original = copy.deepcopy(self.fake.workflow)
         self.fake.calls.clear()
         out, _ = self.run_cli(self.args("--apply"))
         self.assertNotIn("settings.call_dispositions", out)
         draft = next(c for c in self.writes() if c[1] == "/api/v1/workflow/3")
         self.assertEqual(set(draft[2]), {"workflow_definition"})
+
+    def test_call_limit_and_model_services_follow_the_template_and_reapply_as_a_no_op(self):
+        out, _ = self.run_cli(["plan", *self.args()])
+        # Unset live and in the old ref's template: the template's value, with no acceptance needed.
+        self.assertIn("settings.max_call_duration: template-replaced\n  - unset\n  + 1200\n", out)
+        for key in golive.MODEL_KEYS:
+            self.assertIn(f"settings.model_configuration_override.{key}: template-replaced\n  - unset\n", out)
+        self.assertEqual(self.writes(), [])
+        out, _ = self.run_cli(self.args("--apply"))
+        settings = self.fake.workflow["workflow_configurations"]
+        self.assertEqual(settings, self.fake.expected_settings())
+        override = settings["model_configuration_override"]
+        # The named configuration the line selects, and with it the voice, stays; the template's services lie over it.
+        self.assertEqual(
+            override["model_configuration_uuid"],
+            self.fake.original["workflow_configurations"]["model_configuration_override"]["model_configuration_uuid"],
+        )
+        uuid_of = {name: self.fake.connection_uuids[ref] for ref, (_, name) in golive.MODEL_CONNECTIONS.items()}
+        self.assertEqual(
+            override["llm"], {"provider_connection_uuid": uuid_of["synchronize-gemini"], "settings": {"model": "gemini-3.6-flash"}}
+        )
+        self.assertEqual(
+            override["stt"],
+            {"provider_connection_uuid": uuid_of["synchronize-deepgram"], "settings": {"model": "nova-3-general", "language": "en"}},
+        )
+        self.assertEqual(
+            {(r["condition"]["type"], r["target"]["provider_connection_uuid"]) for r in override["llm_fallback"]["rules"]},
+            {("no_output", uuid_of["synchronize-bedrock"]), ("error", uuid_of["synchronize-bedrock"])},
+        )
+        self.assertNotIn(golive.PLACEHOLDER_UUID_PREFIX, json.dumps(settings))
+        self.assertIn(
+            "call_dispositions, max_call_duration, model_configuration_override.llm, model_configuration_override.llm_fallback, "
+            "model_configuration_override.stt applied, other settings unchanged",
+            out,
+        )
+        # The PUT saves a draft and only the publish makes it run; once published, a re-run writes nothing.
+        self.assertEqual([c[1] for c in self.writes()][-2:], ["/api/v1/workflow/3", "/api/v1/workflow/3/publish"])
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertEqual(self.writes(), [])
+        self.assertIn("Already wired", out)
+        self.assertNotIn("settings.max_call_duration", out)
+        # A null override becomes one holding only the template's services (the line then runs the organization default's voice).
+        self.fake.select("en")
+        self.fake.credentials.clear()
+        self.fake.tools.clear()
+        self.fake.workflow["workflow_configurations"]["model_configuration_override"] = None
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        self.run_cli(self.args("--apply"))
+        override = self.fake.workflow["workflow_configurations"]["model_configuration_override"]
+        self.assertEqual(set(override), set(golive.MODEL_KEYS))
+        self.assertEqual(self.fake.workflow["workflow_configurations"], self.fake.expected_settings())
+        # Korea is a separate product: its template sets neither, and no model connection is even read.
+        self.fake.select("ko")
+        self.fake.credentials.clear()
+        self.fake.calls.clear()
+        self.run_cli(self.args("--apply"))
+        self.assertFalse(any("model-connections" in c[1] for c in self.fake.calls))
+        self.assertFalse({"max_call_duration"} & set(self.fake.workflow["workflow_configurations"]))
+        self.assertEqual(
+            self.fake.workflow["workflow_configurations"]["model_configuration_override"],
+            self.fake.original["workflow_configurations"]["model_configuration_override"],
+        )
+
+    def test_a_missing_ambiguous_or_foreign_model_connection_is_refused_before_any_write(self):
+        listed = copy.deepcopy(self.fake.connections)
+        gemini, bedrock, deepgram = listed[:3]
+        for change, message in (
+            (lambda c: c.remove(next(x for x in c if x["name"] == "synchronize-gemini")),
+             "Model connection synchronize-gemini (google) is missing: add it in Dograh (runbook step 5)"),
+            (lambda c: c.append({**deepgram, "uuid": str(uuid4())}),
+             "Model connection name synchronize-deepgram is ambiguous"),
+            (lambda c: next(x for x in c if x["name"] == "synchronize-bedrock").update(provider="openrouter"),
+             "Model connection synchronize-bedrock must be an active aws_bedrock connection"),
+            (lambda c: next(x for x in c if x["name"] == "synchronize-bedrock").update(is_active=False),
+             "Model connection synchronize-bedrock must be an active aws_bedrock connection"),
+        ):
+            with self.subTest(message=message):
+                self.fake.select("en")
+                self.fake.calls.clear()
+                self.fake.connections = copy.deepcopy(listed)
+                change(self.fake.connections)
+                for args in (["plan", *self.args()], self.args("--apply")):
+                    _, err = self.run_cli(args, expected=1)
+                    self.assertIn(message, err)
+                self.assertEqual(self.writes(), [])
+                self.assertEqual(self.fake.workflow, self.fake.original)
+        self.assertEqual((gemini["provider"], bedrock["provider"]), ("google", "aws_bedrock"))
+
+    def test_a_custom_call_limit_or_model_service_needs_acceptance(self):
+        settings = self.fake.workflow["workflow_configurations"]
+        settings["max_call_duration"] = 600
+        settings["model_configuration_override"]["llm"] = {
+            "provider_connection_uuid": str(uuid4()), "settings": {"model": "gpt-4.1-mini"},
+        }
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        out, _ = self.run_cli(["plan", *self.args()])
+        self.assertIn("settings.max_call_duration: REPLACES-CUSTOM\n  - 600\n  + 1200\n", out)
+        self.assertIn("settings.model_configuration_override.llm: REPLACES-CUSTOM\n", out)
+        self.assertIn("settings.model_configuration_override.stt: template-replaced\n", out)
+        _, err = self.run_cli(self.args("--apply"), expected=1)
+        self.assertIn("--accept-merged settings.max_call_duration", err)
+        self.assertIn("--accept-merged settings.model_configuration_override.llm", err)
+        self.assertNotIn("--accept-merged settings.model_configuration_override.stt", err)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply", accept_merged=(
+            "node 4.data.prompt", "settings.max_call_duration", "settings.model_configuration_override.llm",
+        )))
+        self.assertEqual(self.fake.workflow["workflow_configurations"], self.fake.expected_settings())
+        self.assertEqual(self.fake.workflow["workflow_configurations"]["max_call_duration"], 1200)
 
     def test_edge_condition_merges_and_conflicts_abort_before_writes(self):
         self.fake.select("ko")
@@ -1620,7 +1752,8 @@ class GoLiveTests(unittest.TestCase):
         # Call variables each line's prompts may read: Korean gets business facts and hours only.
         variables = {
             "ko": {"business_name", "caller_name", *facts},
-            "en": {"business_name", "caller_name", *facts, "urgent_examples"},
+            # current_time is Dograh's own (api/utils/template_renderer.py): the English extraction dates a calendar day by it.
+            "en": {"business_name", "caller_name", *facts, "urgent_examples", "current_time"},
         }
         for lang, node_id in (("ko", "2"), ("en", "1")):
             spec = golive.tool_spec("HEAD", lang)
@@ -1657,6 +1790,48 @@ class GoLiveTests(unittest.TestCase):
             settings = golive.settings_template("HEAD", lang)
             self.assertEqual(settings["smart_turn_stop_secs"], 1.0)
             self.assertEqual(settings["turn_stop_strategy"], "turn_analyzer")
+            start = golive.nodes(definition)["1"]["data"]
+            if lang == "ko":
+                # Korea is a separate product: its greeting, call limit and model stay as they are.
+                self.assertNotIn("allow_greeting_interrupt", start)
+                self.assertFalse({"max_call_duration", golive.MODEL_OVERRIDE} & set(settings))
+            else:
+                # The greeting plays to the end; the caller can interrupt every turn after it.
+                self.assertIs(start["allow_greeting_interrupt"], False)
+                self.assertIs(start["allow_interrupt"], True)
+                # Dograh 1.51's ceiling (api/schemas/workflow_configurations.py), which ends the call at once: 1.51 has no
+                # wrap-up hook before the limit (call_monitor_processor.py _check_call_duration, abort_immediately=True).
+                (ceiling,) = re.findall(
+                    r"^MAX_CALL_DURATION_SECONDS = (\d+)$",
+                    (golive.ROOT / "api/schemas/workflow_configurations.py").read_text(), re.M,
+                )
+                self.assertEqual(settings["max_call_duration"], int(ceiling))
+                self.assertEqual(settings["max_call_duration"], 1200)
+                override = settings[golive.MODEL_OVERRIDE]
+                # Only the services: the line's named configuration (and with it the voice) is the operator's.
+                self.assertEqual(set(override), set(golive.MODEL_KEYS))
+                connection = golive.MODEL_CONNECTIONS
+                self.assertEqual(connection[override["llm"]["provider_connection_uuid"]][0], "google")
+                self.assertEqual(override["llm"]["settings"], {"model": "gemini-3.6-flash"})
+                # Deepgram itself, not Dograh's managed STT (which sends en to Flux), on nova-3-general in English.
+                self.assertEqual(connection[override["stt"]["provider_connection_uuid"]][0], "deepgram")
+                self.assertEqual(override["stt"]["settings"], {"model": "nova-3-general", "language": "en"})
+                # One hedged race: Haiku 4.5 on Bedrock starts when Gemini gives no output for 1.5 s or fails.
+                rules = override["llm_fallback"]["rules"]
+                self.assertEqual(
+                    sorted((r["condition"]["type"], r["condition"].get("after_ms")) for r in rules),
+                    [("error", None), ("no_output", 1500)],
+                )
+                for rule in rules:
+                    self.assertEqual(connection[rule["target"]["provider_connection_uuid"]][0], "aws_bedrock")
+                    self.assertEqual(rule["target"]["settings"], {"model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"})
+                # The two values Synchronize reads after the call travel like urgent: node 1's extraction, so
+                # gathered_context.recording_declined and gathered_context.caller_language.
+                extracted = {v["name"]: v["type"] for v in start["extraction_variables"]}
+                self.assertEqual(
+                    {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language")},
+                    {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string"},
+                )
             # Urgency is its own flag, extracted in every conversation node.
             conversation = [
                 n for n in definition["nodes"]
@@ -1801,6 +1976,37 @@ class GoLiveTests(unittest.TestCase):
                 ),
                 settings,
             )
+        # As go-live writes it (each placeholder a connection's UUID), Dograh stores the English settings unchanged,
+        # so a re-run compares equal and writes nothing.
+        resolved = golive.resolve_connections(
+            golive.settings_template("HEAD", "en"), {ref: str(uuid4()) for ref in golive.MODEL_CONNECTIONS}
+        )
+        self.assertEqual(
+            WorkflowConfigurationDefaults.model_validate(resolved).model_dump(mode="json", exclude_unset=True), resolved
+        )
+        # The models are ids 1.51 accepts for their providers: gemini-3.6-flash is free text on Google (1.51 drops its
+        # sampling temperature, as for every Gemini from 3.6), Haiku 4.5 is in Bedrock's own list, nova-3-general takes en.
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgresql://unused/unused", "REDIS_URL": "redis://unused"},
+        ), patch.object(sys, "path", [str(golive.ROOT), *sys.path]):
+            from api.services.configuration import registry
+            from api.services.configuration.options.deepgram import DEEPGRAM_LANGUAGES, DEEPGRAM_STT_MODELS
+        schemas = {"google": registry.GoogleLLMService, "aws_bedrock": registry.AWSBedrockLLMConfiguration,
+                   "deepgram": registry.DeepgramSTTConfiguration}
+        credentials = {"google": {"api_key": "k"}, "deepgram": {"api_key": "k"},
+                       "aws_bedrock": {"aws_access_key": "a", "aws_secret_key": "b"}}
+        template = golive.settings_template("HEAD", "en")[golive.MODEL_OVERRIDE]
+        selections = [template["llm"], template["stt"], *(rule["target"] for rule in template["llm_fallback"]["rules"])]
+        for selection in selections:
+            provider = golive.MODEL_CONNECTIONS[selection["provider_connection_uuid"]][0]
+            service = schemas[provider].model_validate({**selection["settings"], **credentials[provider]})
+            self.assertEqual(service.model, selection["settings"]["model"])
+        self.assertIsNone(registry.GoogleLLMService(model="gemini-3.6-flash", api_key="k").temperature)
+        self.assertIn("us.anthropic.claude-haiku-4-5-20251001-v1:0", registry.AWS_BEDROCK_MODELS)
+        self.assertIn("nova-3-general", DEEPGRAM_STT_MODELS)
+        self.assertIn("en", DEEPGRAM_LANGUAGES)
+        self.assertNotIn(golive.PLACEHOLDER_UUID_PREFIX, json.dumps(resolved))
 
 
 # Blob ids at tag dograh-v1.51.0 (commit 3d9fa55e): the code below is 1.51's, not a model of it.

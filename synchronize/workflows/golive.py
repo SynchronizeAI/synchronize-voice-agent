@@ -3,8 +3,9 @@
 Successor to the proof workspace's deploy_live.py: the same exact-once line/word
 merge, with local git refs, explicit targets, credential wiring and rollback.
 One run also creates or updates the caller-work HTTP tool (by its unique name),
-resolves its UUID into the nodes and applies the template's call dispositions,
-and only those, to the workflow settings.
+resolves its UUID into the nodes and applies, of the workflow settings, only the
+template's delta of the ones it owns (SETTINGS_KEYS and the model override's
+MODEL_KEYS, with each model connection named by its placeholder resolved by name).
 Standard library only. Nothing contacts Railway or fetches git refs.
 """
 
@@ -51,6 +52,21 @@ TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definit
 TEST_COPY_ICON = "synchronize-test-copy"
 TOOL_UPDATE_FIELDS = ("description", "icon", "icon_color", "definition")
 DISPOSITIONS = "settings.call_dispositions"
+# The settings go-live owns. Each takes only its old-ref -> new-ref template delta, like a node field; every other
+# setting stays. Of the model override (Dograh 1.51 ModelConfigurationOverride) it owns the services the template
+# sets; a named configuration the line selects (model_configuration_uuid), and with it the voice, stays the operator's.
+SETTINGS_KEYS = ("call_dispositions", "max_call_duration")
+MODEL_OVERRIDE = "model_configuration_override"
+MODEL_KEYS = ("llm", "llm_fallback", "stt")
+# The provider connections a settings template names by a reserved placeholder UUID (the tool placeholders' family):
+# the Dograh provider each must be and the name the operator gave it in Dograh. The connection holds the key, typed
+# at a silent read (runbook step 5), never in git; go-live writes only its UUID, and no placeholder is ever published.
+MODEL_CONNECTIONS = {
+    "00000000-0000-4000-8000-000000000201": ("google", "synchronize-gemini"),
+    "00000000-0000-4000-8000-000000000202": ("aws_bedrock", "synchronize-bedrock"),
+    "00000000-0000-4000-8000-000000000203": ("deepgram", "synchronize-deepgram"),
+}
+CONNECTIONS_ROUTE = "/model-connections/provider-connections"
 BACKUP_FORMAT = 3  # 3 adds the caller-work tool; format 2 backups stay restorable.
 PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real call.
 # Largest digit-text id accepted by the runtime's _run_id validator. Unlike
@@ -202,7 +218,7 @@ class Dograh:
                 f"Dograh {method} failed: HTTP {status}; unknown, may have committed"
             )
         require(200 <= status < 300, f"Dograh {method} failed: HTTP {status}")
-        listing = path.split("?", 1)[0] in ("/credentials/", "/tools/")
+        listing = path.split("?", 1)[0] in ("/credentials/", "/tools/", CONNECTIONS_ROUTE)
         expected = list if method == "GET" and listing else dict
         if not isinstance(result, expected):
             error = GoLiveError if method == "GET" else UncertainWrite
@@ -776,32 +792,93 @@ def show_tool(planned, existing, change, mode=None):
         )
 
 
+def settings_values(settings):
+    """The settings values go-live owns, by the label a plan prints (MISSING when unset)."""
+    settings = settings or {}
+    override = settings.get(MODEL_OVERRIDE) or {}
+    return {
+        **{f"settings.{key}": settings.get(key, MISSING) for key in SETTINGS_KEYS},
+        **{f"settings.{MODEL_OVERRIDE}.{key}": override.get(key, MISSING) for key in MODEL_KEYS},
+    }
+
+
+def model_connections(client, *templates):
+    """Each connection placeholder the settings templates name, mapped to the UUID of the one active
+    connection of its name and provider. Read-only; refused before any write when one is missing."""
+    text = json.dumps(templates)
+    wanted = {ref: spec for ref, spec in MODEL_CONNECTIONS.items() if ref in text}
+    if not wanted:
+        return {}
+    listed = client.api("GET", CONNECTIONS_ROUTE)
+    resolved = {}
+    for ref, (provider, name) in sorted(wanted.items()):
+        matches = [entry for entry in listed if entry["name"] == name]
+        require(
+            matches,
+            f"Model connection {name} ({provider}) is missing: add it in Dograh (runbook step 5), then re-plan",
+        )
+        require(
+            len(matches) == 1,
+            f"Model connection name {name} is ambiguous; archive the duplicate in Dograh first",
+        )
+        require(
+            matches[0]["provider"] == provider and matches[0].get("is_active", True) is True,
+            f"Model connection {name} must be an active {provider} connection",
+        )
+        resolved[ref] = str(UUID(matches[0]["uuid"]))
+    return resolved
+
+
+def resolve_connections(value, resolved):
+    """A settings template with each connection placeholder replaced by its connection's UUID."""
+    if isinstance(value, dict):
+        return {key: resolve_connections(item, resolved) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_connections(item, resolved) for item in value]
+    return resolved.get(value, value) if isinstance(value, str) else value
+
+
 def planned_settings(live, old, new, field_modes):
-    """Apply only the template's call-disposition delta to the live settings."""
-    old_value = (old or {}).get("call_dispositions", MISSING)
-    new_value = (new or {}).get("call_dispositions", MISSING)
-    live_value = (live or {}).get("call_dispositions", MISSING)
-    if old_value == new_value or live_value == new_value:
-        return copy.deepcopy(live)
-    require(new_value is not MISSING, "Template settings must keep call_dispositions")
-    field_modes[DISPOSITIONS] = (
-        "template-replaced"
-        if live_value == old_value
-        else "set" if live_value in (MISSING, None, []) else "REPLACES-CUSTOM"
-    )
-    return {**copy.deepcopy(live or {}), "call_dispositions": copy.deepcopy(new_value)}
+    """Apply only the template's delta of the settings go-live owns to the live settings."""
+    out = copy.deepcopy(live or {})
+    before, previous, current = settings_values(live), settings_values(old), settings_values(new)
+    for label, new_value in current.items():
+        old_value, live_value = previous[label], before[label]
+        if old_value == new_value or live_value == new_value:
+            continue
+        require(new_value is not MISSING, f"Template settings must keep {label.removeprefix('settings.')}")
+        field_modes[label] = (
+            "template-replaced"
+            if live_value == old_value
+            else "set" if live_value in (MISSING, None, []) else "REPLACES-CUSTOM"
+        )
+        key = label.rsplit(".", 1)[1]
+        target = out
+        if label != f"settings.{key}":
+            # An override that was null or absent becomes one holding only the template's services.
+            target = out[MODEL_OVERRIDE] = dict(out.get(MODEL_OVERRIDE) or {})
+        target[key] = copy.deepcopy(new_value)
+    return out
 
 
 def show_settings(live, planned, field_modes):
-    if DISPOSITIONS not in field_modes:
-        return
-    codes = [
-        ", ".join(item["code"] for item in (settings or {}).get("call_dispositions") or [])
-        or "none"
-        for settings in (live, planned)
-    ]
-    print(f"{DISPOSITIONS}: {field_modes[DISPOSITIONS]}; codes")
-    print(f"  - {codes[0]}\n  + {codes[1]}\n  (descriptions withheld)")
+    before, after = settings_values(live), settings_values(planned)
+    for label in after:
+        if label not in field_modes:
+            continue
+        if label == DISPOSITIONS:
+            codes = [
+                ", ".join(item["code"] for item in (value if value is not MISSING else None) or [])
+                or "none"
+                for value in (before[label], after[label])
+            ]
+            print(f"{DISPOSITIONS}: {field_modes[DISPOSITIONS]}; codes")
+            print(f"  - {codes[0]}\n  + {codes[1]}\n  (descriptions withheld)")
+            continue
+        # Models, connection UUIDs and a duration: no secret is part of these values.
+        shown = ["unset" if value is MISSING else json.dumps(value) for value in (before[label], after[label])]
+        print(f"{label}: {field_modes[label]}")
+        print(f"  - {shown[0]}\n  + {shown[1]}")
 
 
 def backup_directory(path):
@@ -1194,6 +1271,10 @@ def deploy(args):
         tool_names=(spec["tool"]["name"],) if spec else (),
     )
     live, live_settings = snapshot["workflow_definition"], snapshot["workflow_configurations"]
+    # The model connections the settings templates name, as their UUIDs, before any comparison with live.
+    connections = model_connections(client, old_settings, new_settings)
+    old_settings = resolve_connections(old_settings, connections)
+    new_settings = resolve_connections(new_settings, connections)
     existing = find_credential(client, args.credential_name)
     existing_tool = change = tool = None
     field_modes = {}
@@ -1220,6 +1301,7 @@ def deploy(args):
     if spec:
         planned = wire_tool_refs(client, planned, templates, spec, tool_ref)
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
+    require(PLACEHOLDER_UUID_PREFIX not in json.dumps(settings), "Unresolved placeholder in settings")
     for value in (planned, settings, tool):
         ensure_no_secrets(value)
     changes = diff_fields(live, planned)
@@ -1232,12 +1314,10 @@ def deploy(args):
         for field, mode in field_modes.items()
         if mode in ("MERGED-INTO-CUSTOM", "REPLACES-CUSTOM")
     }
-    known_fields = template_fields(old, new, wired) | (
-        {DISPOSITIONS}
-        if (old_settings or {}).get("call_dispositions")
-        != (new_settings or {}).get("call_dispositions")
-        else set()
-    ) | {label for label in field_modes if label.startswith("tool.")}
+    old_values = settings_values(old_settings)
+    known_fields = template_fields(old, new, wired) | {
+        label for label, value in settings_values(new_settings).items() if old_values[label] != value
+    } | {label for label in field_modes if label.startswith("tool.")}
     require(
         set(args.accept_merged) <= known_fields,
         "--accept-merged must name a changed template field exactly as printed",
@@ -1251,7 +1331,9 @@ def deploy(args):
         if already_wired
         else "Would create/update credential (secret not shown)"
     )
-    settings_note = "call_dispositions" if settings_changed else None
+    settings_note = ", ".join(
+        label.removeprefix("settings.") for label in field_modes if label.startswith("settings.")
+    ) or None
     if not args.apply:
         summary("PLAN", args.workflow_id, changes, len(nodes(live)), settings_note)
         print("No remote writes")
@@ -1332,9 +1414,9 @@ def deploy(args):
         print(
             "Published and verified; "
             + (
-                "call_dispositions applied, other settings/model override unchanged"
+                f"{settings_note} applied, other settings unchanged"
                 if settings_changed
-                else "settings/model override unchanged"
+                else "settings unchanged"
             )
         )
 
