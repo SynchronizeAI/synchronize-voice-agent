@@ -786,9 +786,12 @@ class GoLiveTests(unittest.TestCase):
         )
         for _, _, body in self.fake.calls[2:4]:
             self.assertEqual(body, {"workflow_run_id": "2147483647"})
-        # The lookup tool's body template sends the run id as a JSON integer.
+        # The lookup tool's body template sends the run id as a JSON integer, with the
+        # probed workflow's language.
         for _, _, body in self.fake.calls[4:]:
-            self.assertEqual(body, {"workflow_run_id": 2147483647})
+            self.assertEqual(
+                body, {"workflow_run_id": 2147483647, "language": golive.TARGETS[3]}
+            )
         self.assertTrue(self.fake.probe_headers[2]["X-Dograh-Secret"] == self.fake.secret)
         self.assertTrue(self.fake.probe_headers[3]["X-Dograh-Secret"] != self.fake.secret)
         self.assertNotIn("Idempotency-Key", self.fake.probe_headers[2])
@@ -1767,8 +1770,9 @@ class LookupToolBodyTests(unittest.TestCase):
                     (request,) = sent
                     self.assertEqual(request["method"], "POST")
                     self.assertEqual(request["url"], "https://runtime.example" + golive.TOOL_ROUTE)
-                    # Only the template's key, with the run's own id as a JSON integer.
-                    self.assertEqual(request["json"], {"workflow_run_id": 77})
+                    # Only the template's keys: the run's own id as a JSON integer, and the
+                    # workflow's language.
+                    self.assertEqual(request["json"], {"workflow_run_id": 77, "language": lang})
 
     def test_a_run_context_without_its_id_sends_nothing(self):
         for lang, definition in self.definitions():
