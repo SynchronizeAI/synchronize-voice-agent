@@ -124,9 +124,9 @@ Exact commands: `RUNBOOK-20261108.md` steps 1–4 and R2–R5. In order:
 
 1. Back up the voice Postgres (logical `pg_dump -Fc` to the owner's machine, verified by reading every data block with
    `pg_restore -f /dev/null`, since `pg_restore -l` reads only the table of contents), and confirm `alembic current` is `b3c1d9e4f7a2`.
-2. `dograh-api` → image `dograhai/dograh-api:1.51.0`. Watch the deploy log for `Running upgrade b3c1d9e4f7a2 -> c82d4f6a9b10` and
+2. `api` → image `dograhai/dograh-api:1.51.0`. Watch the deploy log for `Running upgrade b3c1d9e4f7a2 -> c82d4f6a9b10` and
    `-> d6a83e2b19f0`; healthy when `GET /api/v1/health` answers 200 (the compose health check) and `alembic current` is `d6a83e2b19f0`.
-3. `dograh-ui` → image `dograhai/dograh-ui:1.51.0`; healthy when `/auth/login` answers 200. The root answers 307 without a session
+3. `ui` → image `dograhai/dograh-ui:1.51.0`; healthy when `/auth/login` answers 200. The root answers 307 without a session
    cookie: with the default `AUTH_PROVIDER=local` (`api/constants.py:68`) the UI middleware redirects every non-public path to `/auth/login`
    (`ui/src/middleware.ts:11,60-67`).
 4. Check the two English End Call tools now show their goodbye under "When the tool starts".
@@ -134,5 +134,5 @@ Exact commands: `RUNBOOK-20261108.md` steps 1–4 and R2–R5. In order:
 Rollback, newest state first: workflow changes with `golive.py --rollback`; cut every tool with a delayed message or more than
 one message to its start message, archived tools included (`GET /tools/` hides archived tools unless `?status=` names them,
 `api/db/tool_client.py:88-97`); Alembic `downgrade b3c1d9e4f7a2` from the 1.51.0 api container; only after that succeeds,
-`dograh-api` then `dograh-ui` back to `1.49.0`. If the downgrade fails for another reason, restore the step-1 dump (loses every call
+`api` then `ui` back to `1.49.0`. If the downgrade fails for another reason, restore the step-1 dump (loses every call
 after the backup).
