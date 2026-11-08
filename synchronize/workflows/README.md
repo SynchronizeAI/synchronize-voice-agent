@@ -1,7 +1,7 @@
 # Consultation workflows
 
 The AI phone consultation, ready to load: `consultation-ko.json` and `consultation-en.json` are the body of
-`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the eight call outcomes and the turn strategy; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or no call is classified. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. Both need the caller-work HTTP tool (`tool-lookup-caller-work-*.json`, see Caller memory below) and `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
+`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the six call outcomes and the turn strategy; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or no call is classified. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. Both need the caller-work HTTP tool (`tool-lookup-caller-work-*.json`, see Caller memory below) and `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
 
 Korean is three steps, the shape Dograh's own guide gives (one phase per node, a specific edge condition per exit). The start node plays the greeting, takes the
 reason with a short "네,", and asks the name. The Detail node asks one open question that continues from what the caller said (a bare "anything else?" ended
@@ -45,58 +45,77 @@ Speech recognition mishears the business name unless it is given as a keyterm: o
 comma-separated names of the businesses served by this deployment on the shared workflow; update it when adding a business. It cannot vary per call.
 
 Both are an office front desk, not only a consultation line: the caller may be a new inquiry, an existing customer, a partner or
-vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act Art. 31 and MSIT guideline, for a voice that can pass as human); the English
-one also says the call is recorded (all-party-consent US states; a Korean recording notice is not required by 통신비밀보호법, only by PIPA if
-the legal basis is consent; the customer's privacy policy must name the processors and the cross-border transfer). It takes the message, and promises nothing
+vendor, or a sales call. The greeting says it is an AI (Korea AI Framework Act Art. 31 and MSIT guideline, for a voice that can pass as human) and that the
+call is recorded. English needs the recording notice in all-party-consent US states. Korean law does not require one (통신비밀보호법; PIPA only if the legal
+basis is consent), but announcing it is the standard for Korean call answering (KT 통화매니저 does), so the Korean greeting says `통화 내용은 녹음되어
+담당자에게 전달됩니다.` after the AI disclosure, in the greeting's 합니다체 (amendment A1 §5). The customer's privacy policy must name the processors and the
+cross-border transfer. It takes the message, and promises nothing
 about price, schedule, feasibility or the status of existing work. `consultation-ko.json` and `consultation-en.json` are the same product prompt in two languages; neither names a business or an
 industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
 in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
 context variables apply to test calls only). Both start nodes now use inbound-only Pre-Call Data Fetch: Synchronize's `POST /api/voice/pre-call`
 uses the called number and returns `initial_context` with `business_name`, or `{}` for an unknown number.
 Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
-the call variables `business_name`, `caller_name` and `caller_history`, each with a non-empty fallback: Dograh renders every `{{word}}` in a prompt from the
+the call variables `business_name` and `caller_name`, each with a non-empty fallback: Dograh renders every `{{word}}` in a prompt from the
 call's context, a variable it does not have becomes an empty string, and `{{x | fallback:}}` with nothing after the colon stays in the prompt as literal braces
 (`../UPGRADE-1.51.md`, Fields). Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
-A `mapped_call_disposition` that is not one of the eight outcome codes, such as `user_hangup`, means the call was not classified: Dograh 1.51 stamps the call
+A `mapped_call_disposition` that is not one of the six outcome codes, such as `user_hangup`, means the call was not classified: Dograh 1.51 stamps the call
 status at hangup and the post-call classifier replaces it once it finishes after the hangup, or never when it fails. Synchronize treats it as needing follow-up.
 Edge labels stay ASCII: Dograh names the LLM function from them.
 
 ## Caller memory, record lookup and outcomes
 
-Synchronize's side (branch `fm/261108_voice_caller_context`) gives the pre-call fetch two more `initial_context` keys, both plain text and omitted when there is
-nothing to say: `caller_name` (exactly one contact of the called company has the calling number and a real name) and `caller_history` (at most three short Korean
-lines: open matters with their due day, the site, the last contact date). The Persona lists them under `전화한 분` / `Caller` as data, with the fallbacks `모름` / `없음`
-and `unknown` / `none`, so an unknown caller gets today's prompts. The greeting does not change: Dograh's renderer has no conditional text, so a name in the
-greeting would leave a broken sentence for an unknown caller, and a pre-call `greeting_override` is read before the fetch is merged (`../UPGRADE-1.51.md`). A known
-caller is asked to confirm that name instead of giving one (Korean edge `name_given` counts the confirmation), and `customer_name` takes a confirmed name as
-well as a spoken one (the post-call extraction reads only the conversation, never `initial_context`, and Synchronize names the call by `customer_name`). When the
-confirmed caller's reason is not clearly something else, the one Detail question (English: the step 2 question) names the open matter from the record and asks
-whether the call is about it, the "지난번 견적 문의하셨죠?" reply. The Persona states the record rule once, under `하지 않는 것` / `What you never do`: what the
-caller record or a lookup shows may be told, as what the record shows, to a caller who confirmed their name; nothing else about status, price or dates.
+Synchronize's side (branch `fm/261108_voice_caller_context`) gives the pre-call fetch one more `initial_context` key, `caller_name`, sent only when exactly
+one contact of the called company has the calling number and a real name. Nothing else about the caller comes before the call: task objectives and site
+names are free text that can carry amounts, names and private notes, and caller ID alone is not identity, so a known caller is greeted by name only
+(amendment A1 §1). The Persona lists the name under `전화한 분` / `Caller` as data, with the fallback `모름` / `unknown`, so an unknown caller gets today's
+prompts. The greeting does not change for a known caller: Dograh's renderer has no conditional text, so a name in the greeting would leave a broken sentence
+for an unknown caller, and a pre-call `greeting_override` is read before the fetch is merged (`../UPGRADE-1.51.md`). A known caller is asked to confirm that
+name instead of giving one (Korean edge `name_given` counts the confirmation), and `customer_name` takes a confirmed name as well as a spoken one (the
+post-call extraction reads only the conversation, never `initial_context`, and Synchronize names the call by `customer_name`). The Persona states the record
+rule once, under `하지 않는 것` / `What you never do`, in one wording for both languages: what a lookup in this call shows may be told, as what the record
+shows, only to `기록의 이름이 맞다고 확인한 본인` / a caller who `confirmed the name on the caller record`. A record with no name has no name to confirm, so
+nothing is told. The agent never brings up open work by itself; open work comes only from the lookup.
 
-During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under `tool`,
-written with every field Dograh stores so the read-back is exact). It posts `{"workflow_run_id": "<digits>"}` from the preset `{{initial_context.workflow_run_id}}`
-(run-owned in Dograh, the caller cannot set it; the model supplies nothing) to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom
-Header credential, times out after 5000 ms, says `확인해 보겠습니다.` / "Let me check." when it starts and `잠시만 기다려 주세요.` / "One moment, please." if the answer takes
-over 2.5 s. Synchronize answers facts only (`known`, `name`, `open_work`, `upcoming_visits`, `estimates` with status, no amounts or addresses). The tool is on the Korean
-Detail node and on the English Reception node, where the prompt places it after step 1. The call reaches the Detail node after the name step also when the caller
-declines a name or gives another one (edge `name_given`), so only the Persona's record rule keeps a lookup result from a caller who did not confirm the name: a prompt
-rule, not structure, checked only by the runbook's test call 2 (its unconfirmed variant); a text-chat lookup answers `{"known": false}`. When to use it
-lives only in the tool's description; the node line says only the order (look up before the node's question, ask that question on the next turn). Tools are organization
-objects referenced by UUID: the templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) / `…0102` (en), which `golive.py` replaces
-with the real tool's UUID; Dograh would silently drop the placeholder, and go-live refuses to publish it. Call QA cannot check that a relayed record is faithful: Dograh's
-QA transcript shows a lookup only as `[tool_call]: <name>` and never shows the caller record (`../UPGRADE-1.51.md`, Call QA transcript). `PROMISED_UNCONFIRMED` therefore
-lets a neutral "the record shows …" sentence pass and still tags any commitment; faithfulness is checked only by the runbook's test calls 1 and 2. Added prompt text: the
-`전화한 분` / `Caller` section, the role line naming that record, the record exception in `하지 않는 것` / `What you never do`, the confirm-the-name sentence in the start
-step, the confirmed-name clause of `customer_name`, the Detail / Reception lines on lookup order and on naming the open matter, and the QA sentence. Only the text-chat
-evals below measure it.
+During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under
+`tool`, written with every field Dograh stores so the read-back is exact). Its `body_template` is `{"workflow_run_id": "{{initial_context.workflow_run_id}}"}`,
+so the request body is that one key, filled from the run's own context, and nothing the model sends reaches it. A preset alone would not hold: at 1.51 the
+model's arguments override presets and, with no body template, are the body (`api/services/workflow/tools/custom_tool.py:432`, `:473-474`), so a caller
+could have the model name another call's run. A body template sends only its own keys and is rendered with the run's `initial_context` laid over the
+arguments (`:476-482`); Dograh sets `workflow_run_id` there from the run row (`api/services/pipecat/run_pipeline.py:693`; text chat
+`api/services/workflow/text_chat_runner.py:557-560`) and never takes it from an external context (`api/services/workflow/initial_context.py:10-21`). A value
+that is one whole placeholder keeps its type (`custom_tool.py:278-295`), so the id arrives as a JSON integer; Synchronize accepts that or digit text. The
+required preset of the same id stays as a fail-closed guard: were the context ever without the id, the template would fall back to the bare name, which the
+model can set (`api/utils/template_renderer.py:192-196`), and the empty preset refuses the request first (`custom_tool.py:263-269`, `:407-427`). `test_golive.py`
+runs 1.51's own `execute_http_tool` offline on both committed tools to show it, and go-live refuses a tool template without that body template. The tool posts
+to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom Header credential and times out after 5000 ms. The answer holds only
+`known`, `name`, `open_items` (`count` of open items and `next_due`, the earliest due date or null) and `upcoming_visits` (the dates of visits from today on):
+no task text, project or site names, estimates or amounts (amendment A1 §2). The tool description says exactly that, and that the agent may relay the count
+and the dates and takes a message for anything else. Dograh says `확인해 보겠습니다.` / "Let me check." when the lookup starts and `잠시만 기다려 주세요.` /
+"One moment, please." if the answer takes over 2.5 s (`api/services/workflow/tool_messages.py:97-124`). The Korean Detail line says the system speaks the first
+one, so the turn that calls the tool says nothing (English: "A turn is either speech or a tool call") and the caller does not hear it twice. The tool is on the
+Korean Detail node and on the English Reception node, where the prompt places it after step 1. The call reaches the Detail node after the name step also when
+the caller declines a name or gives another one (edge `name_given`), so only the Persona's record rule keeps a lookup result from a caller who did not confirm
+the name: a prompt rule, not structure, checked only by the runbook's test call 2 (its unconfirmed variant); a text-chat lookup answers `{"known": false}`.
+When to use it lives only in the tool's description; the node line says only the order (look up before the node's question, ask that question on the next
+turn). Tools are organization objects referenced by UUID: the templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) /
+`…0102` (en), which `golive.py` replaces with the real tool's UUID; Dograh would silently drop the placeholder, and go-live refuses to publish it. Call QA
+cannot check that a relayed record is faithful: Dograh's QA transcript shows a lookup only as `[tool_call]: <name>` and never shows its result
+(`../UPGRADE-1.51.md`, Call QA transcript). `PROMISED_UNCONFIRMED` therefore keeps "stated or promised" for a price, schedule, availability, feasibility, the
+status of existing work, a contract or payment fact and a booked visit, and lets only a neutral "the record shows …" sentence about the count or the dates
+pass; faithfulness is checked only by the runbook's test call 2. Prompt text for this: the `전화한 분` / `Caller` name line, the role line naming the lookup,
+the record exception in `하지 않는 것` / `What you never do`, the confirm-the-name sentence in the start step, the confirmed-name clause of `customer_name`,
+the Detail / Reception lines on lookup order (Korean: and on the spoken start message), and the QA sentence. Only the text-chat evals below measure it.
 
-The settings carry eight outcomes, each with a classifier description in the workflow's language: `quote_request` (new quote or price), `booking_request` (visit,
-measurement or appointment, including one needed for a quote), `urgent` (damage or danger now; chosen before anything else that fits), `complaint`, `message` (anything
-else the owner must check or return, including the status of existing work), `done` (nothing left for the owner), `spam` (sales, ads, robocalls) and `wrong_number`.
-Synchronize shows the code as the call's label and treats every code except `done`, `spam` and `wrong_number`, and every unclassified call, as needing follow-up.
+The settings carry six outcomes, each with a classifier description in the workflow's language: `quote_request` (new quote or price), `booking_request`
+(visit, measurement or appointment, including one needed for a quote), `message` (anything else the owner must check or return: the status of existing work,
+a complaint, a partner's or supplier's message, a call-back request), `done` (nothing left for the owner), `spam` (sales, ads, robocalls) and `wrong_number`.
+Urgency is not an outcome but its own flag: every conversation node (Korean 1, 2 and 3; English 1) extracts `urgent`, a boolean whose prompt is
+`누수·가스·안전처럼 바로 사람이 봐야 하는 일이면 true, 아니면 false.` / "true if a person needs to look at it right away, such as a leak, gas or a safety problem;
+otherwise false.", so an urgent quote stays a quote (amendment A1 §3). Synchronize shows the code as the call's label, a separate 긴급 badge when `urgent`
+is true, and needs no follow-up for `done`, `spam` and `wrong_number`; every other code and every unclassified call needs one.
 `scenarios_caller.py` measures these through the text-chat API (Evals, below).
 
 ## Deployment values and authentication
@@ -225,7 +244,8 @@ It also probes `/api/voice/call-ended` with `{"workflow_run_id":"2147483647"}` a
 This is the largest value Dograh's 32-bit `workflow_runs.id` column can hold, so the lookup answers a clean 404 instead of a database range error (an 18-digit id would make Dograh answer 500 and the probe fail on a correct deployment). `"0"` fails validation (the route still answers 200 `{}`),
 so it would not exercise the lookup path. For the deliberately unknown positive ID, `Voice.owning_tenant` (`src/synchronize/voice.py`)
 maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}` without enqueueing a notice**. A lookup failure instead returns 503 and fails the probe.
-It then posts the same body to `/api/voice/tools/caller-work`, as the HTTP tool sends it, and expects 200 `{"known": false}` (an unknown run) and 401/403 with the wrong secret.
+It then posts `{"workflow_run_id": 2147483647}` to `/api/voice/tools/caller-work`, a JSON integer as the tool's body template sends it, and expects 200
+`{"known": false}` (an unknown run) and 401/403 with the wrong secret.
 Successful probe output is six status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
 call-ended correct secret `200`, call-ended wrong secret `401`/`403`, caller-work correct secret `200`, caller-work wrong secret `401`/`403`. A 404, 422 or 5xx at any route fails,
 so a runtime without the caller-work route stops the go-live before anything is wired.
@@ -233,45 +253,19 @@ An older runtime that silently drops digit-text ids also answers 200 `{}`, so th
 The runtime's completion lookup reads Dograh; it does not create a run. The deployed runtime's behavior and absence of that synthetic ID cannot be established offline.
 The test call must still verify business context, a saved call and authenticated completion separately.
 
-Operator setup in the owner's terminal: set the nonsecret `DOGRAH_PROOF_BASE_URL`, `RUNTIME_ORIGIN`, `CREDENTIAL_NAME`, called `TO_NUMBER`,
-`WORKFLOW_ID=3 LANGUAGE=en`, and `BACKUP_DIR="$HOME/golive-backups"`. Export `DOGRAH_PROOF_BASE_URL`.
-For Korean, repeat probe/plan/apply with `WORKFLOW_ID=1 LANGUAGE=ko` and the correct called number; English workflow 3 owns the only Twilio number today.
-Use the absolute path in the function so Railway commands can run from the production project's link directory:
-
-```bash
-cd /Users/enoch/work/deploy-20261029/railway-link
-golive() { python3 /Users/enoch/work/voice-agent-c/synchronize/workflows/golive.py "$@" --workflow-id "$WORKFLOW_ID" --lang "$LANGUAGE" --runtime-origin "$RUNTIME_ORIGIN" --credential-name "$CREDENTIAL_NAME" --backup-dir "$BACKUP_DIR"; }
-IFS= read -rs DOGRAH_PROOF_API_KEY; export DOGRAH_PROOF_API_KEY; printf '\n'
-```
-
-Run in this order. Paste secrets only at silent reads. Step 2 must finish successfully and the runtime must be healthy before step 3;
-`--skip-deploys` alone does **not** activate the secret. Pre-call auth errors fall back to empty context (`api/services/pipecat/pre_call_fetch.py:204–214`),
-and completion auth errors dead-letter (`api/tasks/webhook_delivery.py:327–330`), so applying Dograh wiring before runtime activation can lose completions.
-The stdin form below matches `set-resend-env.sh` and `set-soniox-railway-vars.sh`; installed offline CLI 5.49.6 help also confirms it.
-CLI 5.71.0 and production deployment behavior were not verified offline.
-
-```bash
-# 1. Stage the secret on the explicit production runtime service.
-IFS= read -rs DOGRAH_WEBHOOK_SECRET; export DOGRAH_WEBHOOK_SECRET; printf '\n'; printf '%s' "$DOGRAH_WEBHOOK_SECRET" | railway variable set DOGRAH_WEBHOOK_SECRET --stdin --service synchronize-runtime --environment production --skip-deploys >/dev/null
-# 2. Redeploy the runtime; wait for success/healthy status before continuing.
-railway redeploy --service synchronize-runtime --environment production
-# 3–5. Probe runtime auth first, then review the plan, then apply.
-golive probe --to-number "$TO_NUMBER"
-golive plan
-golive --apply # Add --accept-merged 'node N.data.FIELD' for EACH reviewed custom merge.
-# 6. Place a test call; check greeting/business context, the saved call and authenticated completion.
-# 7. Recovery only: set BACKUP_FILE to the apply run's ROLLBACK FILE path, then:
-# golive --rollback "$BACKUP_FILE"
-unset DOGRAH_WEBHOOK_SECRET DOGRAH_PROOF_API_KEY
-```
-
-For later recovery, securely re-read/export `DOGRAH_PROOF_API_KEY` before `golive --rollback "$BACKUP_FILE"`, then unset it again.
+The operator sequence with exact commands is `../RUNBOOK-20261108.md`: step 0 (shell, `golive()` function), step 5 (probe, plan, apply) and R1
+(rollback). Two orders matter there. The runtime must hold `DOGRAH_WEBHOOK_SECRET` and be deployed and healthy before `--apply`: pre-call auth errors fall back
+to empty context (`api/services/pipecat/pre_call_fetch.py:204–214`) and completion auth errors dead-letter (`api/tasks/webhook_delivery.py:327–330`), so wiring
+Dograh first can lose completions. And `golive.py` reads the templates from `HEAD`, so run it from a clean checkout of the reviewed commit.
 
 Offline targeted proof: `python3 synchronize/workflows/test_golive.py` (standard-library unittest, loopback fake server; no pytest or external calls).
 It covers both languages, draft refusal at both reads, private versioned backups, Korean greeting/conflict handling, silent-skip regressions,
 create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask fidelity, rollback with a pending draft/settings diffs, Unicode hints, durable paths and exact probe payload/auth,
 tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, format-2 backups, dispositions-only settings (replaced, set, custom needs acceptance), edge merges and conflicts,
-placeholder refusal and the caller-work probe. When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
+placeholder refusal and the caller-work probe. It also runs Dograh 1.51's own `execute_http_tool` (`custom_tool.py` and `template_renderer.py` from this
+checkout, checked against the tag's blob ids, with only the network, database and logging stubbed) on both committed lookup tools: a run id or
+`initial_context` the model supplies never reaches the request, a run context without its id sends nothing, and the pre-A1 preset-only shape does send the
+model's id. When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
 Dograh schemas (`api/schemas/tool.py`, `api/schemas/workflow_configurations.py`, identical to the `dograh-v1.51.0` tag).
 No live reachability, deployed image/API equivalence, runtime redeployment, call audio or authenticated real completion is established offline.
 
@@ -287,7 +281,7 @@ How may I help you?
 ```
 
 ```text
-안녕하세요, {{business_name | fallback:저희 회사}} AI 비서입니다.
+안녕하세요, {{business_name | fallback:저희 회사}} AI 비서입니다. 통화 내용은 녹음되어 담당자에게 전달됩니다.
 어떤 일로 전화하셨나요?
 ```
 
@@ -310,15 +304,17 @@ For any later authorized model proof, use isolated test workflows and explicit `
 ## Evals: caller memory, lookup and outcomes (owner-run; not run here)
 
 `scenarios_caller.py` runs nine cases per language through the text-chat API: a known caller greeted by name, a known caller who gives no detail
-(`여쭤볼 게 있어서 전화드렸어요.` / "I'm calling with a question.": after confirming, the agent names the open matter from the record), a known caller asking `견적 어떻게 됐어요?` /
-"How's my quote coming along?" (the lookup tool is called, the result is relayed without promises), the same question from an unknown caller (today's greeting),
-and the outcome of a quote request, an urgent leak, a complaint, a sales call and a wrong number. `manifest` (offline) prints every case and its criteria.
-`run` builds one isolated test workflow from this checkout's committed templates (`HEAD`) with the live lookup tool, the live line's model configuration and the
-template settings; it removes the pre-call fetch, the completion webhook and the QA node, archives the test workflow at the end, and never touches the live workflow
-beyond reading its model configuration. It scores the objective checks (opening text; for a known caller the name in the first reply, no record word before the
-confirmation and `customer_name` equal to the confirmed name; the open matter named after the confirmation; the tool call, never before the confirmation line; the
-outcome code) and writes every
-transcript with a review block for the judged criteria (no promise, no re-asked name). `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`).
+(`여쭤볼 게 있어서 전화드렸어요.` / "I'm calling with a question.": after confirming, the agent asks its one open question and calls no lookup, since the caller
+never asked about existing work), a known caller asking `견적 어떻게 됐어요?` / "How's my quote coming along?" (the lookup tool is called, the result is relayed
+without promises), the same question from an unknown caller (today's greeting), and the outcome of a quote request, an urgent leak, a complaint, a sales call
+and a wrong number. A known contact with no name gets no `caller_name` from the pre-call, so in text chat it is the unknown caller. `manifest` (offline)
+prints every case and its criteria. `run` builds one isolated test workflow from this checkout's committed templates (`HEAD`) with the live lookup tool, the
+live line's model configuration and the template settings; it removes the pre-call fetch, the completion webhook and the QA node, archives the test workflow
+at the end, and never touches the live workflow beyond reading its model configuration. It scores the objective checks: the opening text; for a known caller
+the name in the first reply and `customer_name` equal to the confirmed name; the lookup called, never before the confirmation line, when the caller asks
+about a quote, and not called when they never ask; for each outcome case the code (the leak may be `booking_request` or `message`, a complaint is
+`message`) and the `urgent` flag (true only for the leak). It writes every transcript with a review block for the judged criteria (no promise, no re-asked
+name, no open matter named by the agent). `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`).
 A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the lookup case measures that the tool is called and
 that the agent relays "nothing found, the owner will check" without promising; relaying real records is checked on the second test call of the runbook.
 Text chat also does not recover tool calls the model wrote as text (`../UPGRADE-1.51.md`). The one command (after golive `--apply`, with the two connection values

@@ -31,8 +31,8 @@ Python dependencies moved (Pipecat 1.15, `tuner-pipecat-sdk` 0.3.0, `jsonschema`
 ## Fields Synchronize uses
 
 - **Pre-call fetch.** `api/services/pipecat/pre_call_fetch.py` is unchanged. The response's `initial_context` is merged into the call
-  (`api/services/pipecat/event_handlers.py:153-166`) and persisted on the run (`:226-229`), so `caller_name` and `caller_history`
-  are readable from the run afterwards. A pre-call `greeting_override` does not reach the greeting: the engine reads it once at
+  (`api/services/pipecat/event_handlers.py:153-166`) and persisted on the run (`:226-229`), so `caller_name` is readable from the
+  run afterwards. A pre-call `greeting_override` does not reach the greeting: the engine reads it once at
   construction (`api/services/workflow/pipecat_engine.py:174-176`), before the fetch is merged.
 - **Variables in prompts.** Greeting, prompts, extraction prompts and disposition descriptions render with `render_template` against
   the call context (`pipecat_engine.py:421-424`, `:1092-1134`). The syntax is `{{name}}` or `{{name | fallback:text}}`
@@ -61,11 +61,17 @@ Python dependencies moved (Pipecat 1.15, `tuner-pipecat-sdk` 0.3.0, `jsonschema`
 - **HTTP tool schema (#890).** Tools carry `definition.messages`: one `start` message and `delayed` messages with `after_ms`
   (1–120,000), text or recording, up to 20 variants per timing (`api/schemas/tool.py:519-602`). `HttpApiConfig`, `EndCallConfig` and
   `TransferCallConfig` now forbid unknown keys (`:99`, `:182`, `:373`): a client sending the old `customMessage` gets HTTP 422. The
-  start message plays when the call begins, a delayed one only if the request is still running, and both stop when the result
-  arrives (`api/services/workflow/tool_messages.py:47-124`, `tool_execution.py`). Dograh stores `definition.model_dump()`
-  (`api/services/tool_management.py:209`), so a definition written with every default is read back byte-equal. Presets render from
-  the call context and are coerced to their type (`api/services/workflow/tools/custom_tool.py:173-275`); `workflow_run_id` is
-  run-owned and cannot come from outside (`api/services/workflow/initial_context.py:10-21`, `run_pipeline.py:693`). The result reaches
+  start message plays when the tool call begins, a delayed one `after_ms` after that start and only while the request is still
+  running, and both stop when the result arrives (`api/services/workflow/tool_messages.py:97-124`, `tool_execution.py`). Dograh
+  stores `definition.model_dump()` (`api/services/tool_management.py:209`), so a definition written with every default is read back
+  byte-equal. Presets render from the call context and are coerced to their type (`api/services/workflow/tools/custom_tool.py:173-275`),
+  but they are only fallbacks: the model's arguments override them (`:432`) and, with no `body_template`, are the request body
+  (`:473-474`), so a preset alone does not keep a value away from the model. A `body_template` sends only its own keys, rendered with
+  the run's `initial_context` and `gathered_context` laid over the arguments (`:476-482`); a value that is one whole placeholder keeps
+  its type (`:278-295`). `initial_context.workflow_run_id` is the run's own id: Dograh sets it from the run row
+  (`api/services/pipecat/run_pipeline.py:693`; text chat `api/services/workflow/text_chat_runner.py:557-560`) and drops it from any
+  external context (`api/services/workflow/initial_context.py:10-21`, applied to the pre-call fetch at `event_handlers.py:159`). The
+  caller-work tools therefore carry the id only in their body template (`workflows/README.md`, Caller memory). The result reaches
   the model as `{"status", "status_code", "data"}`, an HTTP error as `status: error` (`custom_tool.py:497-600`).
 - **Tool-call recovery (#920, #926, #945).** When the model writes a tool call as spoken text, voice calls now recover and run it
   and keep control text out of speech (`api/services/pipecat/spoken_tool_call_guard.py:1-10`). Text chat does not
