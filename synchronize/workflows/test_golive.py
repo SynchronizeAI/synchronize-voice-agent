@@ -12,9 +12,10 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -100,6 +101,7 @@ class FakeDograh(ThreadingHTTPServer):
         self.api_key, self.secret = uuid4().hex, uuid4().hex
         self.credential_uuid = str(uuid4())
         self.tool_uuid = str(uuid4())
+        self.transfer_uuid = str(uuid4())
         self.credentials, self.calls, self.published = [], [], 0
         self.tools = []
         self.wrong_status = 401
@@ -108,6 +110,9 @@ class FakeDograh(ThreadingHTTPServer):
         self.completion_result = {}
         self.tool_route_status, self.tool_route_wrong_status = 200, 401
         self.tool_route_result = {"known": False}
+        # Synchronize refuses an unknown run with a 4xx; a missing route is 404 for both secrets.
+        self.transfer_status, self.transfer_wrong_status = 422, 401
+        self.transfer_result = {"detail": "refused"}
         self.credential_error = False
         self.drift = None
         self.redirect = False
@@ -143,6 +148,7 @@ class FakeDograh(ThreadingHTTPServer):
             }
         )
         self.spec = golive.tool_spec("HEAD", lang)
+        self.transfer = golive.transfer_spec("HEAD", lang)
         self.old_settings = golive.settings_template("940fdef", lang)
         self.new_settings = golive.settings_template("HEAD", lang)
         self.tools.clear()
@@ -168,9 +174,12 @@ class FakeDograh(ThreadingHTTPServer):
         self.released = copy.deepcopy(self.workflow)
         self.original = copy.deepcopy(self.workflow)
 
-    def expected(self):
+    def expected(self, with_transfer=False):
         # Independent oracle: replace changed template fields, keep all local
         # additions. No production patch/diff functions determine expected text.
+        # Without --with-transfer the template's transfer reference is never published.
+        transfer = self.transfer["placeholder_uuid"] if self.transfer else None
+        refs = {self.spec["placeholder_uuid"]: self.tool_uuid, transfer: self.transfer_uuid}
         out = copy.deepcopy(self.original["workflow_definition"])
         for old in self.old["nodes"]:
             new = next(n for n in self.new["nodes"] if n["id"] == old["id"])
@@ -182,8 +191,9 @@ class FakeDograh(ThreadingHTTPServer):
                         node["data"][field] += "\nLOCAL CUSTOM LINE: keep this exactly."
                     if field == "tool_uuids":
                         node["data"][field] = [
-                            self.tool_uuid if ref == self.spec["placeholder_uuid"] else ref
+                            refs.get(ref, ref)
                             for ref in node["data"][field]
+                            if with_transfer or ref != transfer
                         ]
         for old in self.old["edges"]:
             new = next(e for e in self.new["edges"] if e["id"] == old["id"])
@@ -210,16 +220,24 @@ class FakeDograh(ThreadingHTTPServer):
         )
         return tool
 
-    def add_tool(self, **changes):
+    def expected_transfer(self):
+        tool = copy.deepcopy(self.transfer["tool"])
+        tool["definition"]["config"]["resolver"].update(
+            url=self.runtime + "/api/voice/tools/transfer",
+            credential_uuid=self.credential_uuid,
+        )
+        return tool
+
+    def add_tool(self, transfer=False, **changes):
         """An existing live tool, by default identical to the planned one."""
         tool = {
             "id": len(self.tools) + 1,
-            "tool_uuid": self.tool_uuid,
+            "tool_uuid": self.transfer_uuid if transfer else self.tool_uuid,
             "status": "active",
             "created_at": "2026-11-01T00:00:00Z",
             "updated_at": None,
             "created_by": None,
-            **self.expected_tool(),
+            **(self.expected_transfer() if transfer else self.expected_tool()),
         }
         tool.update(changes)
         self.tools.append(tool)
@@ -256,6 +274,13 @@ class Handler(BaseHTTPRequestHandler):
                 if completion else (200 if valid else fake.wrong_status),
                 (fake.completion_result if completion else fake.probe_result)
                 if valid else {"echo": fake.secret},
+            )
+            return
+        if self.path == "/api/voice/tools/transfer":
+            valid = self.headers.get("X-Dograh-Secret") == fake.secret
+            self.reply(
+                fake.transfer_status if valid else fake.transfer_wrong_status,
+                fake.transfer_result if valid else {"echo": fake.secret},
             )
             return
         if self.path == "/api/voice/tools/caller-work":
@@ -299,7 +324,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST" and not ident:
                 match = {
                     "id": len(fake.tools) + 1,
-                    "tool_uuid": fake.tool_uuid,
+                    "tool_uuid": fake.transfer_uuid
+                    if body.get("category") == "transfer_call"
+                    else fake.tool_uuid,
                     "status": "active",
                     "created_at": "2026-11-08T00:00:00Z",
                     "updated_at": None,
@@ -531,9 +558,23 @@ class GoLiveTests(unittest.TestCase):
                 for field in golive.TOOL_FIELDS:
                     self.assertEqual(tool[field], self.fake.expected_tool()[field])
                 self.assertIn(f"tool lookup_caller_work_{lang}: create", out)
+                # Live transfer is gated: the English template carries it, go-live leaves it out.
+                self.assertEqual(
+                    "tool transfer_to_owner_en: skipped" in out, lang == "en"
+                )
+                refs = [
+                    ref
+                    for node in self.fake.workflow["workflow_definition"]["nodes"]
+                    for ref in node["data"].get("tool_uuids") or []
+                ]
+                self.assertNotIn(self.fake.transfer_uuid, refs)
+                self.assertFalse(any(ref.startswith(golive.PLACEHOLDER_UUID_PREFIX) for ref in refs))
                 self.assertIn("settings.call_dispositions: template-replaced; codes", out)
+                # The English line also lists the outcome a connected transfer records.
                 self.assertIn(
-                    "+ quote_request, booking_request, message, done, spam, wrong_number\n", out
+                    "+ quote_request, booking_request, message, done, spam, wrong_number"
+                    + (", transferred\n" if lang == "en" else "\n"),
+                    out,
                 )
                 self.assertIn("node 1.data.extraction_variables: template-replaced", out)
                 self.assertIn("node 1.data.tool_uuids" if lang == "en" else "node 2.data.tool_uuids", out)
@@ -1536,9 +1577,183 @@ class GoLiveTests(unittest.TestCase):
             self.assertIn("Wrong-secret tools/caller-work probe", err)
         self.assertFalse(any(c[1].startswith("/api/v1/") for c in self.fake.calls))
 
+    def node_refs(self, node_id="1"):
+        return golive.nodes(self.fake.workflow["workflow_definition"])[node_id]["data"]["tool_uuids"]
+
+    def test_with_transfer_creates_attaches_and_reads_back_both_tools(self):
+        out, _ = self.run_cli(["plan", *self.args("--with-transfer")])
+        self.assertEqual(self.writes(), [])
+        self.assertIn("tool transfer_to_owner_en: create (route /api/voice/tools/transfer; credential reference only)", out)
+        (path,) = self.backups.glob("*.json")
+        self.assertEqual(
+            json.loads(path.read_text())["tools"],
+            {"lookup_caller_work_en": None, "transfer_to_owner_en": None},
+        )
+        out, _ = self.run_cli(self.args("--apply", "--with-transfer"))
+        self.assertEqual(
+            [(c[0], c[1]) for c in self.writes()],
+            [
+                ("POST", "/api/v1/credentials/"),
+                ("POST", "/api/v1/tools/"),
+                ("POST", "/api/v1/tools/"),
+                ("PUT", "/api/v1/workflow/3"),
+                ("POST", "/api/v1/workflow/3/publish"),
+            ],
+        )
+        self.assertEqual(self.fake.workflow["workflow_definition"], self.fake.expected(with_transfer=True))
+        # The End Call tools stay; the lookup, then the transfer, are added to the Reception node.
+        self.assertEqual(self.node_refs()[-2:], [self.fake.tool_uuid, self.fake.transfer_uuid])
+        transfer = next(t for t in self.fake.tools if t["tool_uuid"] == self.fake.transfer_uuid)
+        for field in golive.TOOL_FIELDS:
+            self.assertEqual(transfer[field], self.fake.expected_transfer()[field])
+        resolver = transfer["definition"]["config"]["resolver"]
+        self.assertEqual(resolver["url"], self.fake.runtime + "/api/voice/tools/transfer")
+        self.assertEqual(resolver["credential_uuid"], self.fake.credential_uuid)
+        self.assertEqual(transfer["definition"]["config"]["timeout"], 18)
+        self.assertIn(("GET", f"/api/v1/tools/{self.fake.transfer_uuid}", None), self.fake.calls)
+        # Again with the flag: nothing to write.
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply", "--with-transfer"))
+        self.assertIn("Already wired", out)
+        self.assertIn("tool transfer_to_owner_en: unchanged", out)
+        self.assertEqual(self.writes(), [])
+        # Without the flag later: the attached transfer stays as it is, neither updated nor removed.
+        self.fake.calls.clear()
+        out, _ = self.run_cli(self.args("--apply"))
+        self.assertIn("tool transfer_to_owner_en: skipped", out)
+        self.assertIn("Already wired", out)
+        self.assertEqual(self.writes(), [])
+        self.assertIn(self.fake.transfer_uuid, self.node_refs())
+
+    def test_rollback_after_with_transfer_drops_the_reference_and_keeps_the_tool(self):
+        self.run_cli(self.args("--apply", "--with-transfer"))
+        (path,) = self.backups.glob("*.json")
+        self.fake.calls.clear()
+        out, _ = self.run_cli(["--rollback", str(path)])
+        self.assertIn("tool transfer_to_owner_en: did not exist at backup time; retained", out)
+        self.assertEqual(
+            self.fake.workflow["workflow_definition"], self.fake.original["workflow_definition"]
+        )
+        self.assertNotIn(self.fake.transfer_uuid, self.node_refs())
+        _, err = self.run_cli(["--rollback", str(path), "--with-transfer"], expected=1)
+        self.assertIn("--with-transfer is only for plan/apply/probe", err)
+
+    def test_with_transfer_is_refused_for_the_korean_line_before_any_request(self):
+        self.fake.select("ko")
+        self.fake.calls.clear()
+        _, err = self.run_cli(["plan", *self.args("--with-transfer")], expected=1)
+        self.assertIn("live transfer is for the English US line only", err)
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(self.backups.exists())
+
+    def test_a_failed_transfer_create_names_each_tool_in_the_recovery(self):
+        posts = []
+
+        def second_tool_post(method, path):
+            if method == "POST" and path == "/api/v1/tools/":
+                posts.append(path)
+                return len(posts) == 2
+            return False
+
+        self.fake.failure = second_tool_post
+        _, err = self.run_cli(self.args("--apply", "--with-transfer"), expected=1)
+        self.assertIn("failed stage: tool create", err)
+        self.assertIn("tool: lookup_caller_work_en created, transfer_to_owner_en unchanged", err)
+        self.assertIn("No workflow rollback needed", err)
+        self.assertEqual(self.fake.workflow, self.fake.original)
+
+    def test_an_edited_transfer_tool_needs_acceptance_and_a_moved_runtime_is_wiring(self):
+        self.add_credential()
+        self.fake.add_tool()
+        edited = self.fake.expected_transfer()
+        edited["definition"]["config"]["timeout"] = 60
+        self.fake.add_tool(transfer=True, definition=edited["definition"])
+        out, _ = self.run_cli(["plan", *self.args("--with-transfer")])
+        self.assertIn(
+            "tool transfer_to_owner_en: update definition.config.timeout (REPLACES-CUSTOM; values withheld)", out
+        )
+        _, err = self.run_cli(self.args("--apply", "--with-transfer"), expected=1)
+        self.assertIn("--accept-merged tool.transfer_to_owner_en", err)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(
+            self.args("--apply", "--with-transfer", accept_merged=("node 4.data.prompt", "tool.transfer_to_owner_en"))
+        )
+        transfer = next(t for t in self.fake.tools if t["tool_uuid"] == self.fake.transfer_uuid)
+        self.assertEqual(transfer["definition"]["config"]["timeout"], 18)
+        spec = self.fake.transfer
+        planned = golive.planned_tool(spec, self.fake.runtime, self.fake.credential_uuid)
+        moved = golive.planned_tool(spec, "https://voice.example.test", str(uuid4()))
+        self.assertEqual(golive.tool_mode(moved, None, planned), "wiring")
+        golive.validate_tool(planned, self.fake.runtime, self.fake.credential_uuid)
+        with self.assertRaisesRegex(golive.GoLiveError, "Tool wiring"):
+            golive.validate_tool(moved, self.fake.runtime, self.fake.credential_uuid)
+
+    def test_a_transfer_template_that_rings_too_long_or_can_be_steered_is_refused(self):
+        good = self.fake.transfer
+        golive.check_transfer(good)
+
+        def broken(change):
+            spec = copy.deepcopy(good)
+            change(spec["tool"]["definition"]["config"])
+            return spec
+
+        for label, change in (
+            ("Dograh's 60 s default ring", lambda c: c.pop("timeout")),
+            ("a ring into voicemail", lambda c: c.update(timeout=30)),
+            ("no run id preset", lambda c: c["resolver"].update(preset_parameters=None)),
+            ("a run id the model gives", lambda c: c["resolver"]["parameters"].append(
+                {"name": "workflow_run_id", "type": "string", "description": "", "required": True})),
+            ("a static number", lambda c: c.update(destination_source="static", destination="+12025550100")),
+            ("no outcome", lambda c: c.update(call_disposition=None)),
+            ("no briefing", lambda c: c.update(introduction_enabled=False)),
+        ):
+            with self.subTest(label):
+                with self.assertRaisesRegex(golive.GoLiveError, "Transfer template must"):
+                    golive.check_transfer(broken(change))
+
+    def test_transfer_probe_needs_a_refusal_with_the_secret_and_401_without(self):
+        args = [
+            "probe", "--runtime-origin", self.fake.runtime,
+            "--to-number", "+12025550199", "--workflow-id", "3", "--with-transfer",
+        ]
+        out, _ = self.run_cli(args)
+        self.assertEqual(out.split(), ["200", "401", "200", "401", "200", "401", "422", "401"])
+        # The body 1.51 sends: the reason, and the run id preset rendered as text.
+        bodies = [c[2] for c in self.fake.calls if c[1] == "/api/voice/tools/transfer"]
+        self.assertEqual(bodies, [{"workflow_run_id": "2147483647", "reason": "person"}] * 2)
+        for status, wrong, body, message in (
+            (404, 404, {}, "Wrong-secret tools/transfer probe"),
+            (200, 401, {"transfer_context": {"destination": "+12025550123"}}, "Authenticated tools/transfer probe"),
+            (401, 401, {}, "Authenticated tools/transfer probe"),
+            (503, 401, {}, "Authenticated tools/transfer probe"),
+            (422, 200, {}, "Wrong-secret tools/transfer probe"),
+        ):
+            with self.subTest(status=status, wrong=wrong):
+                self.fake.transfer_status, self.fake.transfer_wrong_status = status, wrong
+                self.fake.transfer_result = body
+                _, err = self.run_cli(args, expected=1)
+                self.assertIn(message, err)
+        _, err = self.run_cli([*args[:-2], "1", "--with-transfer"], expected=1)
+        self.assertIn("workflow 3", err)
+        # Without the flag the transfer route is never probed.
+        self.fake.calls.clear()
+        self.run_cli(args[:-1])
+        self.assertFalse(any(c[1] == "/api/voice/tools/transfer" for c in self.fake.calls))
+        self.assertFalse(any(c[1].startswith("/api/v1/") for c in self.fake.calls))
+
     def test_committed_tool_and_settings_follow_the_contract(self):
-        codes = ["quote_request", "booking_request", "message", "done", "spam", "wrong_number"]
+        six = ["quote_request", "booking_request", "message", "done", "spam", "wrong_number"]
+        facts = {"service_area", "pricing_policy", "open_now", "hours_today", "next_open"}
+        # Call variables each line's prompts may read: Korean gets business facts and hours only.
+        variables = {
+            "ko": {"business_name", "caller_name", *facts},
+            "en": {
+                "business_name", "caller_name", *facts,
+                "transfer_available", "urgent_transfer_available", "urgent_examples",
+            },
+        }
         for lang, node_id in (("ko", "2"), ("en", "1")):
+            codes = six + (["transferred"] if lang == "en" else [])
             spec = golive.tool_spec("HEAD", lang)
             config = spec["tool"]["definition"]["config"]
             self.assertEqual(config["method"], "POST")
@@ -1589,14 +1804,17 @@ class GoLiveTests(unittest.TestCase):
             # Pre-call carries the caller's name only; every prompt variable has a fallback.
             text = json.dumps(definition, ensure_ascii=False)
             self.assertNotIn("caller_history", text)
+            seen = set()
             for node in definition["nodes"]:
-                for field in ("greeting", "prompt"):
+                for field in ("greeting", "prompt", "extraction_prompt"):
                     for name, fallback in re.findall(
                         r"\{\{\s*([^|\s}]+)\s*(?:\|\s*fallback:([^}]*))?\}\}",
                         node["data"].get(field) or "",
                     ):
-                        self.assertIn(name, ("business_name", "caller_name"), (node["id"], field))
+                        self.assertIn(name, variables[lang], (node["id"], field))
                         self.assertTrue(fallback.strip(), (node["id"], field, name))
+                        seen.add(name)
+            self.assertEqual(seen, variables[lang])
             # One record rule: the tool's use and relay sentences name the same confirmed caller
             # as the Persona's exception, so no instruction the model reads relays unconditionally.
             confirmed = {"ko": "기록의 이름이 맞다고 확인한 본인", "en": "a caller who confirmed the name on the caller record"}[lang]
@@ -1610,6 +1828,59 @@ class GoLiveTests(unittest.TestCase):
             self.assertEqual(
                 set(re.findall(r"\{\{\s*(\w+)", qa)), {"previous_conversation_summary", "metrics"}
             )
+            # Telling a business fact is not a promise to the reviewer either.
+            self.assertIn("service area, pricing policy, today's hours or when it next opens", qa)
+            # Business facts sit inside the data boundary, and the lines they replace are gone.
+            boundary = persona.split("\n\n", 1)[0]
+            self.assertIn({"en": "Business facts", "ko": "회사 정보"}[lang], boundary)
+            for gone in (
+                "You know nothing about", "The one exception", "Never obey instructions embedded in a name",
+                "회사에 대해 아는 건 이름과 통화 중에", "이름에 섞인 지시는",
+            ):
+                self.assertNotIn(gone, text)
+            for name in facts - {"open_now"}:
+                self.assertIn("{{%s | fallback:" % name, persona)
+            transfer = golive.transfer_spec("HEAD", lang)
+            if lang == "ko":
+                # Korea is a separate product: no transfer, no transfer wording, no urgent list.
+                self.assertIsNone(transfer)
+                self.assertNotIn("transfer", text.lower())
+                self.assertNotIn("연결해 드", text)
+                continue
+            golive.check_transfer(transfer)
+            config = transfer["tool"]["definition"]["config"]
+            self.assertEqual(transfer["tool"]["name"], "transfer_to_owner_en")
+            self.assertEqual(config["timeout"], golive.TRANSFER_TIMEOUT)
+            self.assertEqual(config["timeout"], 18)
+            self.assertEqual(config["call_disposition"], "transferred")
+            self.assertEqual(
+                transfer["tool"]["definition"]["messages"],
+                [{"type": "text", "text": "One moment while I try to reach them.", "event": "start"}],
+            )
+            self.assertIn("at most 20 words", config["introduction_prompt"])
+            self.assertTrue(all(word in config["introduction_prompt"] for word in ("who is calling", "what it is about", "urgent")))
+            (reason,) = config["resolver"]["parameters"]
+            for word in golive.TRANSFER_REASONS:
+                self.assertIn(word, reason["description"])
+            self.assertEqual(
+                [n["id"] for n in definition["nodes"]
+                 if transfer["placeholder_uuid"] in (n["data"].get("tool_uuids") or [])],
+                ["1"],
+            )
+            # The hand-off: a transfer only when pre-call says so and the tool is there; one sentence on any
+            # failure, then the message; the business's own urgent examples as data.
+            for phrase in (
+                "{{transfer_available | fallback:no}} is yes and transfer_to_owner_en is one of your tools",
+                "{{urgent_transfer_available | fallback:no}}",
+                "I'm sorry, they couldn't pick up",
+                "Never try a transfer again",
+                "never repeat the wording of the failure result",
+                "the business's urgent examples",
+            ):
+                self.assertIn(phrase, persona)
+            # Dograh's own failure texts are never quoted to the model (they are what it must not repeat).
+            for builtin in ("Please contact support", "Please try calling back later"):
+                self.assertNotIn(builtin, text)
 
     @unittest.skipUnless(
         importlib.util.find_spec("pydantic"), "pydantic is needed to load Dograh's schemas"
@@ -1623,11 +1894,13 @@ class GoLiveTests(unittest.TestCase):
         ), patch.object(sys, "path", [str(golive.ROOT), *sys.path]):
             from api.schemas.tool import CreateToolRequest
             from api.schemas.workflow_configurations import WorkflowConfigurationDefaults
-        for lang in ("ko", "en"):
-            tool = golive.tool_spec("HEAD", lang)["tool"]
+        tools = [golive.tool_spec("HEAD", lang)["tool"] for lang in ("ko", "en")]
+        tools.append(golive.transfer_spec("HEAD", "en")["tool"])
+        for tool in tools:
             parsed = CreateToolRequest.model_validate(tool)
             # Dograh stores definition.model_dump(); read-back equality needs it canonical.
             self.assertEqual(parsed.definition.model_dump(), tool["definition"])
+        for lang in ("ko", "en"):
             settings = golive.settings_template("HEAD", lang)
             self.assertEqual(
                 WorkflowConfigurationDefaults.model_validate(settings).model_dump(
@@ -1641,6 +1914,7 @@ class GoLiveTests(unittest.TestCase):
 DOGRAH_151_BLOBS = {
     "api/utils/template_renderer.py": "426d4afd95384b3238f61a3144cdd9538ce1d9ab",
     "api/services/workflow/tools/custom_tool.py": "7971f34661ae35f00faa6ffebd8f1faa66d55ddc",
+    "api/services/workflow/tools/transfer_resolver.py": "902fb6d8651fe3885d663858360aafb5513d0ce0",
 }
 
 
@@ -1665,9 +1939,19 @@ class _Response:
         return {"known": False}
 
 
+class _TransferResponse:
+    """A resolver answer in the shape 1.51 reads (transfer_resolver.py:367-402)."""
+
+    status_code = 200
+    text = "{}"
+
+    def json(self):
+        return {"transfer_context": {"destination": "+12025550123"}}
+
+
 class _Client:
-    def __init__(self, sent, **kwargs):
-        self.sent = sent
+    def __init__(self, sent, response=None, **kwargs):
+        self.sent, self.response = sent, response
 
     async def __aenter__(self):
         return self
@@ -1677,7 +1961,7 @@ class _Client:
 
     async def request(self, **kwargs):
         self.sent.append(kwargs)
-        return _Response()
+        return self.response or _Response()
 
 
 def dograh_151_module(path, namespace):
@@ -1695,9 +1979,47 @@ def dograh_151_module(path, namespace):
             or isinstance(node, ast.Import) and node.names[0].name == "httpx"
         )
     ]
-    module = dict(namespace)
-    exec(compile(tree, path, "exec"), module)
-    return module
+    # A registered module: dataclasses read their module's namespace (transfer_resolver.py).
+    module = ModuleType("dograh_151_" + Path(path).stem)
+    module.__dict__.update(namespace)
+    with patch.dict(sys.modules, {module.__name__: module}):
+        exec(compile(tree, path, "exec"), module.__dict__)
+    return module.__dict__
+
+
+def dograh_151_tools(httpx):
+    """1.51's template renderer and custom_tool.py, with the network replaced by httpx."""
+    quiet = _Anything()
+    renderer = dograh_151_module("api/utils/template_renderer.py", {"logger": quiet})
+    tools = dograh_151_module(
+        "api/services/workflow/tools/custom_tool.py",
+        {
+            "httpx": httpx,
+            "logger": quiet,
+            **{
+                name: _Anything()
+                for name in (
+                    "db_client", "DograhFailure", "ErrorSource", "ErrorType",
+                    "classify_exception", "classify_http_response", "log_failure",
+                    "mask_key", "build_auth_header", "validate_user_configured_service_url",
+                )
+            },
+            "redact_failure_message": lambda text: text,
+            **{
+                name: renderer[name]
+                for name in ("get_nested_value", "render_template", "render_url_template")
+            },
+        },
+    )
+    return renderer, tools
+
+
+def fake_httpx(sent, response=None):
+    return SimpleNamespace(
+        AsyncClient=lambda **kwargs: _Client(sent, response=response, **kwargs),
+        TimeoutException=type("TimeoutException", (Exception,), {}),
+        RequestError=type("RequestError", (Exception,), {}),
+    )
 
 
 class LookupToolBodyTests(unittest.TestCase):
@@ -1709,34 +2031,8 @@ class LookupToolBodyTests(unittest.TestCase):
     """
 
     def setUp(self):
-        quiet = _Anything()
-        renderer = dograh_151_module("api/utils/template_renderer.py", {"logger": quiet})
         self.sent = []
-        httpx = SimpleNamespace(
-            AsyncClient=lambda **kwargs: _Client(self.sent, **kwargs),
-            TimeoutException=type("TimeoutException", (Exception,), {}),
-            RequestError=type("RequestError", (Exception,), {}),
-        )
-        tool_module = dograh_151_module(
-            "api/services/workflow/tools/custom_tool.py",
-            {
-                "httpx": httpx,
-                "logger": quiet,
-                **{
-                    name: _Anything()
-                    for name in (
-                        "db_client", "DograhFailure", "ErrorSource", "ErrorType",
-                        "classify_exception", "classify_http_response", "log_failure",
-                        "mask_key", "build_auth_header", "validate_user_configured_service_url",
-                    )
-                },
-                "redact_failure_message": lambda text: text,
-                **{
-                    name: renderer[name]
-                    for name in ("get_nested_value", "render_template", "render_url_template")
-                },
-            },
-        )
+        _, tool_module = dograh_151_tools(fake_httpx(self.sent))
         self.execute = tool_module["execute_http_tool"]
 
     def call(self, definition, arguments, context):
@@ -1794,6 +2090,102 @@ class LookupToolBodyTests(unittest.TestCase):
                 )
                 self.assertEqual(request["json"], {"workflow_run_id": "4512"})
 
+
+
+class TransferResolverBodyTests(unittest.TestCase):
+    """The resolver request Dograh 1.51 builds from this checkout's transfer template.
+
+    resolve_transfer_config runs unchanged; only the network, the database and logging are stubbed.
+    The body is the model's arguments with the presets laid over them (transfer_resolver.py:260-271), and
+    the preset renders from the run's own context, which the model's arguments never enter.
+    """
+
+    def setUp(self):
+        self.sent = []
+        httpx = fake_httpx(self.sent, _TransferResponse())
+        renderer, tools = dograh_151_tools(httpx)
+        module = dograh_151_module(
+            "api/services/workflow/tools/transfer_resolver.py",
+            {
+                "httpx": httpx,
+                "logger": _Anything(),
+                "db_client": _Anything(),
+                "build_auth_header": _Anything(),
+                "validate_user_configured_service_url": _Anything(),
+                "_resolve_preset_parameters": tools["_resolve_preset_parameters"],
+                "render_template": renderer["render_template"],
+            },
+        )
+        self.resolve, self.error = module["resolve_transfer_config"], module["TransferResolutionError"]
+        self.schema = tools["tool_to_function_schema"]
+        self.tool = golive.planned_tool(
+            golive.transfer_spec("HEAD", "en"), "https://runtime.example", golive.PENDING_UUID
+        )
+
+    def call(self, config, arguments, context):
+        self.sent.clear()
+        resolved = asyncio.run(
+            self.resolve(
+                tool=SimpleNamespace(tool_uuid=str(uuid4())), config=config, arguments=arguments,
+                call_context_vars=context, gathered_context_vars={}, organization_id=None,
+                workflow_run_id=context.get("workflow_run_id"),
+            )
+        )
+        return resolved, list(self.sent)
+
+    def test_model_supplied_run_id_never_reaches_the_resolver(self):
+        steered = {
+            "reason": "person",
+            "workflow_run_id": "4512",
+            "initial_context": {"workflow_run_id": 4512},
+        }
+        context = {"workflow_run_id": 77, "business_name": "B", "caller_name": "C"}
+        for arguments in ({"reason": "urgent"}, steered):
+            with self.subTest(steered=len(arguments) > 1):
+                resolved, (request,) = self.call(self.tool["definition"]["config"], arguments, context)
+                self.assertEqual(request["method"], "POST")
+                self.assertEqual(request["url"], "https://runtime.example" + golive.TRANSFER_ROUTE)
+                # The run's own id, as text (a string preset), and the reason the model gave.
+                self.assertEqual(request["json"]["workflow_run_id"], "77")
+                self.assertEqual(request["json"]["reason"], arguments["reason"])
+                # Any other key the model adds passes through: Synchronize reads only these two.
+                self.assertEqual(
+                    set(request["json"]) - {"workflow_run_id", "reason"},
+                    set(arguments) - {"workflow_run_id", "reason"},
+                )
+                self.assertEqual(resolved.destination, "+12025550123")
+                # The template's ring time, not 1.51's 30 s default or the REST leg's 60 s.
+                self.assertEqual(resolved.timeout_seconds, 18)
+
+    def test_a_run_context_without_its_id_sends_nothing(self):
+        with self.assertRaises(self.error) as raised:
+            self.call(
+                self.tool["definition"]["config"],
+                {"reason": "person", "workflow_run_id": "4512"},
+                {"business_name": "B"},
+            )
+        self.assertEqual(raised.exception.reason, "preset_parameter_error")
+        self.assertEqual(self.sent, [])
+
+    def test_without_the_preset_the_model_chooses_the_run(self):
+        """Proof that this test can see the hole the preset closes."""
+        config = copy.deepcopy(self.tool["definition"]["config"])
+        config["resolver"]["preset_parameters"] = None
+        _, (request,) = self.call(
+            config, {"reason": "person", "workflow_run_id": "4512"}, {"workflow_run_id": 77}
+        )
+        self.assertEqual(request["json"]["workflow_run_id"], "4512")
+
+    def test_the_model_fills_only_the_reason(self):
+        schema = self.schema(
+            SimpleNamespace(
+                name=self.tool["name"], description=self.tool["description"],
+                definition=self.tool["definition"], tool_uuid=str(uuid4()),
+            )
+        )["function"]
+        self.assertEqual(schema["name"], "transfer_to_owner_en")
+        self.assertEqual(set(schema["parameters"]["properties"]), {"reason"})
+        self.assertEqual(schema["parameters"]["required"], ["reason"])
 
 
 if __name__ == "__main__":

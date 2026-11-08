@@ -24,6 +24,10 @@
       {
         "code": "wrong_number",
         "description": "The caller meant to reach someone else, or said they dialed by mistake and had nothing to pass on."
+      },
+      {
+        "code": "transferred",
+        "description": "The phone system records this itself when the call was connected to the owner. Never choose it: a call that was not connected keeps one of the outcomes above, also after a transfer that failed."
       }
     ],
     "turn_stop_strategy": "turn_analyzer",
