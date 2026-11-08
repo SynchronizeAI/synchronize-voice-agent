@@ -31,18 +31,18 @@ class FakeChat(ThreadingHTTPServer):
         ]
 
 
-def disposition(lines):
+def outcome(lines):
+    """The fake classifier: a code, and the separate urgent flag."""
     text = " ".join(lines)
     for words, code in (
-        (("천장", "ceiling"), "urgent"),
-        (("들뜨", "peeling"), "complaint"),
+        (("천장", "ceiling"), "booking_request"),
         (("대출", "card processing"), "spam"),
         (("중국집", "pizza"), "wrong_number"),
         (("견적 좀", "a quote for"), "quote_request"),
     ):
         if any(word in text for word in words):
-            return code
-    return "message"
+            return code, code == "booking_request"
+    return "message", False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -128,10 +128,6 @@ class Handler(BaseHTTPRequestHandler):
                 events.append({"type": "tool_call_started", "payload": {"function_name": tool}})
                 events.append({"type": "tool_call_result", "payload": {"function_name": tool, "result": {"status": "success", "data": {"known": False}}}})
                 reply = "기록에서 찾지 못해 담당자가 확인해서 연락드리겠습니다."
-            elif len(session["lines"]) == 2 and name and (
-                "여쭤볼" in session["lines"][0] or "a question" in session["lines"][0]
-            ):
-                reply = "거실 도배 견적서 건으로 전화 주셨어요?"
             else:
                 reply = "네."
             events.append({"type": "bot_speech", "payload": {"text": reply}})
@@ -139,8 +135,10 @@ class Handler(BaseHTTPRequestHandler):
             session["revision"] += 1
         if parts[-1] == "end" or len(session["lines"]) >= 4:
             session["is_completed"] = True
-            code = disposition(session["lines"])
-            session["gathered_context"] = {"call_disposition": code, "mapped_call_disposition": code}
+            code, urgent = outcome(session["lines"])
+            session["gathered_context"] = {
+                "call_disposition": code, "mapped_call_disposition": code, "urgent": urgent,
+            }
             name = session["initial_context"].get("caller_name")
             if name:
                 session["gathered_context"]["customer_name"] = name
@@ -196,20 +194,31 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual(
                 set(cases),
                 {
-                    "known_caller_greeting", "known_caller_open_matter", "known_caller_quote_status",
+                    "known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status",
                     "unknown_caller_quote_status",
                     "outcome_quote_request", "outcome_urgent_leak", "outcome_complaint",
                     "outcome_sales_call", "outcome_wrong_number",
                 },
             )
+            outcomes = {
+                case: (tuple(c["expected"]["dispositions"]), c["expected"]["urgent"])
+                for case, c in cases.items() if c["expected"]["dispositions"]
+            }
             self.assertEqual(
-                {c["expected"]["disposition"] for c in cases.values()} - {None},
-                {"quote_request", "urgent", "complaint", "spam", "wrong_number"},
+                outcomes,
+                {
+                    "outcome_quote_request": (("quote_request",), False),
+                    "outcome_urgent_leak": (("booking_request", "message"), True),
+                    "outcome_complaint": (("message",), False),
+                    "outcome_sales_call": (("spam",), False),
+                    "outcome_wrong_number": (("wrong_number",), False),
+                },
             )
-            self.assertEqual(
-                set(cases["known_caller_greeting"]["initial_context"]),
-                {"business_name", "caller_name", "caller_history"},
-            )
+            self.assertTrue({code for codes, _ in outcomes.values() for code in codes} <= set(scenarios_caller.CODES))
+            # Pre-call carries the known caller's name only (amendment A1, section 1).
+            for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status"):
+                self.assertEqual(set(cases[case]["initial_context"]), {"business_name", "caller_name"})
+            self.assertIs(cases["known_caller_no_detail"]["expected"]["tool_called"], False)
             self.assertEqual(set(cases["unknown_caller_quote_status"]["initial_context"]), {"business_name"})
         self.assertEqual(self.fake.calls, [])
 
@@ -233,13 +242,16 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(report["errors"], 0)
         self.assertEqual(report["objective_passed"], 9)
         cases = report["cases"]
-        for case in ("known_caller_greeting", "known_caller_open_matter", "known_caller_quote_status"):
-            for check in ("name_in_first_reply", "no_record_before_confirmation", "customer_name_confirmed"):
+        for case in ("known_caller_greeting", "known_caller_no_detail", "known_caller_quote_status"):
+            for check in ("name_in_first_reply", "customer_name_confirmed"):
                 self.assertEqual(cases[case]["checks"][check], 1, (case, check))
-        self.assertEqual(cases["known_caller_open_matter"]["checks"]["open_matter_after_confirmation"], 1)
+        self.assertEqual(cases["known_caller_no_detail"]["checks"]["tool_not_called"], 1)
         self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_called"], 1)
         self.assertEqual(cases["known_caller_quote_status"]["checks"]["tool_after_confirmation"], 1)
-        self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"urgent": 1})
+        self.assertEqual(cases["outcome_urgent_leak"]["dispositions"], {"booking_request": 1})
+        self.assertEqual(cases["outcome_complaint"]["dispositions"], {"message": 1})
+        for case in scenarios_caller.EXPECTED_OUTCOME:
+            self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
         (workflow_id,) = self.fake.workflows
         workflow = self.fake.workflows[workflow_id]
         self.assertEqual(workflow["status"], "archived")
@@ -270,15 +282,17 @@ class CallerScenariosTest(unittest.TestCase):
             return {"user_message": {"text": "x"}, "events": [*events, {"type": "bot_speech", "payload": {"text": text}}]}
 
         graded = scenarios_caller.grade(
-            case, opening, [turn("거실 도배 건이시죠, 홍길동님 맞으세요?")], confirmed, "lookup_caller_work_ko"
+            case, opening, [turn("홍길동님 맞으세요?")], confirmed, "lookup_caller_work_ko"
         )
         self.assertTrue(graded["checks"]["customer_name_confirmed"])
-        self.assertFalse(graded["checks"]["no_record_before_confirmation"])
-        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_open_matter")
+        self.assertTrue(graded["passed"])
+        # A known caller is greeted by name only: a lookup nobody asked for fails.
+        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "known_caller_no_detail")
+        lookup = {"type": "tool_call_started", "payload": {"function_name": "lookup_caller_work_ko"}}
         graded = scenarios_caller.grade(
-            case, opening, [turn("홍길동님 맞으세요?"), turn("더 말씀해 주시겠어요?")], confirmed, "lookup_caller_work_ko"
+            case, opening, [turn("홍길동님 맞으세요?"), turn("", lookup)], confirmed, "lookup_caller_work_ko"
         )
-        self.assertFalse(graded["checks"]["open_matter_after_confirmation"])
+        self.assertFalse(graded["checks"]["tool_not_called"])
         # The lookup may not run before the caller confirmed the name.
         case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "known_caller_quote_status")
         tool = {"type": "tool_call_started", "payload": {"function_name": "lookup_caller_work_en"}}
@@ -295,6 +309,21 @@ class CallerScenariosTest(unittest.TestCase):
         graded = scenarios_caller.grade(case, opening, [], {"call_disposition": "spam"}, "lookup_caller_work_ko")
         self.assertTrue(graded["passed"])
         self.assertFalse(graded["needs_follow_up"])
+        graded = scenarios_caller.grade(
+            case, opening, [], {"call_disposition": "spam", "urgent": True}, "lookup_caller_work_ko"
+        )
+        self.assertFalse(graded["checks"]["urgent"])
+        # The leak keeps its own code (a visit or a message); only the flag says urgent.
+        case = next(c for c in scenarios_caller.build_cases("ko") if c["case"] == "outcome_urgent_leak")
+        for gathered, passed in (
+            ({"call_disposition": "booking_request", "urgent": True}, True),
+            ({"call_disposition": "message", "urgent": "true"}, True),
+            ({"call_disposition": "booking_request", "urgent": False}, False),
+            ({"call_disposition": "booking_request"}, False),
+            ({"call_disposition": "urgent", "urgent": True}, False),
+        ):
+            graded = scenarios_caller.grade(case, opening, [], gathered, "lookup_caller_work_ko")
+            self.assertEqual(graded["passed"], passed, gathered)
 
     def test_refusals_happen_before_any_write(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "3", "--out", str(self.out), expected=1)

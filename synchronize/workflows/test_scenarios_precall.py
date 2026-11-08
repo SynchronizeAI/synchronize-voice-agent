@@ -37,7 +37,8 @@ class PreCallScenariosTest(unittest.TestCase):
                 "I'm an AI assistant, and this call is recorded.\nHow may I help you?"
             ),
             "ko": (
-                "안녕하세요, {{business_name | fallback:저희 회사}} AI 비서입니다.\n"
+                "안녕하세요, {{business_name | fallback:저희 회사}} AI 비서입니다. "
+                "통화 내용은 녹음되어 담당자에게 전달됩니다.\n"
                 "어떤 일로 전화하셨나요?"
             ),
         }

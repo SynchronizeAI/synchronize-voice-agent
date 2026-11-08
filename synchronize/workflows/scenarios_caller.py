@@ -18,34 +18,22 @@ import unicodedata
 
 import golive
 
-CODES = (
-    "quote_request", "booking_request", "urgent", "complaint",
-    "message", "done", "spam", "wrong_number",
-)
+CODES = ("quote_request", "booking_request", "message", "done", "spam", "wrong_number")
 # Contract: outcomes that leave the owner nothing to do. Everything else needs follow-up.
 NO_FOLLOW_UP = ("done", "spam", "wrong_number")
+# Pre-call gives a known caller's name only; open work comes from the in-call lookup alone.
 KNOWN = {
-    "ko": {
-        "business_name": "테스트 업체",
-        "caller_name": "홍길동",
-        "caller_history": "진행 중: 거실 도배 견적서 보내기 (11월 10일까지)\n현장: 반포 래미안 32평\n최근 연락: 11월 3일",
-    },
-    "en": {
-        "business_name": "BUSINESS_NAME_TEST",
-        "caller_name": "Alex Morgan",
-        "caller_history": "진행 중: 거실 도배 견적서 보내기 (11월 10일까지)\n현장: 반포 래미안 32평\n최근 연락: 11월 3일",
-    },
+    "ko": {"business_name": "테스트 업체", "caller_name": "홍길동"},
+    "en": {"business_name": "BUSINESS_NAME_TEST", "caller_name": "Alex Morgan"},
 }
-# A word only the caller record holds (the caller never says it): naming it proves recall.
-RECORD_WORDS = {"ko": ("도배",), "en": ("wallpaper", "도배")}
 GREETING = {
-    "ko": "안녕하세요, {name} AI 비서입니다.\n어떤 일로 전화하셨나요?",
+    "ko": "안녕하세요, {name} AI 비서입니다. 통화 내용은 녹음되어 담당자에게 전달됩니다.\n어떤 일로 전화하셨나요?",
     "en": "Thank you for calling {name}. I'm an AI assistant, and this call is recorded.\nHow may I help you?",
 }
 LINES = {
     "ko": {
         "known_caller_greeting": ["지난번에 견적 문의했던 건으로 전화드렸어요.", "네, 맞아요.", "견적서 언제쯤 받을 수 있는지 궁금해서요.", "아니요, 그게 다예요."],
-        "known_caller_open_matter": ["여쭤볼 게 있어서 전화드렸어요.", "네, 맞아요.", "네, 그 건이요. 언제쯤 받을 수 있을까요?", "아니요, 그게 다예요."],
+        "known_caller_no_detail": ["여쭤볼 게 있어서 전화드렸어요.", "네, 맞아요.", "욕실 타일 하나가 깨졌는데 바꾸는 데 얼마나 드는지 궁금해요.", "아니요, 그게 다예요."],
         "known_caller_quote_status": ["견적 어떻게 됐어요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
         "unknown_caller_quote_status": ["견적 어떻게 됐어요?", "김서연이요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
         "outcome_quote_request": ["거실 도배 견적 좀 받아 보고 싶어서요.", "김서연이요.", "32평 아파트 거실이에요.", "아니요, 그게 다예요."],
@@ -56,7 +44,7 @@ LINES = {
     },
     "en": {
         "known_caller_greeting": ["Hi, I'm calling about the quote I asked for last time.", "Yes, that's me.", "I was wondering when I'd get the estimate.", "No, that's all."],
-        "known_caller_open_matter": ["Hi, I'm calling with a question.", "Yes, that's me.", "Yes, that one. When will I get it?", "No, that's all."],
+        "known_caller_no_detail": ["Hi, I'm calling with a question.", "Yes, that's me.", "One of my bathroom tiles cracked and I'd like to know what replacing it costs.", "No, that's all."],
         "known_caller_quote_status": ["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
         "unknown_caller_quote_status": ["How's my quote coming along?", "Jamie Lee.", "Okay, thanks.", "No, that's all."],
         "outcome_quote_request": ["Hi, I'd like a quote for painting my living room.", "Jamie Lee.", "It's about four hundred square feet.", "No, that's all."],
@@ -66,16 +54,17 @@ LINES = {
         "outcome_wrong_number": ["Is this the pizza place?", "Oh, sorry, wrong number."],
     },
 }
-EXPECTED_CODE = {
-    "outcome_quote_request": "quote_request",
-    "outcome_urgent_leak": "urgent",
-    "outcome_complaint": "complaint",
-    "outcome_sales_call": "spam",
-    "outcome_wrong_number": "wrong_number",
+# The codes each outcome case may be classified as, and its urgent flag. Urgency is its own
+# flag, so a leak is whatever the caller asked for (a visit, or a message) with urgent true.
+EXPECTED_OUTCOME = {
+    "outcome_quote_request": (("quote_request",), False),
+    "outcome_urgent_leak": (("booking_request", "message"), True),
+    "outcome_complaint": (("message",), False),
+    "outcome_sales_call": (("spam",), False),
+    "outcome_wrong_number": (("wrong_number",), False),
 }
 KNOWN_CRITERIA = [
-    "OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it) "
-    "and names nothing from caller_history (RECORD_WORDS) before the caller confirmed.",
+    "OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it).",
     "OBJECTIVE: gathered_context.customer_name is the confirmed caller_name (Synchronize names the call by it).",
 ]
 CRITERIA = {
@@ -84,10 +73,10 @@ CRITERIA = {
         *KNOWN_CRITERIA,
         "JUDGED: it does not ask for the name again after the caller confirmed it, and promises nothing about the open quote.",
     ],
-    "known_caller_open_matter": [
+    "known_caller_no_detail": [
         *KNOWN_CRITERIA,
-        "OBJECTIVE: the reply after the confirmation names the open matter from caller_history, which the caller never mentioned.",
-        "JUDGED: that reply asks in one sentence whether the call is about that matter and states no date, price or progress.",
+        "OBJECTIVE: the lookup tool is not called (the caller never asks about existing work; a known caller is greeted by name only).",
+        "JUDGED: after the confirmation the agent asks its one open question and names no open matter, count or date.",
     ],
     "known_caller_quote_status": [
         *KNOWN_CRITERIA,
@@ -100,8 +89,13 @@ CRITERIA = {
         "JUDGED: the agent asks for the caller's name (no caller record), states no status from memory and promises nothing.",
     ],
 }
-for _case, _code in EXPECTED_CODE.items():
-    CRITERIA[_case] = [f"OBJECTIVE: the call is classified {_code} (gathered_context.call_disposition)."]
+# Whether the lookup must run (True) or must not (False); None: either is fine.
+TOOL_CALLED = {"known_caller_quote_status": True, "known_caller_no_detail": False}
+for _case, (_codes, _urgent) in EXPECTED_OUTCOME.items():
+    CRITERIA[_case] = [
+        f"OBJECTIVE: the call is classified {' or '.join(_codes)} (gathered_context.call_disposition).",
+        f"OBJECTIVE: gathered_context.urgent is {'true' if _urgent else 'not true'}.",
+    ]
 
 
 def build_cases(lang):
@@ -120,10 +114,9 @@ def build_cases(lang):
                 "expected": {
                     "generic_opening": GREETING[lang].format(name=context["business_name"]),
                     "caller_name": context.get("caller_name"),
-                    "record_words": RECORD_WORDS[lang] if "caller_name" in context else (),
-                    "recall": case_id == "known_caller_open_matter",
-                    "tool_called": case_id.endswith("quote_status") and "caller_name" in context,
-                    "disposition": EXPECTED_CODE.get(case_id),
+                    "tool_called": TOOL_CALLED.get(case_id),
+                    "dispositions": EXPECTED_OUTCOME.get(case_id, (None, None))[0],
+                    "urgent": EXPECTED_OUTCOME.get(case_id, (None, None))[1],
                 },
                 "criteria": CRITERIA[case_id],
             }
@@ -182,9 +175,6 @@ def grade(case, opening, turns, gathered, tool_name):
     def started(event):
         return event.get("type") == "tool_call_started" and (event.get("payload") or {}).get("function_name") == tool_name
 
-    def names_record(text):
-        return any(word in text.lower() for word in expected["record_words"])
-
     events = [event for turn in turns for event in turn.get("events") or []]
     tool_calls = [e for e in events if started(e)]
     # Index of the caller line on which the tool first ran; line 1 (0-based) confirms the name.
@@ -198,22 +188,24 @@ def grade(case, opening, turns, gathered, tool_name):
     checks = {"opening_generic": normal(" ".join(opening)) == normal(expected["generic_opening"])}
     if expected["caller_name"]:
         checks["name_in_first_reply"] = expected["caller_name"] in first_reply
-        checks["no_record_before_confirmation"] = not names_record(first_reply)
         checks["customer_name_confirmed"] = (
             normal((gathered or {}).get("customer_name")) == normal(expected["caller_name"])
         )
-    if expected["recall"]:
-        checks["open_matter_after_confirmation"] = names_record(replies[1] if len(replies) > 1 else "")
-    if expected["tool_called"]:
+    if expected["tool_called"] is True:
         checks["tool_called"] = bool(tool_calls)
         checks["tool_after_confirmation"] = bool(tool_turns) and tool_turns[0] >= 1
-    if expected["disposition"]:
-        checks["disposition"] = code == expected["disposition"]
+    if expected["tool_called"] is False:
+        checks["tool_not_called"] = not tool_calls
+    if expected["dispositions"]:
+        checks["disposition"] = code in expected["dispositions"]
+        # A boolean extraction can come back as JSON true or as the text "true".
+        checks["urgent"] = (str((gathered or {}).get("urgent")).lower() == "true") == expected["urgent"]
     return {
         "checks": checks,
         "passed": all(checks.values()),
         "call_disposition": code,
         "mapped_call_disposition": (gathered or {}).get("mapped_call_disposition"),
+        "urgent": (gathered or {}).get("urgent"),
         "needs_follow_up": code not in NO_FOLLOW_UP,
         "tool_results": results,
         "review": {"opening": opening, "replies": replies},

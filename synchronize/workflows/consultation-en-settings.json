@@ -10,16 +10,8 @@
         "description": "The caller wants to book, move or cancel a visit, a measurement or an appointment, including a visit needed to give a quote."
       },
       {
-        "code": "urgent",
-        "description": "Something is being damaged or is unsafe right now and needs attention today, such as a leak, fire, electrical, gas or structural problem. Choose this before any other outcome that also fits."
-      },
-      {
-        "code": "complaint",
-        "description": "The caller complained or was upset about the work, a delay, the service or a charge, and it is not an urgent hazard."
-      },
-      {
         "code": "message",
-        "description": "The owner still has something to check or a call to return, but no outcome above fits: a question about how existing work or an estimate is going, a partner or supplier passing on a message, or a request to be called back."
+        "description": "The owner still has something to check or a call to return, but no outcome above fits: a question about how existing work or an estimate is going, a complaint about the work or the service, a partner or supplier passing on a message, or a request to be called back."
       },
       {
         "code": "done",

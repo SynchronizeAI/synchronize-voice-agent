@@ -1,16 +1,20 @@
 """Targeted offline integration proof: every HTTP request goes to a local fake."""
 
 import ast
+import asyncio
 import contextlib
 import copy
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -528,7 +532,10 @@ class GoLiveTests(unittest.TestCase):
                     self.assertEqual(tool[field], self.fake.expected_tool()[field])
                 self.assertIn(f"tool lookup_caller_work_{lang}: create", out)
                 self.assertIn("settings.call_dispositions: template-replaced; codes", out)
-                self.assertIn("+ quote_request, booking_request, urgent", out)
+                self.assertIn(
+                    "+ quote_request, booking_request, message, done, spam, wrong_number\n", out
+                )
+                self.assertIn("node 1.data.extraction_variables: template-replaced", out)
                 self.assertIn("node 1.data.tool_uuids" if lang == "en" else "node 2.data.tool_uuids", out)
                 if lang == "ko":
                     self.assertIn("edge 1-2.data.condition: template-replaced", out)
@@ -777,8 +784,11 @@ class GoLiveTests(unittest.TestCase):
             + ["/api/voice/call-ended"] * 2
             + ["/api/voice/tools/caller-work"] * 2,
         )
-        for _, _, body in self.fake.calls[2:]:
+        for _, _, body in self.fake.calls[2:4]:
             self.assertEqual(body, {"workflow_run_id": "2147483647"})
+        # The lookup tool's body template sends the run id as a JSON integer.
+        for _, _, body in self.fake.calls[4:]:
+            self.assertEqual(body, {"workflow_run_id": 2147483647})
         self.assertTrue(self.fake.probe_headers[2]["X-Dograh-Secret"] == self.fake.secret)
         self.assertTrue(self.fake.probe_headers[3]["X-Dograh-Secret"] != self.fake.secret)
         self.assertNotIn("Idempotency-Key", self.fake.probe_headers[2])
@@ -803,7 +813,8 @@ class GoLiveTests(unittest.TestCase):
         live = "안녕하세요, 영훈솔루션 AI 비서입니다. 어떤 일로 전화하셨나요?"
         self.assertEqual(
             golive.patch_text(old, new, live, "node 1.data.greeting"),
-            "안녕하세요, 영훈솔루션 AI 비서입니다.\n어떤 일로 전화하셨나요?",
+            "안녕하세요, 영훈솔루션 AI 비서입니다. 통화 내용은 녹음되어 담당자에게 전달됩니다.\n"
+            "어떤 일로 전화하셨나요?",
         )
 
     def test_customised_korean_greeting_apply_is_idempotent(self):
@@ -1487,6 +1498,17 @@ class GoLiveTests(unittest.TestCase):
         with self.assertRaisesRegex(golive.GoLiveError, "Tool wiring"):
             golive.validate_tool(tool, self.fake.runtime, self.fake.credential_uuid)
 
+    def test_a_lookup_tool_the_model_could_steer_is_refused_before_any_request(self):
+        # 77c06434 sent the run id as a preset only, which the model's arguments override.
+        for lang in ("en", "ko"):
+            with self.subTest(lang=lang):
+                self.fake.select(lang)
+                self.fake.calls.clear()
+                _, err = self.run_cli(["plan", *self.args("--new-ref", "77c06434")], expected=1)
+                self.assertIn("must send only the run id, from its body template", err)
+                self.assertEqual(self.fake.calls, [])
+                self.assertFalse(self.backups.exists())
+
     def test_caller_work_probe_requires_known_false_and_wrong_secret_refusal(self):
         args = [
             "probe", "--runtime-origin", self.fake.runtime,
@@ -1512,25 +1534,20 @@ class GoLiveTests(unittest.TestCase):
         self.assertFalse(any(c[1].startswith("/api/v1/") for c in self.fake.calls))
 
     def test_committed_tool_and_settings_follow_the_contract(self):
-        codes = [
-            "quote_request", "booking_request", "urgent", "complaint",
-            "message", "done", "spam", "wrong_number",
-        ]
+        codes = ["quote_request", "booking_request", "message", "done", "spam", "wrong_number"]
         for lang, node_id in (("ko", "2"), ("en", "1")):
             spec = golive.tool_spec("HEAD", lang)
             config = spec["tool"]["definition"]["config"]
             self.assertEqual(config["method"], "POST")
             self.assertEqual(config["timeout_ms"], 5000)
             self.assertIsNone(config["parameters"])
-            self.assertEqual(
-                config["preset_parameters"],
-                [{
-                    "name": "workflow_run_id",
-                    "type": "string",
-                    "value_template": "{{initial_context.workflow_run_id}}",
-                    "required": True,
-                }],
-            )
+            self.assertEqual(config["body_template"], golive.RUN_BODY)
+            self.assertEqual(config["preset_parameters"], golive.RUN_PRESET)
+            # The description says what the result holds (amendment A1, section 2).
+            for key in ("known", "name", "open_items.count", "open_items.next_due", "upcoming_visits"):
+                self.assertIn(key, spec["tool"]["description"])
+            for gone in ("open_work", "estimates"):
+                self.assertNotIn(gone, spec["tool"]["description"])
             events = [m["event"] for m in spec["tool"]["definition"]["messages"]]
             self.assertEqual(events, ["start", "delayed"])
             definition = golive.template("HEAD", lang)
@@ -1542,6 +1559,30 @@ class GoLiveTests(unittest.TestCase):
             dispositions = golive.settings_template("HEAD", lang)["call_dispositions"]
             self.assertEqual([d["code"] for d in dispositions], codes)
             self.assertTrue(all("{{" not in d["description"] for d in dispositions))
+            # Urgency is its own flag, extracted in every conversation node.
+            conversation = [
+                n for n in definition["nodes"]
+                if n["type"] in ("startCall", "agentNode", "endCall")
+            ]
+            self.assertEqual(
+                [n["id"] for n in conversation], ["1", "3", "2"] if lang == "ko" else ["1"]
+            )
+            for node in conversation:
+                urgent = [v for v in node["data"]["extraction_variables"] if v["name"] == "urgent"]
+                self.assertEqual(len(urgent), 1, node["id"])
+                self.assertEqual(urgent[0]["type"], "boolean")
+                self.assertIn("true", urgent[0]["prompt"])
+            # Pre-call carries the caller's name only; every prompt variable has a fallback.
+            text = json.dumps(definition, ensure_ascii=False)
+            self.assertNotIn("caller_history", text)
+            for node in definition["nodes"]:
+                for field in ("greeting", "prompt"):
+                    for name, fallback in re.findall(
+                        r"\{\{\s*([^|\s}]+)\s*(?:\|\s*fallback:([^}]*))?\}\}",
+                        node["data"].get(field) or "",
+                    ):
+                        self.assertIn(name, ("business_name", "caller_name"), (node["id"], field))
+                        self.assertTrue(fallback.strip(), (node["id"], field, name))
 
     @unittest.skipUnless(
         importlib.util.find_spec("pydantic"), "pydantic is needed to load Dograh's schemas"
@@ -1567,6 +1608,164 @@ class GoLiveTests(unittest.TestCase):
                 ),
                 settings,
             )
+
+
+# Blob ids at tag dograh-v1.51.0 (commit 3d9fa55e): the code below is 1.51's, not a model of it.
+DOGRAH_151_BLOBS = {
+    "api/utils/template_renderer.py": "426d4afd95384b3238f61a3144cdd9538ce1d9ab",
+    "api/services/workflow/tools/custom_tool.py": "7971f34661ae35f00faa6ffebd8f1faa66d55ddc",
+}
+
+
+class _Anything:
+    """Stands in for Dograh's logging, error and database helpers."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __call__(self, *args, **kwargs):
+        return None
+
+    def __getattr__(self, name):
+        return _Anything()
+
+
+class _Response:
+    status_code = 200
+    text = "{}"
+
+    def json(self):
+        return {"known": False}
+
+
+class _Client:
+    def __init__(self, sent, **kwargs):
+        self.sent = sent
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def request(self, **kwargs):
+        self.sent.append(kwargs)
+        return _Response()
+
+
+def dograh_151_module(path, namespace):
+    """Run one 1.51 source file with its non-standard-library imports replaced by namespace."""
+    source = (golive.ROOT / path).read_bytes()
+    blob = hashlib.sha1(b"blob %d\0" % len(source) + source).hexdigest()
+    if blob != DOGRAH_151_BLOBS[path]:
+        raise unittest.SkipTest(f"{path} in this checkout is not Dograh 1.51.0's")
+    tree = ast.parse(source)
+    tree.body = [
+        node for node in tree.body
+        if not (
+            isinstance(node, ast.ImportFrom)
+            and node.module.split(".")[0] in ("api", "loguru")
+            or isinstance(node, ast.Import) and node.names[0].name == "httpx"
+        )
+    ]
+    module = dict(namespace)
+    exec(compile(tree, path, "exec"), module)
+    return module
+
+
+class LookupToolBodyTests(unittest.TestCase):
+    """The lookup request Dograh 1.51 builds, from this checkout's tool templates.
+
+    execute_http_tool runs unchanged; only the network, the database and logging are stubbed.
+    The run id comes from the run's context (Dograh sets it, run_pipeline.py:693), never from
+    the model's arguments, which a caller can steer.
+    """
+
+    def setUp(self):
+        quiet = _Anything()
+        renderer = dograh_151_module("api/utils/template_renderer.py", {"logger": quiet})
+        self.sent = []
+        httpx = SimpleNamespace(
+            AsyncClient=lambda **kwargs: _Client(self.sent, **kwargs),
+            TimeoutException=type("TimeoutException", (Exception,), {}),
+            RequestError=type("RequestError", (Exception,), {}),
+        )
+        tool_module = dograh_151_module(
+            "api/services/workflow/tools/custom_tool.py",
+            {
+                "httpx": httpx,
+                "logger": quiet,
+                **{
+                    name: _Anything()
+                    for name in (
+                        "db_client", "DograhFailure", "ErrorSource", "ErrorType",
+                        "classify_exception", "classify_http_response", "log_failure",
+                        "mask_key", "build_auth_header", "validate_user_configured_service_url",
+                    )
+                },
+                "redact_failure_message": lambda text: text,
+                **{
+                    name: renderer[name]
+                    for name in ("get_nested_value", "render_template", "render_url_template")
+                },
+            },
+        )
+        self.execute = tool_module["execute_http_tool"]
+
+    def call(self, definition, arguments, context):
+        tool = SimpleNamespace(name="lookup", tool_uuid=str(uuid4()), definition=definition)
+        self.sent.clear()
+        result = asyncio.run(
+            self.execute(tool, arguments, call_context_vars=context, gathered_context_vars={})
+        )
+        return result, list(self.sent)
+
+    def definitions(self):
+        for lang in ("ko", "en"):
+            spec = golive.tool_spec("HEAD", lang)
+            yield lang, golive.planned_tool(
+                spec, "https://runtime.example", golive.PENDING_UUID
+            )["definition"]
+
+    def test_model_supplied_run_id_never_reaches_the_lookup_request(self):
+        steered = {
+            "workflow_run_id": "4512",
+            "initial_context": {"workflow_run_id": 4512},
+            "gathered_context": {"workflow_run_id": 4512},
+            "caller_number": "+15550000000",
+        }
+        context = {"workflow_run_id": 77, "business_name": "B", "caller_name": "C"}
+        for lang, definition in self.definitions():
+            for arguments in ({}, steered):
+                with self.subTest(lang=lang, steered=bool(arguments)):
+                    result, sent = self.call(definition, arguments, context)
+                    self.assertEqual(result["status"], "success")
+                    (request,) = sent
+                    self.assertEqual(request["method"], "POST")
+                    self.assertEqual(request["url"], "https://runtime.example" + golive.TOOL_ROUTE)
+                    # Only the template's key, with the run's own id as a JSON integer.
+                    self.assertEqual(request["json"], {"workflow_run_id": 77})
+
+    def test_a_run_context_without_its_id_sends_nothing(self):
+        for lang, definition in self.definitions():
+            with self.subTest(lang=lang):
+                result, sent = self.call(
+                    definition, {"workflow_run_id": "4512"}, {"business_name": "B"}
+                )
+                self.assertEqual(sent, [])
+                self.assertEqual(result["status"], "error")
+
+    def test_without_the_body_template_the_model_chooses_the_run(self):
+        """The shape before amendment A1, kept as proof that this test can see the hole."""
+        for lang, definition in self.definitions():
+            with self.subTest(lang=lang):
+                old = copy.deepcopy(definition)
+                old["config"]["body_template"] = None
+                _, (request,) = self.call(
+                    old, {"workflow_run_id": "4512"}, {"workflow_run_id": 77}
+                )
+                self.assertEqual(request["json"], {"workflow_run_id": "4512"})
+
 
 
 if __name__ == "__main__":
