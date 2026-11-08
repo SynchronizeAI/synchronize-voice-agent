@@ -36,7 +36,9 @@ English is one agent, not three steps, because every change of step costs a seco
 two End Call tools, `end_call` and `end_call_wrong_number`, instead of an end node: an End Call tool plays a fixed goodbye and hangs up with no further model call.
 The tools belong to one Dograh organization. Create both first (category End Call, one start message under "When the tool starts", Dograh 1.51: "Thank you for calling. Have a good day. Goodbye." and
 "No problem. Thank you for calling, and have a good day. Goodbye.") and put their UUIDs in the start node's `tool_uuids` in `consultation-en.json`; Dograh silently drops an unknown UUID, and the
-call then ends only when the caller hangs up. The live tools' 1.49 "End Message type custom" goodbyes become that start message in the 1.51 migration (`../UPGRADE-1.51.md`). `consultation-en-settings.json` also sets `smart_turn_stop_secs` to 1.0 (Dograh's default wait is 2.0 s, which added 3 s or more to short
+call then ends only when the caller hangs up. The live tools' 1.49 "End Message type custom" goodbyes become that start message in the 1.51 migration (`../UPGRADE-1.51.md`).
+The line's three other End Call tools (a recording objection, Spanish, any other language) are not made by hand: go-live creates them from `tool-end-call-*-en.json`
+(Kinds of call, visits, recording and language, below). `consultation-en-settings.json` also sets `smart_turn_stop_secs` to 1.0 (Dograh's default wait is 2.0 s, which added 3 s or more to short
 answers), and so does `consultation-ko-settings.json` since A2: the name confirmation (`○○님 맞으세요?` → `네`) makes short Korean answers
 common. Go-live applies the outcomes, the call limit and the model services from the settings file but not the turn settings, so the runbook (step 5) sets the wait in Dograh. The `facts` and `quotes` extraction prompts say plain text because the extraction model sometimes returned a JSON list; the Synchronize page joins a list into
 lines as a safeguard. Real calls of this shape are not measured yet.
@@ -232,21 +234,34 @@ All of it is general rules in the lines the model already reads, not one sentenc
 - **Visits.** Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why.
   The owner confirms either; the agent never confirms, books or moves a time (the approval card after the call is Synchronize's). Both are
   `booking_request`, and `follow_up` carries the window.
-- **Recording.** The greeting says the call is recorded. A caller who does not want that hears that recording cannot be switched off on this
-  line, that the call ends now and that the owner will call them back at this number; the agent asks nothing more and ends the call with
-  `end_call` on its next turn (a turn is speech or a tool call, never both).
-- **Language.** The line takes calls in English only (Spanish is deferred). A caller who speaks another language, or asks for one, hears once, in
-  that language, only that the owner will call them back at this number (Spanish: `El dueño le devolverá la llamada a este número.`), then
-  `end_call`'s fixed English goodbye. Speech recognition runs in English (below), so on a call the model reads a Spanish caller's words as
-  English recognition heard them; text chat cannot show how well that works, and no real call has measured it.
+- **Recording and language end the call at once.** Each has its own End Call tool (Dograh's End Call type, like `end_call_wrong_number`: one
+  fixed start message, no reason parameter, since a reason would replace the call's outcome), which go-live creates from
+  `tool-end-call-*-en.json` (Live wiring). The agent calls it in a turn with no speech of its own, so the caller never waits for another turn or
+  hears Dograh's "are you still there?":
+  - `end_call_recording_declined`, for a caller who says they do not want this call recorded: "Recording can't be switched off on this line, so
+    I'll end the call now. The owner will call you back at this number. Thank you for calling. Goodbye." A caller who only asks whether the
+    call is recorded (it is, as the greeting said), wants one detail kept off the recording, wants a person rather than a recording, or takes
+    the objection back is answered and the call goes on; that list is in the tool's description, the text the model reads when it chooses
+    the tool, and in the Persona's rule.
+  - `end_call_spanish`, for a caller who speaks Spanish: "El dueño le devolverá la llamada a este número. Gracias por llamar. Adiós."
+  - `end_call_other_language`, for a caller who speaks any other language: "I can only help in English on this line. The owner will call you
+    back at this number. Thank you for calling. Goodbye."
+
+  The language rule is for a caller who speaks another language, not one who asks about one (an English speaker asking "do you speak
+  Spanish?" stays in English). The line takes calls in English only (Spanish is deferred). Speech recognition runs in English (below), so on a
+  call the model reads a Spanish caller's words as English recognition heard them, and the Spanish message is spoken by the line's own voice:
+  **the Spanish path needs one real Spanish call to verify** (runbook step 8, call 4); text chat cannot show either.
 - **AI.** Whenever the caller asks whether it is a real person or a robot, the agent says plainly that it is an AI assistant and carries on.
-- **Speech.** Numbers, times, prices and addresses are said as words; the name is read back once by using it in the next question, a new
-  project's address and another callback number once; nothing is spelled letter by letter, and only a part the caller corrected is spelled,
+- **Speech.** Numbers, times, prices and addresses are said as words; the name is read back once by using it in the next question; a new
+  project's address and another callback number are each read back once in a turn of their own that asks whether it is right; the recap keeps
+  a requested day, time or window and reads out no phone number; nothing is spelled letter by letter, and only a part the caller corrected is spelled,
   once. "I'm sorry" only when declining, deferring to the owner or asking again. The greeting cannot be interrupted
   (`allow_greeting_interrupt` false: caller speech is kept until it ends, `api/services/workflow/dto.py`); interruptions stay on after it.
-- **Values for Synchronize.** Node 1's extraction, which already carries `urgent`, also carries `recording_declined` (boolean, true only when the
-  caller said they do not want the call recorded) and `caller_language` (the BCP-47 code, such as `es`, only when the caller did not speak
-  English; empty otherwise). Dograh writes every extracted variable at the top of the run's `gathered_context`
+- **Values for Synchronize.** Node 1's extraction, which already carries `urgent`, also carries `recording_declined` (boolean, true only when
+  the assistant called `end_call_recording_declined`, an event the extraction reads in the conversation as `[Tool Call: …]`,
+  `api/services/workflow/conversation_history.py`; Synchronize erases a call's details on it, so nothing said about the recording alone may
+  set it) and `caller_language` (the BCP-47 code of the language the caller spoke, such as `es`, only when `end_call_spanish` or
+  `end_call_other_language` ran; empty otherwise). Dograh writes every extracted variable at the top of the run's `gathered_context`
   (`api/services/workflow/pipecat_engine.py:697-707`), so Synchronize reads `gathered_context.recording_declined` and
   `gathered_context.caller_language` where it reads `gathered_context.urgent`. The extraction writes a phone number as E.164 and a date the
   caller named by its day as `YYYY-MM-DD` (dated by Dograh's `{{current_time}}`, which is UTC); a day named relative to the call (tomorrow,
@@ -265,6 +280,10 @@ All of it is general rules in the lines the model already reads, not one sentenc
   `api/tests/test_llm_fallback_providers.py`): no output after 1500 ms, a hedged race in which Haiku starts while Gemini may still answer, and an
   error. One request serves both rules (`api/services/pipecat/service_factory.py` `create_llm_service`).
 - **Speech recognition.** `stt` is Deepgram itself, `nova-3-general`, language `en`. Dograh's managed STT would send `en` to Flux.
+- **Thinking level.** 1.51 gives no way to set Gemini's thinking level or budget for a workflow: its Google model settings are the model and the
+  temperature (`api/services/configuration/registry.py` `GoogleLLMService`; `api/services/pipecat/service_factory.py` builds
+  `GoogleLLMSettings` from those alone), and Dograh refuses any other setting in an override (`model_connections.py` `_resolve_spec`, "Unknown
+  or non-overridable llm setting"). Gemini runs at its default; the runbook measures how often that is slow enough for Haiku to answer.
 - **Call limit.** `max_call_duration` is 1200 s, Dograh 1.51's ceiling (`api/schemas/workflow_configurations.py`). 1.51 has no wrap-up before
   the limit: the call monitor ends the call at once when it passes (`api/services/pipecat/call_monitor_processor.py` `_check_call_duration`,
   `api/services/workflow/pipecat_engine_callbacks.py` `create_max_duration_callback`, `abort_immediately=True`), and no template variable gives
@@ -274,6 +293,10 @@ All of it is general rules in the lines the model already reads, not one sentenc
   `synchronize-bedrock` (aws_bedrock) or `synchronize-deepgram` (deepgram). The keys live in those Dograh connections, typed at silent reads
   (runbook step 5), never in JSON or git. The line's named configuration (`model_configuration_uuid`), and with it the voice, stays as the
   operator set it; the override's services lie over it (`api/services/configuration/model_connections.py` `_apply_model_patch`).
+- **Checked before writing.** Every plan has Dograh resolve the planned override as a call would (`POST /api/v1/model-connections/resolve`,
+  read-only) and prints what a call will run; a refusal (an archived connection, a setting the provider does not take) stops the plan before
+  any write. When the template did not change but the line names another connection than the active one of that name (archived or
+  recreated), the plan stops and says how to repair it.
 
 ## Deployment values and authentication
 
@@ -296,6 +319,13 @@ credential UUID. Create the tool from that object (`POST /api/v1/tools/`, or Too
 place of the placeholder `00000000-0000-4000-8000-000000000101` in node `2` → `data.tool_uuids` (Korean) or `…0102` in node `1` (English). Dograh looks a node's
 tools up among the organization's active tools only (`api/db/tool_client.py:294-319` at 1.51), so a placeholder left in place publishes without an error and the
 lookup never runs. For an existing workflow, `golive.py --apply` does all of this (Live wiring, below).
+
+The English line has two more kinds of placeholder. Its three End Call tools (`tool-end-call-*-en.json`: `…0103` other language, `…0104` recording
+declined, `…0105` Spanish, in node `1` → `data.tool_uuids`) are created from their `tool` objects as written (`POST /api/v1/tools/`; nothing to wire)
+and their returned UUIDs put in place of the placeholders. And `consultation-en-settings.json` names each model connection by a placeholder in
+`model_configuration_override`: replace `00000000-0000-4000-8000-000000000201` with the UUID of the Gemini (google) connection, `…0202` with the
+Bedrock (aws_bedrock) one and `…0203` with the Deepgram one (Dograh → Providers → Copy UUID; the keys stay in the connections). Go-live does both
+by name for an existing workflow.
 
 Node `6` is the sole caller of `POST /api/voice/call-ended`: replace the same `.invalid` origin in `data.endpoint_url`, and put that same credential UUID in
 `data.credential_uuid`. It is an enabled `POST` Webhook node, with no incoming or outgoing edges: Dograh runs integration nodes asynchronously after completion,
@@ -324,11 +354,12 @@ before any write, and no placeholder is ever published.
 Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and tools. Template changes to node data and to edge data (`edge 1-2.data.condition`)
 merge the same way; a template that adds, removes or re-targets an edge is refused before any write.
 
-The caller-work tool (`tool-lookup-caller-work-{lang}.json` at the new ref) is found by its unique name among the organization's non-archived tools: absent → created,
+Every tool the new ref's template names by placeholder (the caller-work tool, `tool-lookup-caller-work-{lang}.json`, and on English the three End Call tools,
+`tool-end-call-*-en.json`, refused if one asks for a reason or speaks more than one message) is found by its unique name among the organization's non-archived tools: absent → created,
 equal → untouched, different description/icon/definition → updated in place (name and category never change) with a mode like the fields': `wiring` when only the URL or
 credential differs, `template-replaced` when the live tool equals the old ref's tool, and `REPLACES-CUSTOM` otherwise (edited in Dograh → Tools, or an old ref without the
-tool), which needs `--accept-merged tool.<name>`. Its URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named `--credential-name`
-credential. A duplicate name, or a tool of that name that is not an active tool of the template's category, aborts before any write.
+tool), which needs `--accept-merged tool.<name>`. The caller-work tool's URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named
+`--credential-name` credential; an End Call tool is written as its template has it. A duplicate name, or a tool of that name that is not an active tool of the template's category, aborts before any write.
 A tool whose icon is `synchronize-test-copy` (`TEST_COPY_ICON`) is a copy `scenarios_caller.py` made for an eval run (the failing lookup): it has the line tool's own
 name, because that name is the function the model calls, and it is otherwise the planned tool exactly, so without the mark go-live would call it unchanged, attach
 it, and lose it when the eval archives it. Go-live refuses it before any write
@@ -436,7 +467,9 @@ Offline targeted proof: `python3 synchronize/workflows/test_golive.py` (standard
 It covers both languages, draft refusal at both reads, private versioned backups, Korean greeting/conflict handling, silent-skip regressions,
 create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask fidelity, rollback with a pending draft/settings diffs, Unicode hints, durable paths and exact probe payload/auth,
 tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, format-2 backups, the owned settings (dispositions, the English call limit and model services:
-replaced, set, custom needs acceptance, a re-run writes nothing, a null override; connections refused when missing, duplicate, foreign or archived; Korean untouched), edge merges and conflicts,
+replaced, set, custom needs acceptance, a re-run writes nothing, a null override; connections refused when missing, duplicate, foreign or archived; Dograh's
+model check refusing; a stale connection refused; Korean untouched), the English End Call tools (contract, created with the lookup, an edited one needing
+acceptance, an updated tool outranking a created one in the recovery), edge merges and conflicts,
 placeholder refusal and the caller-work probe;
 the pre-call URL with each line's language (wired, set back when missing, probed, in both templates), an eval run's marked copy refused, and a backup of
 another workflow refused on rollback. It also runs Dograh 1.51's own `execute_http_tool` (`custom_tool.py` and `template_renderer.py` from this
@@ -481,7 +514,7 @@ For any later authorized model proof, use isolated test workflows and explicit `
 
 ## Evals: caller memory, lookup, outcomes and behaviours (owner-run; not run here)
 
-`scenarios_caller.py` runs 29 Korean and 39 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
+`scenarios_caller.py` runs 29 Korean and 44 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
 tell a rare failure from luck). Caller memory and the lookup: a known caller greeted by name; a known caller who gives no detail (after
 confirming, the agent asks its one open question and calls no lookup); a known caller asking when the next visit is (the lookup runs once,
 after the confirmation); the same question from an unknown caller (no lookup: no record name to confirm); the lookup failing (a copy of the
@@ -504,35 +537,45 @@ the `urgent` flag true. The English scripts of these two cases and of the leak a
 cases are also gated on `URGENT_NOT_FLAGGED` (an urgent matter where the agent did not say it is marked urgent for the owner, or did not ask once for a number to call back when none
 was given). Kinds of call and visits (English): a new project, a change to a project under way, a problem with finished work, moving a visit and cancelling
 one, each gated on `INTAKE_MISSED` (the agent did not ask what that kind needs, one per turn, or for a cancellation did not offer another time once); their
-scripts answer in the order step 2 asks, which a scripted line cannot change, so the judges read the order. A recording objection (gated on
-`RECORDING_OBJECTION_IGNORED`) and a caller speaking Spanish (`LANGUAGE_NOT_HANDLED`) must be ended by the agent before the script runs out
-(`ended_by_agent`), and "am I talking to a robot?" mid-call is gated, like every case, on `AI_DENIED`. Every English case also checks the two values
-Synchronize reads, `recording_declined` (true only for the objection; a false one would delete a call's recording) and `caller_language` (`es`, or
-`es-…`, only for the Spanish caller). The existing English scripts give one detail after the name, so a new-project call among them (a quote, the facts
-cases) may now meet an address question its next line does not answer; their gates do not depend on it. Korean scripts and Korean judged text are unchanged.
+scripts answer in the order step 2 asks, which a scripted line cannot change, so the judges read the order. A recording objection, a caller speaking
+Spanish and one speaking Portuguese must end on that caller line through `end_call_recording_declined`, `end_call_spanish` or `end_call_other_language`,
+in a turn whose only speech is the tool's fixed message (`end_turn`); four near misses ("is this call recorded?", one detail kept off the recording,
+"I don't want to talk to a recording, get me a person", an objection taken back) must go on with no End Call tool. `RECORDING_MISHANDLED` gates the
+objection and the near misses in both directions and `LANGUAGE_NOT_HANDLED` the two languages; "am I talking to a robot?" mid-call is gated, like
+every case, on `AI_DENIED`. Every English case checks that none of those three tools ran unless the case asks for it (`end_tool`, so a call ended by
+mistake fails whatever the extraction says) and the two values Synchronize reads: `recording_declined` (true only for the objection; a wrong one
+erases a call's details) and `caller_language` (`es` or `es-…` for the Spanish caller, `pt` for the Portuguese one; `en` and `en-…` count as English,
+for which Synchronize stores nothing). English has its own `WRONG_LANGUAGE` wording, as its call review has it: the fixed sentence in the caller's
+language and the fixed goodbye are not the flag.
+The older English scripts give one detail after the name. Their gates that judge the first answer (the facts cases, after hours) come before the new
+intake; two did depend on its order and were rewritten: `callback_other_number` now asks about an invoice, so no address question stands between the
+number and its read-back, and `closing_price_question` answers the new-project intake (address, read-back, work and when) so its price question
+comes at the close. `outcome_quote_request` and `known_caller_no_detail` may still meet an address question their next line does not answer;
+their checks are the outcome code and the name. Korean scripts and Korean judged text are unchanged.
 `manifest` (offline) prints every case, its criteria and the flags that gate it. `run` builds isolated test workflows from this checkout's
-committed templates (`HEAD`) with the live lookup tool (or the failing copy), the live line's model configuration (its `model_configuration_override` as go-live
-applied it, never the template's placeholders) and the template settings, every case but the lookup failure on the line as golive deploys it;
+committed templates (`HEAD`) with the live lookup tool (or the failing copy), on English the live End Call tools, the live line's model configuration
+(its `model_configuration_override` as go-live applied it, never the template's placeholders) and the template settings, every case but the lookup failure on the line as golive deploys it;
 it removes the pre-call fetch, the completion webhook and the QA node, archives everything it created at the end, and never writes to the
 live workflow or the live tool. It scores the objective checks: the opening text; for a known caller the name in the first reply and
 `customer_name` equal to the confirmed name (empty when the caller does not confirm); the lookup called exactly once and never before the
 confirmation line when a known caller asks about a visit, also when it fails, and not called when they never ask, will not confirm, or are
 unknown; for each outcome case and the two hand-over lookup cases the code (the leak and the gas smell may be `booking_request` or
-`message`, a complaint is `message`) and the `urgent` flag; on English, every case's `recording_declined` and `caller_language`, and that the agent itself
-ended the recording objection and the Spanish call. Every session file keeps a review block: the replies, the lookup's arguments and results, and the extraction for the owner.
+`message`, a complaint is `message`) and the `urgent` flag; on English, every case's `recording_declined`, `caller_language` and `end_tool`, and for
+the recording objection and the two languages `end_turn`. Every session file keeps a review block: the replies, the lookup's arguments and results, and the extraction for the owner.
 `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`, workflows and the failing copy).
 
 The judged criteria go to independent judge models, in the format of the 10-31 blinded-judge harness (`build_judge.py`, `score.py` in
 `~/work/voice-polite-proof-20261031`). `judge --out DIR` writes `judge.md`: a fixed flag rubric (the 10-31 flags plus record, lookup,
 callback, closing, mumbled-call, guessed-value and AI-answer flags, and business-fact, field-instruction, after-hours and offered-connection flags, and on English
-`URGENT_NOT_FLAGGED`, `INTAKE_MISSED`, `RECORDING_OBJECTION_IGNORED` and `LANGUAGE_NOT_HANDLED`, whose rubric clause on urgent matters, kinds of call, the
-recording and other languages the Korean rubric does not have) and every transcript as a numbered
+`URGENT_NOT_FLAGGED`, `INTAKE_MISSED`, `RECORDING_MISHANDLED` and `LANGUAGE_NOT_HANDLED`, whose rubric clause on urgent matters, kinds of call, the
+recording and other languages the Korean rubric does not have; a lookup shows as `[RECORD LOOKUP RAN …]` and `[LOOKUP RESULT …]`, an End Call tool
+as `[CALL ENDED BY <tool>]`, and no other function a session records reaches the judge) and every transcript as a numbered
 item with the caller record name, the business facts, on English the business's urgent examples when set, the lookup calls and results and the after-call
 `follow_up`, in a deterministic shuffle with planted canaries (a price stated at the close, a record invented after a failed lookup, 반말 or curt speech, a price
 worked out from the pricing line, on English a connection offered to a caller who asked for the owner, an urgent matter neither marked urgent for the owner nor asked for a callback number,
 a new project with no address, work or timing asked, a recording objection answered with "the recording is off" and more questions, and a Spanish caller answered in English, and clean calls: a failed lookup handled, a caller who declines the
-record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection and a Spanish caller told once in Spanish before the
-fixed English goodbye, which a judge must not read as `WRONG_LANGUAGE`; six Korean, thirteen English), and no case name or criterion; `judge-key.json` maps items back and
+record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection and a Spanish caller whose call
+`end_call_spanish` ended at once, which a judge must not read as `WRONG_LANGUAGE`; six Korean, thirteen English), and no case name or criterion; `judge-key.json` maps items back and
 must not reach a judge. Canaries go through the same rendering as the real sessions, with Dograh's result shape and the tool's spoken start
 message, so no line format marks them. The judges run in an empty directory (runbook step 6), as the 10-31 judges did, because the fork
 holds every case and canary word for word.
