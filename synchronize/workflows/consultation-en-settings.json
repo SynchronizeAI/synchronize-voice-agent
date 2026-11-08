@@ -27,6 +27,50 @@
       }
     ],
     "turn_stop_strategy": "turn_analyzer",
-    "smart_turn_stop_secs": 1.0
+    "smart_turn_stop_secs": 1.0,
+    "max_call_duration": 1200,
+    "model_configuration_override": {
+      "llm": {
+        "provider_connection_uuid": "00000000-0000-4000-8000-000000000201",
+        "settings": {
+          "model": "gemini-3.6-flash"
+        }
+      },
+      "llm_fallback": {
+        "version": 1,
+        "rules": [
+          {
+            "condition": {
+              "type": "no_output",
+              "after_ms": 1500
+            },
+            "target": {
+              "provider_connection_uuid": "00000000-0000-4000-8000-000000000202",
+              "settings": {
+                "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+              }
+            }
+          },
+          {
+            "condition": {
+              "type": "error"
+            },
+            "target": {
+              "provider_connection_uuid": "00000000-0000-4000-8000-000000000202",
+              "settings": {
+                "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+              }
+            }
+          }
+        ]
+      },
+      "stt": {
+        "provider_connection_uuid": "00000000-0000-4000-8000-000000000203",
+        "settings": {
+          "model": "nova-3-general",
+          "language": "en"
+        }
+      }
+    }
   }
 }
