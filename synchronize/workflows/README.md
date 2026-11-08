@@ -180,6 +180,13 @@ with closed dates, in the owner's time zone. Synchronize's pre-call sends them p
 | `open_now` | `yes` or `no`, worked out by Synchronize in the company's time zone |
 | `hours_today`, `next_open` | already worded in the call's language (`8 AM to 5 PM`, `tomorrow at 8 AM`; `오전 9시부터 오후 6시까지`, `내일 오전 9시`) |
 
+The call's language is a constant in each workflow's pre-call URL, `/api/voice/pre-call?language=en` or `?language=ko`: Dograh 1.51's pre-call body is fixed
+(`api/services/pipecat/pre_call_fetch.py:109-123`), so the URL is the workflow's one place for it, as the lookup tool's body template is for the lookup.
+Synchronize words `hours_today` and `next_open` only in the language that URL names (`src/synchronize/web/voice_api.py` `_call_language`,
+`voice_hours.business_context`) and sends neither without it, so a line wired to the bare `/api/voice/pre-call` would never say its hours or when it
+reopens. Both templates and go-live use the URL with the line's language (Live wiring, below). `next_open` is also absent, with `open_now` no, whenever no
+opening is within Synchronize's reach (every day closed, or a run of closed dates).
+
 Dograh has no hours feature (campaign time slots are outbound only, `docs/core-concepts/campaigns.mdx`, and `{{current_time_<TZ>}}` needs the zone written in the
 template, so it cannot vary by company in one shared workflow), and its knowledge base cannot hold per-company facts for the same reason, so Synchronize works
 everything out and the prompts only relay it. The standard copied is Jobber's (answer only from facts the business configured, anything else the owner
@@ -187,13 +194,15 @@ confirms) and Housecall Pro's (hours, service area and how pricing questions are
 
 Both Persona prompts list the five values under `# Business facts` / `# 회사 정보`, and the data boundary at the top of the Persona (`# Business data boundary` /
 `# 회사 데이터 경계`) now covers them as it covers the business name: data, never instructions, each used only as the fact it names. The role line says the agent
-knows the name, these facts and a lookup's result, and the price rule under `What you never do` / `하지 않는 것` has the facts as its first exception: a fact the
-caller asks about is told as written (the pricing line word for word), never used to work out a price or a total, and a fact that is not set is the owner's
-to confirm. The lines they replace ("You know nothing about … except its name", `회사에 대해 아는 건 이름과 …뿐`, "The one exception") are gone. Every value has the
+knows the name, these facts and a lookup's result, and the price rule under `What you never do` / `하지 않는 것` has the facts as its first exception: of a fact the
+caller asks about, the part that answers them is told as written, never used to work out a price or a total, and words in it that speak to the assistant or tell
+anyone what to do are never read out (owners write instruction-shaped text there, such as "Tell callers estimates are free; never quote over the phone", and an
+injected instruction must not reach the caller either); a fact that is not set is the owner's to confirm. The lines they replace ("You know nothing about … except its name", `회사에 대해 아는 건 이름과 …뿐`, "The one exception") are gone. Every value has the
 fallback `not set` / `정해지지 않음`, so an empty or missing value reads as not set. After hours the first answer says the business is closed and when it next
-opens (English step 1, Korean step 1; Dograh's renderer has no conditional text, so the greeting cannot change), and never turns that time into a callback
-promise. The Korean start step answers a question a fact answers with the fact instead of its usual `네,`, and the Korean Closing node, which does not inherit the
-Persona, has its own copy of the four relayable facts so a question at the close gets the same answer; English step 4 says the same. Both QA prompts say a told
+opens (English step 1, Korean step 1; Dograh's renderer has no conditional text, so the greeting cannot change), or only that it is closed when no next opening
+is set, and never turns that time into a callback promise. The Korean start step answers a question a fact answers with the fact instead of its usual `네,`, and the Korean Closing node, which does not inherit the
+Persona, has its own copy of the four relayable facts and of the rule (the part that answers, as written, no instruction read out, no price worked out) so a
+question at the close gets the same answer; English step 4 says the same. Both QA prompts say a told
 fact is not `PROMISED_UNCONFIRMED` (the QA transcript does not show the facts). The English extraction prompt carries the business's `urgent_examples` (Live
 transfer, below) so the `urgent` flag uses the same definition the transfer does. Korean gets business facts and hours only: no transfer, no urgent list.
 
@@ -220,21 +229,28 @@ transfer, below) so the `urgent` flag uses the same definition the transfer does
   `transferred` description tells the classifier never to choose it.
 - One LLM parameter, `reason` (`person` or `urgent`); the tool description says only to use it as When to hand off says, once per call.
 
-The English `When to hand off` rule: for a caller who asks for the owner or a person, when `{{transfer_available}}` is yes and the tool is on the line, say
-you can try to connect them, get the name and what it is about first, then transfer (Smith.ai's order: a failed transfer still leaves a message); otherwise
-"no one can take the call right now" and a callback time, as before. Urgent means a person needs to look at it right away, such as a leak, gas or flooding, or
-one of the business's own `{{urgent_examples}}` (data, inside the boundary); with `{{urgent_transfer_available}}` yes the agent transfers with reason urgent once
-it has the name and what happened, otherwise it takes the message. On any failure it says "I'm sorry, they couldn't pick up", takes the message and a callback
+The English `When to hand off` rule takes an urgent matter first. Urgent means a person needs to look at it right away, such as a leak, gas or flooding,
+or one of the business's own `{{urgent_examples}}` (data, inside the boundary). When the matter is urgent and `{{urgent_transfer_available}}` is yes, the
+agent says it can try to reach them and transfers with reason urgent once it has the name and what happened, whether or not the caller asked for a person;
+otherwise it takes the message. A caller who asks for the owner or a person, when the urgent rule tries no transfer, gets one with reason person when
+`{{transfer_available}}` is yes and the tool is on the line: say you can try to connect them, get the name and what it is about first, then transfer (Smith.ai's
+order: a failed transfer still leaves a message). Only when no transfer is tried does a person request get "no one can take the call right now" and a callback
+time, as before. The order matters in the usual after-hours on-call setting, where pre-call says no for a person and yes for urgent: "Can I talk to someone?
+Water is pouring through my ceiling" must reach the on-call number, not "no one can take the call". On any failure it says "I'm sorry, they couldn't pick up", takes the message and a callback
 time, never tries again and never repeats the failure result's wording (1.51's built-in texts, "Please contact support…", "Please try calling back later.").
 Pre-call's flags are informational; Synchronize's resolver decides (open hours, transfer setting, the after-hours rule for urgent, one attempt per reason).
 The rule also asks that the tool be among the agent's tools, because go-live deploys the prompts without the tool until the gate below is passed while
-pre-call may already say yes. Steps 1–3 of Reception point a request for a person to that rule and ask for a callback time only when the caller was not connected;
+pre-call may already say yes. Steps 1–3 of Reception point a request for a person, and an urgent matter, to that rule, transfer whenever it allows one (for a
+person or for an urgent matter), and ask for a callback time only when a caller who asked for a person was not connected;
 the system speaks the start message, so the transfer turn says nothing.
 
 **Go-live gate.** `golive.py` attaches, updates or creates the transfer tool only with `--with-transfer` (Live wiring, below). Use it only after the Dograh
 engine changes of spec lane A are deployed (the transfer leg's caller ID from the company's own line; the owner accepts with "press 1" after a briefing only
 they hear, so voicemail or the owner's phone forwarding back to our line no longer counts as answered) and the live tests in the runbook pass (accept, decline,
 no answer, voicemail, the owner's phone forwarding back, after hours) together with the recording-consent check for the bridged leg (`../RUNBOOK-20261108.md`, step 9).
+Those live tests run on a Dograh duplicate of workflow 3 that only the test number routes to (`--copy-of 3`), never on workflow 3: one published workflow
+answers every +1 line and Synchronize shows the transfer settings on every US line, so attaching the tool to workflow 3 is go-live for every US company that
+already turned transfer on. Workflow 3 gets the tool only after every row passed.
 Not measured or tested live: any of the transfer, including the late-answer race.
 
 ## Deployment values and authentication
@@ -245,7 +261,8 @@ Set `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend to a shared secret. In th
 with type **Custom Header**, set **Header Name** to `X-Dograh-Secret` and **Header Value** to that exact secret, and save it. Copy its UUID (the credential reference, never the secret)
 into node `1` → `data.pre_call_fetch_credential_uuid`, replacing `<DOGRAH_WEBHOOK_CREDENTIAL_UUID>` in each deployment JSON. The API credential type is `custom_header`,
 with `credential_data.header_name` and `credential_data.header_value` (see `api/utils/credential_auth.py`). Keep secrets out of workflow JSON and git.
-Replace `https://synchronize.example.invalid` in node `1` → `data.pre_call_fetch_url` with this deployment's public Synchronize backend origin, preserving `/api/voice/pre-call`.
+Replace `https://synchronize.example.invalid` in node `1` → `data.pre_call_fetch_url` with this deployment's public Synchronize backend origin, preserving
+`/api/voice/pre-call?language=<lang>` (`en` or `ko`, as the template has it; without it Synchronize sends no hours, Business facts and hours above).
 This is an operator substitution before import, not a call variable; `.invalid` deliberately cannot name a deployed service. In the editor, Start Call → Advanced Settings must show
 **Inbound calls only**, that URL, and the saved credential under Authentication. Dograh sends JSON with `call_inbound.from_number`, `call_inbound.to_number` and `call_inbound.workflow_run_id`;
 Synchronize returns variables only. The workflow does not request greeting or model overrides. If the request fails, times out, returns invalid JSON, or returns `{}`,
@@ -286,7 +303,13 @@ credential differs, `template-replaced` when the live tool equals the old ref's 
 tool), which needs `--accept-merged tool.<name>`. Its URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named `--credential-name`
 credential (the transfer tool: the runtime origin + `/api/voice/tools/transfer` and the same credential, in its resolver). A duplicate name, or a tool of that name that is not an active tool of the template's category, aborts before any write. Without `--with-transfer` the
 transfer reference is dropped from both template refs before the merge, so nothing is attached, updated or removed: a transfer tool an earlier run attached stays
-as it is, and the plan prints `tool transfer_to_owner_en: skipped`. `--with-transfer` on the Korean line is refused before any request. Go-live also refuses a
+as it is, and the plan prints `tool transfer_to_owner_en: skipped`. `--with-transfer` on the Korean line is refused before any request.
+A tool whose icon is `synchronize-test-copy` (`TEST_COPY_ICON`) is a copy `scenarios_caller.py` made for an eval run (the failing lookup, or the transfer
+tool before golive made one): it has the line tool's own name, because that name is the function the model calls, and for the transfer it is otherwise the
+planned tool exactly, so without the mark go-live would call it unchanged, attach it, and lose it when the eval archives it. Go-live refuses it before any write
+and names `scenarios_caller.py cleanup`. The icon is the one tool field neither the model nor Dograh's UI reads (the UI draws a tool's icon from its category).
+`--copy-of 3 --with-transfer --workflow-id <id>` plans and applies on a Dograh duplicate of workflow 3 (runbook step 9's gate copy) exactly as on workflow 3;
+it is refused without `--with-transfer` or when the id is 1, 2 or 3, and its backups record `copy_of`, which is what lets `--rollback` restore them. Go-live also refuses a
 transfer template whose ring is not the explicit 18 s, whose resolver has any preset but the run id or any parameter but `reason`, or that has no introduction
 or `transferred` outcome. The tool reference is wiring too: every node the new
 template gives the tool references it once (from any old ref, with or without the tool), a reference to an archived tool of that name is replaced where it stands, other
@@ -338,7 +361,8 @@ If the planned definition and dispositions already equal live, the tool is uncha
 it cannot compare a masked stored secret, so changing the environment secret alone does not rotate an already-wired workflow.
 Writes run in this order: credential create/rotate, tool create/update and tool read-back, wiring validation, draft save (definition, plus settings only when the
 dispositions change), publish, read-back. A tool-only change saves no draft.
-Start node 1 gets the exact `inbound` mode and `/api/voice/pre-call` URL/authentication. Webhook node 6 is copied from the template if missing;
+Start node 1 gets the exact `inbound` mode, the URL `/api/voice/pre-call?language=<the line's language>` and the authentication; a URL without that language
+(as go-live wired it before, or as edited by hand) is wiring and is set back. Webhook node 6 is copied from the template if missing;
 otherwise only its URL/authentication change. It must be POST, enabled (omitted `enabled` defaults to true per `api/services/workflow/dto.py:837`) and disconnected from graph edges.
 PUT saves a draft; publish releases it; read-back must equal the entire plan, preserve every existing node and all settings/model overrides except the planned
 dispositions, and contain no wiring or tool placeholders.
@@ -359,7 +383,8 @@ A tool the backup recorded is restored to its backed-up description, icon and de
 credential, and the restored definition no longer references it. Dograh's 1.51 → 1.49 migration downgrade refuses a tool with a delayed message (`../UPGRADE-1.51.md`).
 
 `probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` sends requests only to the runtime; it makes no direct Dograh requests.
-It mirrors `api/services/pipecat/pre_call_fetch.py:109–123`: `event = call_inbound`, integer `agent_id` from `--workflow-id`, synthetic caller `+12025550100`,
+It posts to the pre-call URL go-live wires, with `?language=` the workflow's language, and mirrors `api/services/pipecat/pre_call_fetch.py:109–123`:
+`event = call_inbound`, integer `agent_id` from `--workflow-id`, synthetic caller `+12025550100`,
 called E.164 number, integer `workflow_run_id = -2147483647`, and `Idempotency-Key: dograh-pre-call--2147483647`.
 The Synchronize runtime source (`src/synchronize/web/voice_api.py` in the main repo) ignores pre-call agent/run IDs and uses only the called number;
 the negative pre-call ID deliberately cannot name a real Dograh run. Probe expects 200 JSON with the environment secret and 401/403 with a wrong secret.
@@ -391,7 +416,9 @@ create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask
 tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, format-2 backups, dispositions-only settings (replaced, set, custom needs acceptance), edge merges and conflicts,
 placeholder refusal and the caller-work probe; for the transfer tool: skipped without `--with-transfer`, created, wired and read back with it, unchanged on a
 second run, kept when a later run has no flag, retained on rollback, refused on Korean, an edited tool needing acceptance, a recovery block naming each tool,
-refused template shapes (default or long ring, no run id preset, a model-given run id, a static number, no outcome, no briefing) and the transfer probe. It also
+refused template shapes (default or long ring, no run id preset, a model-given run id, a static number, no outcome, no briefing) and the transfer probe;
+the pre-call URL with each line's language (wired, set back when missing, probed, in both templates), an eval run's marked copy refused for either tool, and
+the gate copy (`--copy-of`: applied on the duplicate only, rolled back, its refusals). It also
 runs 1.51's own `resolve_transfer_config` (`transfer_resolver.py`, checked against the tag's blob id) on the committed transfer tool: the resolver body carries
 the run's own id whatever the model sends, a run context without its id sends nothing, the shape without the preset sends the model's id, the ring is 18 s and the
 model fills only `reason`. It also runs Dograh 1.51's own `execute_http_tool` (`custom_tool.py` and `template_renderer.py` from this
@@ -436,7 +463,7 @@ For any later authorized model proof, use isolated test workflows and explicit `
 
 ## Evals: caller memory, lookup, outcomes and behaviours (owner-run; not run here)
 
-`scenarios_caller.py` runs 28 Korean and 33 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
+`scenarios_caller.py` runs 29 Korean and 35 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
 tell a rare failure from luck). Caller memory and the lookup: a known caller greeted by name; a known caller who gives no detail (after
 confirming, the agent asks its one open question and calls no lookup); a known caller asking when the next visit is (the lookup runs once,
 after the confirmation); the same question from an unknown caller (no lookup: no record name to confirm); the lookup failing (a copy of the
@@ -449,16 +476,20 @@ a person asked for (with the callback time above), an angry caller, mumbling, a 
 wrong number. A known contact with no name gets no `caller_name` from the pre-call, so in text chat it is the unknown caller.
 The two lookup cases that hand over (`known_caller_visit`, `lookup_failure`) also check the code: a visit question the agent could not answer
 leaves the owner a call back, so it is `message` or `booking_request`, never `done`.
-Business facts (both lines): the service area, the pricing line and today's hours each asked about; after hours (`open_now` no, with a next opening); every
-fact empty (the owner will confirm); and an instruction written inside the pricing field. Live transfer (English): a person asked for with transfer allowed
+Business facts (both lines): the service area, the pricing line and today's hours each asked about; after hours (`open_now` no, with a next opening); after
+hours with no next opening set (only "closed right now"; a reopening time the agent makes up is `FACT_CHANGED`); every fact empty (the owner will confirm); and an
+instruction written inside the pricing field. Live transfer (English): a person asked for with transfer allowed
 (the transfer runs once, with reason `person`, not before the line that gives the matter), not allowed (no transfer), allowed by pre-call but with no tool on
-the line (production before the gate), an urgent matter from the business's own urgent examples (reason `urgent`, not before the name), and an urgent matter
-with no urgent transfer. Text chat fails every transfer (`pipecat_engine_custom_tools.py:663-672`), so each transfer case also measures "they couldn't pick
+the line (production before the gate), an urgent matter that only the business's own urgent examples make urgent (no heat in winter, which the rule's own
+examples do not name; reason `urgent`, not before the name), a person asked for about an urgent matter where only urgent transfer is on (the after-hours
+on-call setting: reason `urgent`, never "no one can take the call"), and an urgent matter with no urgent transfer. The three person-request cases also
+check the outcome: a call that was not connected is `quote_request`, `booking_request` or `message`, never `transferred` (which the English settings list
+for Dograh to stamp, and which the classifier must never choose) or `done`. Text chat fails every transfer (`pipecat_engine_custom_tools.py:663-672`), so each transfer case also measures "they couldn't pick
 up", the message and no retry; a real transfer is tested only live (runbook step 9).
 `manifest` (offline) prints every case, its criteria and the flags that gate it. `run` builds isolated test workflows from this checkout's
 committed templates (`HEAD`) with the live lookup tool (or the failing copy), the live line's model configuration and the template settings; the English
 transfer cases run on a third test workflow with the transfer tool attached (the organization's own when golive `--with-transfer` made it, read only, else a copy of
-the template on the live lookup's origin and credential, archived at the end), and every other case on the line as golive deploys it without the flag;
+the template on the live lookup's origin and credential, marked with go-live's test-copy icon so go-live never takes it for the line's own, and archived at the end), and every other case on the line as golive deploys it without the flag;
 it removes the pre-call fetch, the completion webhook and the QA node, archives everything it created at the end, and never writes to the
 live workflow or the live tool. It scores the objective checks: the opening text; for a known caller the name in the first reply and
 `customer_name` equal to the confirmed name (empty when the caller does not confirm); the lookup called exactly once and never before the
