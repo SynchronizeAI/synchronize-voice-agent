@@ -1543,11 +1543,16 @@ class GoLiveTests(unittest.TestCase):
             self.assertIsNone(config["parameters"])
             self.assertEqual(config["body_template"], golive.RUN_BODY)
             self.assertEqual(config["preset_parameters"], golive.RUN_PRESET)
-            # The description says what the result holds (amendment A1, section 2).
-            for key in ("known", "name", "open_items.count", "open_items.next_due", "upcoming_visits"):
+            # The description says what the result holds: the caller's next visit days, already
+            # spoken (amendment A1, section 2; A2 drops the open item count and due date).
+            for key in ("known", "name", "upcoming_visits", "spoken"):
                 self.assertIn(key, spec["tool"]["description"])
-            for gone in ("open_work", "estimates"):
+            for gone in ("open_work", "estimates", "open_items", "next_due", "count"):
                 self.assertNotIn(gone, spec["tool"]["description"])
+            # Nothing else the model reads still offers the count or a due date.
+            text = json.dumps(golive.template("HEAD", lang), ensure_ascii=False)
+            for gone in ("open item", "due date", "건수", "기한", "마감"):
+                self.assertNotIn(gone, text)
             events = [m["event"] for m in spec["tool"]["definition"]["messages"]]
             self.assertEqual(events, ["start", "delayed"])
             definition = golive.template("HEAD", lang)
@@ -1559,6 +1564,11 @@ class GoLiveTests(unittest.TestCase):
             dispositions = golive.settings_template("HEAD", lang)["call_dispositions"]
             self.assertEqual([d["code"] for d in dispositions], codes)
             self.assertTrue(all("{{" not in d["description"] for d in dispositions))
+            # Both lines wait 1.0 s for an unfinished turn; Dograh's default is 2.0 s
+            # (api/schemas/workflow_configurations.py:25). Go-live does not apply it (runbook step 5).
+            settings = golive.settings_template("HEAD", lang)
+            self.assertEqual(settings["smart_turn_stop_secs"], 1.0)
+            self.assertEqual(settings["turn_stop_strategy"], "turn_analyzer")
             # Urgency is its own flag, extracted in every conversation node.
             conversation = [
                 n for n in definition["nodes"]
