@@ -1,7 +1,7 @@
 # Consultation workflows
 
 The AI phone consultation, ready to load: `consultation-ko.json` and `consultation-en.json` are the body of
-`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the two dispositions and the turn strategy; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or every call shows as needing follow-up. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
+`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the eight call outcomes and the turn strategy; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or no call is classified. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. Both need the caller-work HTTP tool (`tool-lookup-caller-work-*.json`, see Caller memory below) and `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
 
 Korean is three steps, the shape Dograh's own guide gives (one phase per node, a specific edge condition per exit). The start node plays the greeting, takes the
 reason with a short "네,", and asks the name. The Detail node asks one open question that continues from what the caller said (a bare "anything else?" ended
@@ -34,9 +34,9 @@ on `gpt-4.1-mini` the English agent restates the caller a little more (judges fl
 English is one agent, not three steps, because every change of step costs a second model call (0.45-0.93 s on real calls). The start node
 `Reception` holds the whole conversation (reason, name, one open question, a short recap, "anything to add?") and the call ends through one of
 two End Call tools, `end_call` and `end_call_wrong_number`, instead of an end node: an End Call tool plays a fixed goodbye and hangs up with no further model call.
-The tools belong to one Dograh organization. Create both first (category End Call, End Message type custom: "Thank you for calling. Have a good day. Goodbye." and
+The tools belong to one Dograh organization. Create both first (category End Call, one start message under "When the tool starts", Dograh 1.51: "Thank you for calling. Have a good day. Goodbye." and
 "No problem. Thank you for calling, and have a good day. Goodbye.") and put their UUIDs in the start node's `tool_uuids` in `consultation-en.json`; Dograh silently drops an unknown UUID, and the
-call then ends only when the caller hangs up. `consultation-en-settings.json` also sets `smart_turn_stop_secs` to 1.0 (Dograh's default wait is 2.0 s, which added 3 s or more to short
+call then ends only when the caller hangs up. The live tools' 1.49 "End Message type custom" goodbyes become that start message in the 1.51 migration (`../UPGRADE-1.51.md`). `consultation-en-settings.json` also sets `smart_turn_stop_secs` to 1.0 (Dograh's default wait is 2.0 s, which added 3 s or more to short
 answers). The `facts` and `quotes` extraction prompts say plain text because the extraction model sometimes returned a JSON list; the Synchronize page joins a list into
 lines as a safeguard. Real calls of this shape are not measured yet.
 
@@ -54,11 +54,41 @@ in both, and the fallback fills in when the value is missing). Dograh gives a pr
 context variables apply to test calls only). Both start nodes now use inbound-only Pre-Call Data Fetch: Synchronize's `POST /api/voice/pre-call`
 uses the called number and returns `initial_context` with `business_name`, or `{}` for an unknown number.
 Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
-this variable. Who the caller is goes in the first line of `facts` (`구분:` or
+the call variables `business_name`, `caller_name` and `caller_history`, each with a non-empty fallback: Dograh renders every `{{word}}` in a prompt from the
+call's context, a variable it does not have becomes an empty string, and `{{x | fallback:}}` with nothing after the colon stays in the prompt as literal braces
+(`../UPGRADE-1.51.md`, Fields). Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
 
-A `mapped_call_disposition` other than `follow_up` or `done`, such as `user_hangup`, means the call was not classified.
+A `mapped_call_disposition` that is not one of the eight outcome codes, such as `user_hangup`, means the call was not classified: Dograh 1.51 stamps the call
+status at hangup and the post-call classifier replaces it once it finishes after the hangup, or never when it fails. Synchronize treats it as needing follow-up.
 Edge labels stay ASCII: Dograh names the LLM function from them.
+
+## Caller memory, record lookup and outcomes
+
+Synchronize's side (branch `fm/261108_voice_caller_context`) gives the pre-call fetch two more `initial_context` keys, both plain text and omitted when there is
+nothing to say: `caller_name` (exactly one contact of the called company has the calling number and a real name) and `caller_history` (at most three short Korean
+lines: open matters with their due day, the site, the last contact date). The Persona lists them under `전화한 분` / `Caller` as data, with the fallbacks `모름` / `없음`
+and `unknown` / `none`, so an unknown caller gets today's prompts. The greeting does not change: Dograh's renderer has no conditional text, so a name in the
+greeting would leave a broken sentence for an unknown caller, and a pre-call `greeting_override` is read before the fetch is merged (`../UPGRADE-1.51.md`). A known
+caller is asked to confirm that name instead of giving one (Korean edge `name_given` counts the confirmation), the Detail step can refer to the open matter, and the
+Persona shares what a record says only with the person it names once they confirmed it.
+
+During the call the agent can look the caller up: `tool-lookup-caller-work-ko.json` / `-en.json` hold the Dograh HTTP API tool (`POST /api/v1/tools/` body under `tool`,
+written with every field Dograh stores so the read-back is exact). It posts `{"workflow_run_id": "<digits>"}` from the preset `{{initial_context.workflow_run_id}}`
+(run-owned in Dograh, the caller cannot set it; the model supplies nothing) to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom
+Header credential, times out after 5000 ms, says `확인해 보겠습니다.` / "Let me check." when it starts and `잠시만 기다려 주세요.` / "One moment, please." if the answer takes
+over 2.5 s. Synchronize answers facts only (`known`, `name`, `open_work`, `upcoming_visits`, `estimates` with status, no amounts or addresses). The tool is on the Korean
+Detail node (after the name step, so nothing is told to an unconfirmed caller) and on the English Reception node. Tools are organization objects referenced by UUID: the
+templates name it with the reserved placeholder `00000000-0000-4000-8000-000000000101` (ko) / `…0102` (en), which `golive.py` replaces with the real tool's UUID; Dograh
+would silently drop the placeholder, and go-live refuses to publish it. The Persona's never-promise rule now allows repeating what the lookup returned and nothing more;
+the QA tag `PROMISED_UNCONFIRMED` says the same. Added prompt text: the `전화한 분` / `Caller` section, the role line naming that record, the confirm-the-name sentence in the
+start step, one Detail / Reception sentence on when to look up, and the QA sentence. None of it is measured yet.
+
+The settings carry eight outcomes, each with a classifier description in the workflow's language: `quote_request` (new quote or price), `booking_request` (visit,
+measurement or appointment, including one needed for a quote), `urgent` (damage or danger now; chosen before anything else that fits), `complaint`, `message` (anything
+else the owner must check or return, including the status of existing work), `done` (nothing left for the owner), `spam` (sales, ads, robocalls) and `wrong_number`.
+Synchronize shows the code as the call's label and treats every code except `done`, `spam` and `wrong_number`, and every unclassified call, as needing follow-up.
+`scenarios_caller.py` measures these through the text-chat API (Evals, below).
 
 ## Deployment values and authentication
 
@@ -83,7 +113,7 @@ permanent auth/validation errors dead-letter immediately. The developer referenc
 
 **What the webhook sends.** The template holds only `workflow_run_id`. `WebhookNodeData` in `api/services/workflow/dto.py` lists `workflow_run_id` as payload context, `docs/voice-agent/webhook.mdx` shows it, and
 `_build_render_context` in `api/tasks/run_integrations.py` supplies `workflow_run.id`. The renderer turns the placeholder into text and `_build_webhook_payload` always adds `call_disposition`,
-so the body on the wire is `{"workflow_run_id": "123", "call_disposition": "follow_up"}` (checked by running those functions offline). Synchronize's receiver accepts the id as plain digits in text
+so the body on the wire is `{"workflow_run_id": "123", "call_disposition": "quote_request"}` (checked by running those functions offline at 1.49; `api/tasks/run_integrations.py` is unchanged at 1.51, which now sends it after the post-call classification). Synchronize's receiver accepts the id as plain digits in text
 and ignores every other field, so no backend change to Dograh is needed. This lane changes `synchronize/` and ignores local session state in `.gitignore`; no `.omc/` files are tracked.
 
 ## Live wiring without re-importing
@@ -91,7 +121,15 @@ and ignores every other field, so no backend change to Dograh is needed. This la
 `python3 synchronize/workflows/golive.py [plan]` replaces the proof workspace's retired `deploy_live.py`.
 It reads **local git objects only**: `--old-ref` defaults to `940fdef`, `--new-ref` to this checkout's `HEAD`.
 Commit intended template changes before selecting `HEAD`. Target **3/en** or **1/ko** explicitly; **2, Korean realtime, is excluded**.
-No settings template is applied to an existing workflow. Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and tools.
+Of the settings template only `call_dispositions` is applied, and only its old-ref → new-ref delta: live equal to the old list is `template-replaced`, no list is
+`set`, any other list is `REPLACES-CUSTOM` and needs `--accept-merged settings.call_dispositions`; every other setting and the model override stay as they are.
+Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and tools. Template changes to node data and to edge data (`edge 1-2.data.condition`)
+merge the same way; a template that adds, removes or re-targets an edge is refused before any write.
+
+The caller-work tool (`tool-lookup-caller-work-{lang}.json` at the new ref) is found by its unique name among the organization's non-archived tools: absent → created,
+different description/icon/definition → updated in place (name and category never change), equal → untouched. Its URL is the runtime origin + `/api/voice/tools/caller-work`
+and its credential is the named `--credential-name` credential. A duplicate name, or a tool of that name that is not an active HTTP API tool, aborts before any write.
+The template's placeholder UUID resolves to the tool's UUID; the published definition and the tool are both read back.
 
 Text deltas use exact-once line/character merges. Insert/delete hunks use up to two unchanged context lines on each side;
 a new fragment elsewhere is insufficient evidence that a change was already applied. A single-line greeting becoming multiline uses an anchored character delta,
@@ -114,7 +152,8 @@ and PUT keeps an existing draft's settings (`api/db/workflow_client.py:242–249
 Avoid concurrent editor changes during apply/rollback; the pre-write comparison includes definition, settings, status, version and definition ID,
 but the API has no conditional PUT to close the final read/write race.
 
-Both plan and apply flush a timestamped `0600` format-version-2 backup containing the definition, settings, template variables, version number and published definition ID.
+Both plan and apply flush a timestamped `0600` format-version-3 backup containing the definition, settings, template variables, version number, published definition ID
+and the caller-work tool as it was (or `null` when it did not exist).
 The version/ID and path are printed; apply explicitly prints **`ROLLBACK FILE: <path>`**. Keep that file for recovery.
 Backups never contain the supplied secrets; workflow data containing either is refused. QA/provider secrets remain masked by Dograh's API.
 Plan has no remote writes. Each changed template field prints
@@ -123,7 +162,8 @@ Plan has no remote writes. Each changed template field prints
 Custom merges include a zero-context diff of changed text lines for review; unchanged prompt lines are withheld.
 Other template fields with no actual change are omitted. Operator wiring fields use `wiring` in the same format;
 rollback fields use `restore-backup`. URL paths omit origins; secrets are never shown.
-The all-zero UUID denotes a credential that does not yet exist and is never published.
+`settings.call_dispositions: MODE; codes` prints the old and new code lists (descriptions withheld) and `tool NAME: create|update FIELDS|unchanged` the tool change.
+The all-zero UUID denotes a credential that does not yet exist, and the `00000000-0000-4000-8000-` family the template's tool placeholders; none is ever published.
 
 `--apply` requires `DOGRAH_WEBHOOK_SECRET` from the environment only. It creates or rotates the uniquely named `custom_header` credential,
 using `header_name = X-Dograh-Secret`. Use a dedicated shared credential: rotation affects every consumer.
@@ -131,15 +171,18 @@ Before any remote write, apply refuses every `MERGED-INTO-CUSTOM` field unless e
 `--accept-merged FIELD`. After reviewing the plan's diff, use e.g.
 `golive --apply --accept-merged 'node 1.data.greeting' --accept-merged 'node 4.data.prompt'`.
 Accept only the exact fields printed as merged; the flag never bypasses an ambiguous/conflicting merge or the published/draft guards.
-If the planned definition already equals live and the named credential exists, it says **Already wired** and skips rotation, PUT and publish;
+If the planned definition and dispositions already equal live, the tool is unchanged and the named credential exists, it says **Already wired** and skips rotation, PUT and publish;
 it cannot compare a masked stored secret, so changing the environment secret alone does not rotate an already-wired workflow.
+Writes run in this order: credential create/rotate, tool create/update and tool read-back, wiring validation, draft save (definition, plus settings only when the
+dispositions change), publish, read-back. A tool-only change saves no draft.
 Start node 1 gets the exact `inbound` mode and `/api/voice/pre-call` URL/authentication. Webhook node 6 is copied from the template if missing;
 otherwise only its URL/authentication change. It must be POST, enabled (omitted `enabled` defaults to true per `api/services/workflow/dto.py:837`) and disconnected from graph edges.
-PUT saves a draft; publish releases it; read-back must equal the entire plan, preserve every existing node and all settings/model overrides, and contain no wiring placeholders.
+PUT saves a draft; publish releases it; read-back must equal the entire plan, preserve every existing node and all settings/model overrides except the planned
+dispositions, and contain no wiring or tool placeholders.
 
 Every write/read-back stage is labelled, including wiring validation after credential creation/rotation. A failure after a write attempt prints one recovery block with the failed stage, credential state,
-published-definition state and draft state. When the workflow may have changed, it includes the exact rollback command.
-A rejected draft save (4xx), or validation failure before that save, says no workflow rollback is needed; any credential change remains.
+tool state, published-definition state and draft state. When the workflow may have changed, it includes the exact rollback command.
+A rejected draft save (4xx), or validation failure before that save, says no workflow rollback is needed; any credential or tool change remains.
 Malformed API responses fail with a suppressed-detail error and recovery evidence when a write was attempted.
 Transport failures or HTTP 5xx mean **unknown, may have committed**.
 If PUT succeeded and publish failed, anyone pressing **Publish** in Dograh would ship the wiring: roll back or discard that draft before using the editor.
@@ -147,8 +190,10 @@ Credential/workflow writes are separate transactions. Rollback retains the crede
 
 `--rollback /absolute/path/to/backup.json` uses the saved workflow ID, backs up the current state, prints the field diff and warns that it **overwrites later edits**.
 It can recover a draft left by a failed apply, saves/publishes the backup definition, and sends only settings that differ from the backup to avoid a lossy typed round trip.
-A current draft's inspection backup is labelled draft and cannot itself be restored as a release; all backups except format version 2 are refused with an explicit message. Rollback verifies equality against the fetched API representation;
+A current draft's inspection backup is labelled draft and cannot itself be restored as a release; all backups except format versions 2 and 3 are refused with an explicit message. Rollback verifies equality against the fetched API representation;
 masked/server-only values cannot be recovered from an API backup. Historical definitions need not have the new wiring.
+A tool the backup recorded is restored to its backed-up description, icon and definition (then read back); a tool created after the backup is retained, like the
+credential, and the restored definition no longer references it. Dograh's 1.51 → 1.49 migration downgrade refuses a tool with a delayed message (`../UPGRADE-1.51.md`).
 
 `probe --workflow-id 3 --runtime-origin "$RUNTIME_ORIGIN" --to-number "$TO_NUMBER"` sends requests only to the runtime; it makes no direct Dograh requests.
 It mirrors `api/services/pipecat/pre_call_fetch.py:109–123`: `event = call_inbound`, integer `agent_id` from `--workflow-id`, synthetic caller `+12025550100`,
@@ -159,8 +204,10 @@ It also probes `/api/voice/call-ended` with `{"workflow_run_id":"2147483647"}` a
 This is the largest value Dograh's 32-bit `workflow_runs.id` column can hold, so the lookup answers a clean 404 instead of a database range error (an 18-digit id would make Dograh answer 500 and the probe fail on a correct deployment). `"0"` fails validation (the route still answers 200 `{}`),
 so it would not exercise the lookup path. For the deliberately unknown positive ID, `Voice.owning_tenant` (`src/synchronize/voice.py`)
 maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}` without enqueueing a notice**. A lookup failure instead returns 503 and fails the probe.
-Successful probe output is four status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
-call-ended correct secret `200`, call-ended wrong secret `401`/`403`. A 404, 422 or 5xx at either route fails.
+It then posts the same body to `/api/voice/tools/caller-work`, as the HTTP tool sends it, and expects 200 `{"known": false}` (an unknown run) and 401/403 with the wrong secret.
+Successful probe output is six status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
+call-ended correct secret `200`, call-ended wrong secret `401`/`403`, caller-work correct secret `200`, caller-work wrong secret `401`/`403`. A 404, 422 or 5xx at any route fails,
+so a runtime without the caller-work route stops the go-live before anything is wired.
 An older runtime that silently drops digit-text ids also answers 200 `{}`, so this probe cannot tell the two receivers apart: only the test call proves that completions are processed.
 The runtime's completion lookup reads Dograh; it does not create a run. The deployed runtime's behavior and absence of that synthetic ID cannot be established offline.
 The test call must still verify business context, a saved call and authenticated completion separately.
@@ -201,7 +248,10 @@ For later recovery, securely re-read/export `DOGRAH_PROOF_API_KEY` before `goliv
 
 Offline targeted proof: `python3 synchronize/workflows/test_golive.py` (standard-library unittest, loopback fake server; no pytest or external calls).
 It covers both languages, draft refusal at both reads, private versioned backups, Korean greeting/conflict handling, silent-skip regressions,
-create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask fidelity, rollback with a pending draft/settings diffs, Unicode hints, durable paths and exact probe payload/auth.
+create/rotate/no-op, every failure stage and uncertain writes, sanitizer/QA-mask fidelity, rollback with a pending draft/settings diffs, Unicode hints, durable paths and exact probe payload/auth,
+tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, format-2 backups, dispositions-only settings (replaced, set, custom needs acceptance), edge merges and conflicts,
+placeholder refusal and the caller-work probe. When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
+Dograh schemas (`api/schemas/tool.py`, `api/schemas/workflow_configurations.py`, identical to the `dograh-v1.51.0` tag).
 No live reachability, deployed image/API equivalence, runtime redeployment, call audio or authenticated real completion is established offline.
 
 ## Business context in the prompts
@@ -235,3 +285,23 @@ python3 -m unittest discover -s synchronize/workflows -p 'test_*.py'
 `manifest` lists every case and the pass criteria. `definitions` exports exact workflow and settings files for all six arm/language pairs using local `git show`, without credential lookup, network access or deployment. Arms: `old` pins `7bc87a18c432973adb798478c0fcff9e5d2beeff`; `polite` reads the workflow and settings at `940fdef`; `new` reads this checkout.
 
 For any later authorized model proof, use isolated test workflows and explicit `DOGRAH_PROOF_BASE_URL` / `DOGRAH_PROOF_API_KEY`. Do not route a real number. The adapter injects `initial_context`, captures the opening, and records natural completion plus Korean Closing or English End Call tool evidence.
+
+## Evals: caller memory, lookup and outcomes (owner-run; not run here)
+
+`scenarios_caller.py` runs eight cases per language through the text-chat API: a known caller greeted by name, a known caller asking `견적 어떻게 됐어요?` /
+"How's my quote coming along?" (the lookup tool is called, the result is relayed without promises), the same question from an unknown caller (today's greeting),
+and the outcome of a quote request, an urgent leak, a complaint, a sales call and a wrong number. `manifest` (offline) prints every case and its criteria.
+`run` builds one isolated test workflow from this checkout's committed templates (`HEAD`) with the live lookup tool, the live line's model configuration and the
+template settings; it removes the pre-call fetch, the completion webhook and the QA node, archives the test workflow at the end, and never touches the live workflow
+beyond reading its model configuration. It scores the objective checks (opening text, the name in the first reply, the tool call, the outcome code) and writes every
+transcript with a review block for the judged criteria (no promise, no re-asked name). `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`).
+A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the lookup case measures that the tool is called and
+that the agent relays "nothing found, the owner will check" without promising; relaying real records is checked on the second test call of the runbook.
+Text chat also does not recover tool calls the model wrote as text (`../UPGRADE-1.51.md`). The one command (after golive `--apply`, with the two connection values
+exported):
+
+```bash
+python3 synchronize/workflows/scenarios_caller.py run --lang ko --live-workflow-id 1 --repeats 2 --out "$HOME/voice-evals/caller-ko-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+Offline proof of the runner: `python3 synchronize/workflows/test_scenarios_caller.py` (loopback fake text-chat API).

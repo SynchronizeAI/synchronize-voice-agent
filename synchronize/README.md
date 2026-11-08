@@ -8,7 +8,8 @@ Dograh's HTTP API with one organization key (the browser never sees it). Custome
 ## Production
 
 Railway project `synchronize-voice` (US East), separate from the product project. Official images, pinned: `dograhai/dograh-api` and
-`dograhai/dograh-ui` 1.49.0, `pgvector/pgvector:pg17` with a volume, Railway's managed Redis, a Railway bucket for recordings (Dograh's
+`dograhai/dograh-ui` 1.51.0 (what changed from 1.49.0, migrations and rollback: `UPGRADE-1.51.md`; the operator sequence:
+`RUNBOOK-20261108.md`), `pgvector/pgvector:pg17` with a volume, Railway's managed Redis, a Railway bucket for recordings (Dograh's
 documented S3 settings: `ENABLE_AWS_S3`, `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_ADDRESSING_STYLE=virtual`, `S3_SIGNATURE_VERSION=s3v4`).
 Variables follow `docker-compose.yaml`: `PUBLIC_BASE_URL` (the api's public URL), `DATABASE_URL` and `REDIS_URL` as references to the
 Postgres and Redis services, `OSS_JWT_SECRET`, `TELEPHONY_WS_TOKEN_SECRET`, `FORWARDED_ALLOW_IPS=*` (the Railway proxy terminates TLS),
@@ -20,10 +21,11 @@ ElevenLabs provider connections and a model configuration (`POST /api/v1/model-c
 workflow and enter its settings (`workflows/README.md`); add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 
-Shared reception uses Synchronize's `POST /api/voice/pre-call` for per-called-number business context and a completion Webhook node for
-`POST /api/voice/call-ended`. Both authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
+Shared reception uses Synchronize's `POST /api/voice/pre-call` for per-called-number business context and the known caller's name and open
+matters, an HTTP API tool for `POST /api/voice/tools/caller-work` (the caller's open work, visits and quote status during the call), and a
+completion Webhook node for `POST /api/voice/call-ended`. All three authenticate with `X-Dograh-Secret`, matching `DOGRAH_WEBHOOK_SECRET` on the Synchronize backend; keep the secret in a Dograh
 Custom Header credential, never the workflow JSON. Deployment URL/credential substitutions, failure/retry behavior and the separate real-model proof are in
-`workflows/README.md`. Dograh renders the run id as text and adds `call_disposition`; Synchronize's receiver accepts that body as it is.
+`workflows/README.md`. Dograh renders the run id as text and adds `call_disposition` (one of eight outcomes, `workflows/README.md`); Synchronize's receiver accepts that body as it is.
 
 ## Measured
 
