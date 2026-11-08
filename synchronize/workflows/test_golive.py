@@ -1530,10 +1530,16 @@ class GoLiveTests(unittest.TestCase):
             self.assertIn("in a turn with no speech of your own", spec["tool"]["description"])
         # What the recording tool is not for lives in its description, the one text the model reads when choosing it.
         self.assertIn(
-            "not for a caller who only asks whether the call is recorded, wants one detail kept off the recording, "
-            "wants to speak to a person, or takes the objection back",
+            "not for a caller who only asks about the recording (whether it is on, or whether it can be switched off), wants one "
+            "detail kept off the recording, wants to speak to a person, or takes the objection back",
             specs["end_call_recording_declined"]["tool"]["description"],
         )
+        # The language a caller tells their matter in decides, in both language tools: a greeting, a name, a place, a word
+        # or an accent alone ends nothing.
+        for name in ("end_call_spanish", "end_call_other_language"):
+            description = specs[name]["tool"]["description"]
+            self.assertIn("tells their matter in", description, name)
+            self.assertIn("is not that: carry on in English", description, name)
         definition = golive.template("HEAD", "en")
         start = golive.nodes(definition)["1"]["data"]
         self.assertEqual(
@@ -1542,8 +1548,20 @@ class GoLiveTests(unittest.TestCase):
         persona = golive.nodes(definition)["4"]["data"]["prompt"]
         for name in specs:
             self.assertIn(f"call {name}", persona)
-        # The language rule is for a caller who speaks another language, not one who asks about one.
+        # The language rule is for a caller who speaks another language, not one who asks about one; the language the
+        # matter is told in decides, and a caller who only says hello, in any language, is asked once more.
         self.assertNotIn("or asks for one", persona)
+        self.assertIn(
+            "The language the caller tells their matter in decides: a greeting, a name, a place, a borrowed word or an accent in "
+            "another language neither switches the language nor ends the call.",
+            persona,
+        )
+        self.assertIn(
+            "or they only said hello (in any language), ask once more what they are calling about; the language they then tell "
+            "their matter in decides",
+            start["prompt"],
+        )
+        self.assertIn("A caller who only asks about the recording (whether it is on, or whether it can be switched off", persona)
         self.assertNotIn("on your next turn call end_call", persona)
         prompts = {v["name"]: v["prompt"] for v in start["extraction_variables"]}
         self.assertTrue(prompts["recording_declined"].startswith(
@@ -1560,6 +1578,8 @@ class GoLiveTests(unittest.TestCase):
                 {"type": "text", "text": "Hola.", "event": "delayed", "after_ms": 1000}
             ),
             lambda spec: spec["tool"].update(category="http_api"),
+            lambda spec: spec["tool"]["definition"]["messages"][0].update(text="   "),
+            lambda spec: spec["tool"]["definition"]["messages"][0].update(text=""),
         ):
             bad = copy.deepcopy(good)
             change(bad)
@@ -1589,6 +1609,17 @@ class GoLiveTests(unittest.TestCase):
         (tool,) = [t for t in self.fake.tools if t["name"] == name]
         self.assertEqual(tool["definition"], spec["tool"]["definition"])
         self.assertEqual(self.fake.workflow["workflow_definition"], self.fake.expected())
+
+    def test_a_live_end_call_tool_of_another_category_is_refused_by_its_own_category(self):
+        name = "end_call_spanish"
+        (spec,) = [spec for spec in self.fake.specs if spec["tool"]["name"] == name]
+        self.fake.tools.append({
+            "id": 1, "tool_uuid": self.fake.created_uuids[name], "status": "active", "created_at": "2026-11-01T00:00:00Z",
+            "updated_at": None, "created_by": None, **copy.deepcopy(spec["tool"]), "category": "http_api",
+        })
+        _, err = self.run_cli(["plan", *self.args()], expected=1)
+        self.assertIn(f"Existing tool {name} must be an active End Call tool", err)
+        self.assertEqual(self.writes(), [])
 
     def test_an_updated_tool_outranks_a_created_one_in_the_recovery(self):
         self.add_credential()

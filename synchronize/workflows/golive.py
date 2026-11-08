@@ -52,6 +52,7 @@ TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definit
 # tool for the line's own (tool_change): an eval copy is archived when its run ends.
 TEST_COPY_ICON = "synchronize-test-copy"
 TOOL_UPDATE_FIELDS = ("description", "icon", "icon_color", "definition")
+CATEGORY_NAMES = {"http_api": "HTTP API", "end_call": "End Call"}
 DISPOSITIONS = "settings.call_dispositions"
 # The settings go-live owns. Each takes only its old-ref -> new-ref template delta, like a node field; every other
 # setting stays. Of the model override (Dograh 1.51 ModelConfigurationOverride) it owns the services the template
@@ -333,7 +334,9 @@ def end_call_spec(ref, name):
         and definition.get("config") == END_CALL_CONFIG
         and len(messages) == 1
         and messages[0].get("event") == "start"
-        and messages[0].get("type") == "text",
+        and messages[0].get("type") == "text"
+        and isinstance(messages[0].get("text"), str)
+        and bool(messages[0]["text"].strip()),
         "End Call tool template must be an End Call tool with one spoken start message and no reason",
     )
     return {"placeholder_uuid": placeholder, "tool": tool}
@@ -743,7 +746,8 @@ def tool_change(existing, planned):
     )
     require(
         existing["status"] == "active" and existing["category"] == planned["category"],
-        f"Existing tool {planned['name']} must be an active HTTP API tool",
+        f"Existing tool {planned['name']} must be an active "
+        f"{CATEGORY_NAMES.get(planned['category'], planned['category'])} tool",
     )
     differs = [f for f in TOOL_UPDATE_FIELDS if existing[f] != planned[f]]
     return "update" if differs else None
