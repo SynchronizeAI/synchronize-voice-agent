@@ -155,11 +155,17 @@ per-failure sentences. None is measured yet: the runbook's step 6 measures them 
   call back (CALLBOTO does the same when it cannot connect); a caller who is only upset still gets "cannot connect now, the owner will get
   back to you". The time goes into `follow_up` (its prompt in every node now asks for it), not a new variable: like the caller type in
   `facts`, Synchronize already shows `follow_up` on the call and passes every extraction field to the agent, so a new field would add a column
-  nothing reads first.
+  nothing reads first. The steps leave room for the question in both languages in the same place: the first step answers a request for a
+  person with "no one can take the call right now" and asks the name, and the one follow-up question (Korean `Detail`, English step 2) is the
+  callback time when a person was asked for and no time was given. A request for a person that comes only as the answer to that question gets
+  the callback-time question before the close (Korean `Detail` and its `done` edge, English step 3).
 - **Another callback number.** When the caller gives a number other than the one they are calling from, the agent reads it back once in short
   groups of digits and asks whether it is right (under `잘 안 들릴 때` / `Unclear audio`, next to "take numbers as heard"). Vapi advises against
-  read-backs in intake calls, so this is limited to the one number the owner will dial. The Korean Closing says `말씀하신 번호` instead of
-  reading it again.
+  read-backs in intake calls, so this is limited to the one number the owner will dial. The rule is also where the call moves on, because the
+  most natural moment for the number is the answer to the last question: Korean `Detail` reads it back before the close and its `done` edge
+  fires only after the caller answered the read-back (the Closing node does not inherit the global rules and, as a Dograh 1.51 end node,
+  speaks once and hangs up, `api/services/workflow/pipecat_engine.py:469-487`); English step 3 reads it back before the recap, which itself
+  reads no number. The Korean Closing then says `말씀하신 번호` instead of reading it again.
 
 ## Deployment values and authentication
 
