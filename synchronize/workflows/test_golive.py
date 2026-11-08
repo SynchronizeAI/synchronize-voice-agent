@@ -1429,6 +1429,29 @@ class GoLiveTests(unittest.TestCase):
         self.assertIn("is not a tool Dograh returns", err)
         self.assertEqual(self.writes(), [])
 
+    def test_operator_tool_on_the_lookup_node_stays_from_an_old_ref_without_the_tool(self):
+        self.fake.select("ko")
+        other = self.fake.add_tool(tool_uuid=str(uuid4()), name="my_own_tool")
+        node = golive.nodes(self.fake.workflow["workflow_definition"])["2"]
+        node["data"]["tool_uuids"] = [other["tool_uuid"]]
+        self.fake.original = copy.deepcopy(self.fake.workflow)
+        # The default old ref (940fdef) has no tool on node 2: the reference is wiring, not a merge.
+        out, _ = self.run_cli(["plan", *self.args()])
+        self.assertIn("node 2.data.tool_uuids: wiring", out)
+        self.assertEqual(self.writes(), [])
+        self.run_cli(self.args("--apply"))
+        node = golive.nodes(self.fake.workflow["workflow_definition"])["2"]
+        self.assertEqual(node["data"]["tool_uuids"], [other["tool_uuid"], self.fake.tool_uuid])
+
+    def test_template_change_to_other_tools_on_the_lookup_node_is_refused(self):
+        self.fake.select("en")
+        old, new = golive.template("HEAD", "en"), golive.template("HEAD", "en")
+        golive.nodes(new)["1"]["data"]["tool_uuids"].insert(0, str(uuid4()))
+        with self.assertRaisesRegex(golive.GoLiveError, "changes other tools on the caller-work node"):
+            golive.wire_tool_refs(
+                golive.Dograh(), self.fake.expected(), (old, new), self.fake.spec, self.fake.tool_uuid
+            )
+
     def test_tool_listing_with_a_status_query_returns_archived_tools(self):
         self.fake.add_tool(status="archived")
         listed = golive.Dograh().api("GET", "/tools/?status=active,archived,draft")

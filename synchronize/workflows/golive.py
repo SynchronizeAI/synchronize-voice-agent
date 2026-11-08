@@ -437,8 +437,11 @@ def patch_fields(a, b, target, prefix, field_modes):
             target[field] = value
 
 
-def template_fields(old, new):
-    """Every node/edge data field whose template value changes, as printed."""
+def template_fields(old, new, wired=()):
+    """Every node/edge data field whose template value changes, as printed.
+
+    wired: node ids whose tool_uuids is caller-work tool wiring (wire_tool_refs).
+    """
     fields = set()
     for kind, index in (("node", nodes), ("edge", edge_index)):
         before, after = index(old), index(new)
@@ -451,11 +454,12 @@ def template_fields(old, new):
                 for field in a.keys() | b.keys()
                 if a.get(field, MISSING) != b.get(field, MISSING)
                 and not (kind == "node" and item_id == "1" and field in START_FIELDS)
+                and not (kind == "node" and item_id in wired and field == "tool_uuids")
             }
     return fields
 
 
-def patched(live, old, new, runtime, credential_uuid, field_modes=None):
+def patched(live, old, new, runtime, credential_uuid, field_modes=None, wired=()):
     out = copy.deepcopy(live)
     before, previous, current = nodes(out), nodes(old), nodes(new)
     for node_id in sorted(previous.keys() | current.keys()):
@@ -469,8 +473,11 @@ def patched(live, old, new, runtime, credential_uuid, field_modes=None):
         require(
             a["type"] == b["type"] == target["type"], f"node {node_id}: type differs"
         )
-        # Wiring always uses operator values, never template placeholders.
-        skip = START_FIELDS if node_id == "1" else set()
+        # Wiring always uses operator values, never template placeholders. The
+        # caller-work tool reference is wiring too: wire_tool_refs sets it.
+        skip = (START_FIELDS if node_id == "1" else set()) | (
+            {"tool_uuids"} if node_id in wired else set()
+        )
         patch_fields(
             {k: v for k, v in a["data"].items() if k not in skip},
             {k: v for k, v in b["data"].items() if k not in skip},
@@ -646,7 +653,9 @@ def wire_tool_refs(client, definition, templates, spec, tool_ref):
 
     Every node the new template gives the tool references tool_ref once. A reference to an
     inactive tool of the same name (archived in the Dograh UI) is replaced where it stands;
-    other tools on the node stay; a reference Dograh cannot return is refused. Read-only.
+    other tools on the node stay; a reference Dograh cannot return is refused. patched()
+    leaves these nodes' tool_uuids alone, so a template change to their other tools is
+    refused here rather than lost. Read-only.
     """
     name, placeholder = spec["tool"]["name"], spec["placeholder_uuid"]
     literal = {
@@ -656,11 +665,24 @@ def wire_tool_refs(client, definition, templates, spec, tool_ref):
         for ref in node.get("data", {}).get("tool_uuids") or []
         if not ref.startswith(PLACEHOLDER_UUID_PREFIX)
     }
+
+    def others(node):
+        return [
+            ref
+            for ref in node.get("data", {}).get("tool_uuids") or []
+            if not ref.startswith(PLACEHOLDER_UUID_PREFIX)
+        ]
+
     out = copy.deepcopy(definition)
     indexed = nodes(out)
     for node_id, node in nodes(templates[-1]).items():
         if placeholder not in (node.get("data", {}).get("tool_uuids") or []):
             continue
+        require(
+            others(nodes(templates[0])[node_id]) == others(node),
+            f"node {node_id}: the template changes other tools on the caller-work node; "
+            "go-live wires only the caller-work tool there",
+        )
         data = indexed[node_id]["data"]
         refs = []
         for ref in data.get("tool_uuids") or []:
@@ -1129,7 +1151,13 @@ def deploy(args):
     existing_tool = change = tool = None
     field_modes = {}
     templates = (old, new)
+    wired = set()
     if spec:
+        wired = {
+            node["id"]
+            for node in new["nodes"]
+            if spec["placeholder_uuid"] in (node.get("data", {}).get("tool_uuids") or [])
+        }
         existing_tool = snapshot["tools"][spec["tool"]["name"]]
         tool = planned_tool(spec, runtime, existing or PENDING_UUID)
         change = tool_change(existing_tool, tool)
@@ -1141,7 +1169,7 @@ def deploy(args):
         new = resolve_tool_refs(new, spec["placeholder_uuid"], tool_ref)
         if old_spec:
             old = resolve_tool_refs(old, old_spec["placeholder_uuid"], tool_ref)
-    planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes)
+    planned = patched(live, old, new, runtime, existing or PENDING_UUID, field_modes, wired)
     if spec:
         planned = wire_tool_refs(client, planned, templates, spec, tool_ref)
     settings = planned_settings(live_settings, old_settings, new_settings, field_modes)
@@ -1157,7 +1185,7 @@ def deploy(args):
         for field, mode in field_modes.items()
         if mode in ("MERGED-INTO-CUSTOM", "REPLACES-CUSTOM")
     }
-    known_fields = template_fields(old, new) | (
+    known_fields = template_fields(old, new, wired) | (
         {DISPOSITIONS}
         if (old_settings or {}).get("call_dispositions")
         != (new_settings or {}).get("call_dispositions")
