@@ -2,7 +2,7 @@
   "placeholder_uuid": "00000000-0000-4000-8000-000000000105",
   "tool": {
     "name": "end_call_spanish",
-    "description": "Ends the call for a caller who speaks Spanish. Call it at once, in a turn with no speech of your own: the phone system itself then tells them in Spanish that the owner will call them back at this number, and says goodbye.",
+    "description": "Ends the call for a caller who tells their matter in Spanish. A Spanish greeting, name, place or word alone, or an accent, is not that: carry on in English. Call it at once, in a turn with no speech of your own: the phone system itself then tells them in Spanish that the owner will call them back at this number, and says goodbye.",
     "category": "end_call",
     "icon": "phone-off",
     "icon_color": "#EF4444",
