@@ -1,0 +1,339 @@
+"""Caller memory, record lookup and call-outcome scenarios through Dograh's text-chat API.
+
+manifest prints every case and its pass criteria, offline. run is for the owner: it reads
+DOGRAH_PROOF_BASE_URL / DOGRAH_PROOF_API_KEY from the environment, builds one isolated test
+workflow per run from this checkout's committed templates (HEAD), runs every case, writes the
+transcripts and a report, and archives the test workflow. It never routes a number, never edits a
+live workflow (the live one is only read for its model configuration) and prints no connection value.
+cleanup archives the test workflows a crashed run left behind (ids are in the run's state.json).
+"""
+
+import argparse
+import copy
+import json
+from pathlib import Path
+import sys
+import time
+import unicodedata
+
+import golive
+
+CODES = (
+    "quote_request", "booking_request", "urgent", "complaint",
+    "message", "done", "spam", "wrong_number",
+)
+# Contract: outcomes that leave the owner nothing to do. Everything else needs follow-up.
+NO_FOLLOW_UP = ("done", "spam", "wrong_number")
+KNOWN = {
+    "ko": {
+        "business_name": "테스트 업체",
+        "caller_name": "홍길동",
+        "caller_history": "진행 중: 거실 도배 견적서 보내기 (11월 10일까지)\n현장: 반포 래미안 32평\n최근 연락: 11월 3일",
+    },
+    "en": {
+        "business_name": "BUSINESS_NAME_TEST",
+        "caller_name": "Alex Morgan",
+        "caller_history": "진행 중: 거실 도배 견적서 보내기 (11월 10일까지)\n현장: 반포 래미안 32평\n최근 연락: 11월 3일",
+    },
+}
+GREETING = {
+    "ko": "안녕하세요, {name} AI 비서입니다.\n어떤 일로 전화하셨나요?",
+    "en": "Thank you for calling {name}. I'm an AI assistant, and this call is recorded.\nHow may I help you?",
+}
+LINES = {
+    "ko": {
+        "known_caller_greeting": ["지난번에 견적 문의했던 건으로 전화드렸어요.", "네, 맞아요.", "견적서 언제쯤 받을 수 있는지 궁금해서요.", "아니요, 그게 다예요."],
+        "known_caller_quote_status": ["견적 어떻게 됐어요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
+        "unknown_caller_quote_status": ["견적 어떻게 됐어요?", "김서연이요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
+        "outcome_quote_request": ["거실 도배 견적 좀 받아 보고 싶어서요.", "김서연이요.", "32평 아파트 거실이에요.", "아니요, 그게 다예요."],
+        "outcome_urgent_leak": ["지금 욕실 천장에서 물이 계속 새고 있어요.", "김서연이요.", "아래층까지 물이 떨어질 것 같아요, 빨리 좀 봐 주세요.", "네, 부탁드려요."],
+        "outcome_complaint": ["지난주에 해 주신 도배가 벌써 들뜨기 시작했어요, 너무 실망스럽네요.", "김서연이요.", "거실 벽 이음새 쪽이 다 일어났어요.", "아니요, 연락이나 빨리 주세요."],
+        "outcome_sales_call": ["안녕하세요, 사업자 대출 상품 안내드리려고 연락드렸습니다.", "저는 이민호 팀장입니다.", "대표님께 금리 좋은 상품을 소개해 드리고 싶어서요.", "네, 그럼 다음에 다시 연락드릴게요."],
+        "outcome_wrong_number": ["거기 중국집 아니에요?", "아, 죄송합니다. 잘못 걸었네요."],
+    },
+    "en": {
+        "known_caller_greeting": ["Hi, I'm calling about the quote I asked for last time.", "Yes, that's me.", "I was wondering when I'd get the estimate.", "No, that's all."],
+        "known_caller_quote_status": ["How's my quote coming along?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
+        "unknown_caller_quote_status": ["How's my quote coming along?", "Jamie Lee.", "Okay, thanks.", "No, that's all."],
+        "outcome_quote_request": ["Hi, I'd like a quote for painting my living room.", "Jamie Lee.", "It's about four hundred square feet.", "No, that's all."],
+        "outcome_urgent_leak": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.", "Yes, please hurry."],
+        "outcome_complaint": ["The wallpaper you put up last week is already peeling, I'm really disappointed.", "Jamie Lee.", "It's all along the seams in the living room.", "No, just call me back soon."],
+        "outcome_sales_call": ["Hi, I'm calling to offer your business a lower rate on card processing.", "This is Chris from Rate Partners.", "I'd love to tell the owner about our new plan.", "Okay, I'll try again later."],
+        "outcome_wrong_number": ["Is this the pizza place?", "Oh, sorry, wrong number."],
+    },
+}
+EXPECTED_CODE = {
+    "outcome_quote_request": "quote_request",
+    "outcome_urgent_leak": "urgent",
+    "outcome_complaint": "complaint",
+    "outcome_sales_call": "spam",
+    "outcome_wrong_number": "wrong_number",
+}
+CRITERIA = {
+    "known_caller_greeting": [
+        "OBJECTIVE: the opening is the unchanged greeting (the name cannot be in the canned greeting; see README).",
+        "OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it).",
+        "JUDGED: it does not ask for the name again after the caller confirmed it, and promises nothing about the open quote.",
+    ],
+    "known_caller_quote_status": [
+        "OBJECTIVE: the lookup tool is called after the caller confirmed their name.",
+        "JUDGED: the reply after the tool result says only what the result holds (a text-chat run is not an inbound call, so "
+        "Synchronize answers known=false and the right reply is that the owner will check) and promises no price, date or feasibility.",
+    ],
+    "unknown_caller_quote_status": [
+        "OBJECTIVE: the opening is today's generic greeting with the business name.",
+        "JUDGED: the agent asks for the caller's name (no caller record), states no status from memory and promises nothing.",
+    ],
+}
+for _case, _code in EXPECTED_CODE.items():
+    CRITERIA[_case] = [f"OBJECTIVE: the call is classified {_code} (gathered_context.call_disposition)."]
+
+
+def build_cases(lang):
+    cases = []
+    for case_id, lines in LINES[lang].items():
+        if case_id.startswith("known_caller"):
+            context = dict(KNOWN[lang])
+        else:
+            context = {"business_name": KNOWN[lang]["business_name"]}
+        cases.append(
+            {
+                "id": f"{lang}_{case_id}",
+                "case": case_id,
+                "initial_context": context,
+                "lines": lines,
+                "expected": {
+                    "generic_opening": GREETING[lang].format(name=context["business_name"]),
+                    "caller_name": context.get("caller_name"),
+                    "tool_called": case_id.endswith("quote_status") and "caller_name" in context,
+                    "disposition": EXPECTED_CODE.get(case_id),
+                },
+                "criteria": CRITERIA[case_id],
+            }
+        )
+    return cases
+
+
+def test_definition(lang, tool_uuid):
+    """This checkout's template for an isolated test workflow.
+
+    The lookup tool is the live one (golive creates it); the pre-call fetch, the completion
+    webhook and the QA review are removed: none of them changes the conversation or the
+    outcome, and the webhook would post test runs to the production runtime.
+    """
+    spec = golive.tool_spec("HEAD", lang)
+    golive.require(spec is not None, "This checkout has no caller-work tool template")
+    definition = golive.resolve_tool_refs(
+        golive.template("HEAD", lang), spec["placeholder_uuid"], tool_uuid
+    )
+    definition["nodes"] = [n for n in definition["nodes"] if n["type"] not in ("webhook", "qa")]
+    for node in definition["nodes"]:
+        for field in golive.START_FIELDS:
+            node["data"].pop(field, None)
+    text = json.dumps(definition)
+    golive.require(
+        ".invalid" not in text and "<DOGRAH" not in text and golive.PLACEHOLDER_UUID_PREFIX not in text,
+        "Unresolved placeholder in the test workflow",
+    )
+    return spec["tool"]["name"], definition
+
+
+def assistant_texts(turns):
+    out = []
+    for turn in turns:
+        spoken = [
+            (event.get("payload") or {}).get("text") or ""
+            for event in turn.get("events") or []
+            if event.get("type") == "bot_speech"
+        ]
+        text = " ".join(t for t in spoken if t) or ((turn.get("assistant_message") or {}).get("text") or "")
+        out.append(text.strip())
+    return out
+
+
+def normal(text):
+    return " ".join(unicodedata.normalize("NFC", text or "").split())
+
+
+def grade(case, opening, turns, gathered, tool_name):
+    expected = case["expected"]
+    # The opening turn has no caller message; replies answer the caller's lines.
+    replies = assistant_texts([turn for turn in turns if turn.get("user_message")])
+    first_reply = next((text for text in replies if text), "")
+    events = [event for turn in turns for event in turn.get("events") or []]
+    tool_calls = [
+        e for e in events
+        if e.get("type") == "tool_call_started" and (e.get("payload") or {}).get("function_name") == tool_name
+    ]
+    results = [
+        (e.get("payload") or {}).get("result")
+        for e in events
+        if e.get("type") == "tool_call_result" and (e.get("payload") or {}).get("function_name") == tool_name
+    ]
+    code = (gathered or {}).get("call_disposition")
+    checks = {"opening_generic": normal(" ".join(opening)) == normal(expected["generic_opening"])}
+    if expected["caller_name"] and case["case"] == "known_caller_greeting":
+        checks["name_in_first_reply"] = expected["caller_name"] in first_reply
+    if expected["tool_called"]:
+        checks["tool_called"] = bool(tool_calls)
+    if expected["disposition"]:
+        checks["disposition"] = code == expected["disposition"]
+    return {
+        "checks": checks,
+        "passed": all(checks.values()),
+        "call_disposition": code,
+        "mapped_call_disposition": (gathered or {}).get("mapped_call_disposition"),
+        "needs_follow_up": code not in NO_FOLLOW_UP,
+        "tool_results": results,
+        "review": {"opening": opening, "replies": replies},
+    }
+
+
+class Session:
+    def __init__(self, client):
+        self.client = client
+
+    def run(self, workflow_id, name, case, settle_seconds=60):
+        base = f"/workflow/{workflow_id}/text-chat/sessions"
+        session = self.client.api(
+            "POST", base, {"name": name, "initial_context": case["initial_context"]}
+        )
+        run_id = session["workflow_run_id"]
+        opening = assistant_texts(session["session_data"]["turns"])
+        for line in case["lines"]:
+            if session["is_completed"]:
+                break
+            body = {"text": line, "expected_revision": session["revision"]}
+            try:
+                session = self.client.api("POST", f"{base}/{run_id}/messages", body)
+            except golive.GoLiveError as error:
+                if "HTTP 409" not in str(error):
+                    raise
+                session = self.client.api("GET", f"{base}/{run_id}")
+                body["expected_revision"] = session["revision"]
+                session = self.client.api("POST", f"{base}/{run_id}/messages", body)
+        forced = not session["is_completed"]
+        if forced:
+            session = self.client.api(
+                "POST", f"{base}/{run_id}/end", {"expected_revision": session["revision"]}
+            )
+        # The outcome is classified as the session ends; read it back for a bounded time.
+        deadline = time.monotonic() + settle_seconds
+        while "call_disposition" not in (session.get("gathered_context") or {}):
+            if time.monotonic() > deadline:
+                break
+            time.sleep(3)
+            session = self.client.api("GET", f"{base}/{run_id}")
+        turns = session["session_data"]["turns"]
+        return {
+            "run_id": run_id,
+            "completed_naturally": not forced,
+            "opening": opening,
+            "turns": turns,
+            "gathered_context": session.get("gathered_context"),
+        }
+
+
+def create_test_workflow(client, lang, live_workflow_id, state, out):
+    tools = [t for t in client.api("GET", "/tools/") if t["name"] == f"lookup_caller_work_{lang}"]
+    golive.require(len(tools) == 1, f"Run golive --apply first: need exactly one lookup_caller_work_{lang} tool")
+    tool_name, definition = test_definition(lang, tools[0]["tool_uuid"])
+    live = client.api("GET", f"/workflow/fetch/{live_workflow_id}")
+    settings = copy.deepcopy(golive.settings_template("HEAD", lang))
+    override = (live.get("workflow_configurations") or {}).get("model_configuration_override")
+    if override:
+        settings["model_configuration_override"] = override
+    name = f"caller-eval-{lang}-{time.strftime('%Y%m%dT%H%M%S')}"
+    created = client.api("POST", "/workflow/create/definition", {"name": name, "workflow_definition": definition})
+    state.setdefault("workflows", []).append(created["id"])
+    (out / "state.json").write_text(json.dumps(state, indent=1) + "\n")
+    client.api("PUT", f"/workflow/{created['id']}", {"workflow_configurations": settings})
+    client.api("POST", f"/workflow/{created['id']}/publish", {})
+    return created["id"], tool_name
+
+
+def archive(client, state, out):
+    for workflow_id in list(state.get("workflows", [])):
+        client.api("PUT", f"/workflow/{workflow_id}/status", {"status": "archived"})
+        state["workflows"].remove(workflow_id)
+        (out / "state.json").write_text(json.dumps(state, indent=1) + "\n")
+        print(f"archived test workflow {workflow_id}")
+
+
+def report(rows):
+    groups = {}
+    for row in rows:
+        group = groups.setdefault(row["case"]["case"], {"runs": 0, "passed": 0, "checks": {}, "dispositions": {}})
+        group["runs"] += 1
+        group["passed"] += bool(row["grade"]["passed"])
+        for check, ok in row["grade"]["checks"].items():
+            group["checks"][check] = group["checks"].get(check, 0) + bool(ok)
+        code = row["grade"]["call_disposition"] or "none"
+        group["dispositions"][code] = group["dispositions"].get(code, 0) + 1
+    return {
+        "runs": len(rows),
+        "objective_passed": sum(bool(row["grade"]["passed"]) for row in rows),
+        "errors": sum(bool(row.get("error")) for row in rows),
+        "cases": groups,
+        "judged": "Read every review block: the JUDGED criteria in manifest are not scored here.",
+    }
+
+
+def run(args):
+    client = golive.Dograh()
+    args.out.mkdir(parents=True, exist_ok=True)
+    state = {}
+    rows = []
+    try:
+        workflow_id, tool_name = create_test_workflow(client, args.lang, args.live_workflow_id, state, args.out)
+        session = Session(client)
+        for case in build_cases(args.lang):
+            for rep in range(1, args.repeats + 1):
+                row = {"case": case, "rep": rep, "workflow_id": workflow_id}
+                try:
+                    result = session.run(workflow_id, f"caller-eval-{case['id']}-r{rep}", case)
+                    row.update(result, grade=grade(case, result["opening"], result["turns"], result["gathered_context"], tool_name))
+                except golive.GoLiveError as error:
+                    row.update(error=str(error), grade={"passed": False, "checks": {}, "call_disposition": None})
+                rows.append(row)
+                (args.out / f"{case['id']}-r{rep}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2) + "\n")
+                print(case["id"], rep, row.get("error") or row["grade"]["checks"])
+    finally:
+        archive(client, state, args.out)
+    summary = report(rows)
+    (args.out / "report.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({k: summary[k] for k in ("runs", "objective_passed", "errors")}))
+    return 0 if summary["errors"] == 0 else 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("manifest", "run", "cleanup"), default="manifest")
+    parser.add_argument("--lang", choices=("ko", "en"), default="ko")
+    parser.add_argument("--live-workflow-id", type=int, help="read only, for its model configuration")
+    parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "manifest":
+            print(json.dumps({"codes": CODES, "cases": build_cases(args.lang)}, ensure_ascii=False, indent=2))
+            return 0
+        golive.require(args.out is not None, "--out is required")
+        if args.command == "cleanup":
+            path = args.out / "state.json"
+            state = json.loads(path.read_text()) if path.is_file() else {}
+            archive(golive.Dograh(), state, args.out)
+            return 0
+        golive.require(args.repeats >= 1, "--repeats must be positive")
+        golive.require(
+            golive.TARGETS.get(args.live_workflow_id) == args.lang,
+            "--live-workflow-id must be 1 for ko or 3 for en",
+        )
+        return run(args)
+    except golive.GoLiveError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
