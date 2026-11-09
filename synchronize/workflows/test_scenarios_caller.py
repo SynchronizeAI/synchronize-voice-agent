@@ -522,11 +522,12 @@ class CallerScenariosTest(unittest.TestCase):
                     self.assertEqual(lines[lines.index(said):], [said, "Yes, that's right.", "No, that's all."], case)
                 self.assertEqual(cases["visit_email_corrected"]["lines"][2:4], [said, "Almost: it's l, e, a after the dot, not l, e, e."])
                 self.assertIn("rather not give an email", cases["visit_email_declined"]["lines"][4])
-                # An urgent caller who asks for someone to come is asked for an email too (urgency adds): the leak caller
-                # gives one after the callback number, the gas caller declines.
-                self.assertEqual(cases["outcome_urgent_leak"]["lines"][3:6],
+                # An urgent caller who asks for someone to come gives the service address (read back once) and is asked for
+                # an email too (urgency adds): the leak caller gives one after the callback number, the gas caller declines.
+                self.assertEqual(cases["outcome_urgent_leak"]["lines"][3:5], ["It's 418 Oak Street in Berkeley.", "Yes, that's right."])
+                self.assertEqual(cases["outcome_urgent_leak"]["lines"][5:8],
                                  [scenarios_caller.URGENT_NUMBER_ANSWER, said, "Yes, that's right."])
-                self.assertIn("rather not give an email", cases["outcome_urgent_gas"]["lines"][4])
+                self.assertIn("rather not give an email", cases["outcome_urgent_gas"]["lines"][6])
                 for case, c in cases.items():
                     if case not in ("visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined", "outcome_urgent_gas"):
                         self.assertNotRegex(" ".join(c["lines"]).lower(), r"\be-?mail\b", case)
@@ -539,9 +540,11 @@ class CallerScenariosTest(unittest.TestCase):
             if lang == "en":
                 for case in marked:
                     # The answer sits between the detail question and the recap's "anything to add"; a caller who asked
-                    # for someone to come then answers the visit's email question (an address and its read-back, or a no).
-                    self.assertEqual(cases[case]["lines"].index("This number is fine."), 3, case)
-                    self.assertEqual(len(cases[case]["lines"]), {"outcome_urgent_leak": 7, "outcome_urgent_gas": 6}.get(case, 5), case)
+                    # for someone to come first gives the service address (no caller record is confirmed) and its yes, and
+                    # then answers the visit's email question (an address and its read-back, or a no).
+                    visit = case in ("outcome_urgent_leak", "outcome_urgent_gas")
+                    self.assertEqual(cases[case]["lines"].index("This number is fine."), 5 if visit else 3, case)
+                    self.assertEqual(len(cases[case]["lines"]), {"outcome_urgent_leak": 9, "outcome_urgent_gas": 8}.get(case, 5), case)
             self.assertEqual({c["workflow"] for case, c in cases.items() if case != "lookup_failure"}, {"live"})
             self.assertEqual(cases["facts_after_hours"]["initial_context"]["open_now"], "no")
             self.assertTrue(cases["facts_after_hours"]["initial_context"]["next_open"])

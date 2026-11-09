@@ -245,10 +245,12 @@ All of it is general rules in the lines the model already reads, not one sentenc
   question per turn and only what they have not said: a new project, the service address (read back once), the work and when; a project under
   way or a change to one, which project or address and what changed; a problem with finished work or a warranty matter, what is wrong and since
   when. Any other call keeps the one question that builds on what the caller said (or the callback time when a person was asked for). A visit
-  the caller asks for comes first and replaces the other questions of the kind, except the ones its own line names.
+  the caller asks for comes first and replaces the other questions of the kind, except the ones its own line names and a returning
+  caller's recent-job question, asked in the reply right after the yes to the record's name when the Caller section has a job to ask about.
 - **Visits.** A visit at the office is booked in the call, only when the availability tool says the time is open (Office visits and recent
-  jobs, below). A site visit (someone comes out) is a request: the day wanted, and a time if the caller has one, and for a new project the
-  service address (read back once); then, in one sentence, "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is
+  jobs, below). A site visit (someone comes out) is a request: the day wanted (for an urgent matter the day is as soon as possible, so it is not asked),
+  and a time if the caller has one, and the service address (read back once) for a new project or whenever there is no confirmed caller
+  record; then, in one sentence, "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is
   approved.", never booked or confirmed. Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why;
   the owner confirms either (the approval card after the call is Synchronize's). All are `booking_request`, and `follow_up` carries the window.
 - **An email for a visit's confirmation.** When the caller wants to book, move or cancel a visit, urgent or not (urgency adds to a visit
@@ -286,9 +288,9 @@ All of it is general rules in the lines the model already reads, not one sentenc
 - **Speech.** One short sentence per turn, or two when a step has the agent answer and then ask, with at most one question; when a step gives
   more than one thing to say before the question (closed right now, marked urgent), they go in one sentence, and the recap is one sentence
   before "anything to add?", so no turn passes Call QA's `LONG_TURN` (more than two sentences). Numbers, times,
-  dates, prices and addresses are said as words ("Monday, November tenth", "four one eight Oak Street"), also in a business fact told as written
+  dates, prices and addresses are said as words ("Monday, November sixteenth", "four one eight Oak Street"), also in a business fact told as written
   and a day or time a lookup or an office-visit tool gives, and abbreviations and symbols in full ("Avenue", "percent"); the name is read back
-  once by using it in the next question; a new project's address and another callback number (three, three and four digits, each as a word;
+  once by using it in the next question; the service address of a new project or a site visit and another callback number (three, three and four digits, each as a word;
   a corrected number read back whole once more) are each read back once in a turn of their own that asks whether it is right; the
   read-backs and the recap are the only exceptions to "do not repeat the caller"; the recap keeps
   a requested day, time or window and reads out no phone number or email; an email address is read back once in a turn of its own, with "at"
@@ -333,9 +335,14 @@ would be refused by #3926 and answered `unknown`.
 
 **The tools.** `tool-check-office-availability-en.json` (placeholder `…0106`) and `tool-book-office-visit-en.json` (`…0107`)
 carry the spec's names, descriptions, parameters, messages ("Let me check." / "One moment.", then "One moment, please."
-after 2.5 s) and timeouts (5000 and 8000 ms, over Synchronize's 4 s and 7 s deadlines) word for word, except one sentence of
-each description that put the email before the booking (v1: `available` asks the name if missing, books, and asks the email
-only after the booking answered; `confirmed` says booked, then asks the email once), with the placeholder
+after 2.5 s) and timeouts (5000 and 8000 ms, over Synchronize's 4 s and 7 s deadlines) word for word, except where the v1 order differs: the name after the time is found, the email only after the booking. The
+check's description changes in its use sentence and all four answers against #3935's: it is called once the caller has named at
+least a day (a day or a part of the day goes as a window; #3935's "If they gave no time at all, send neither" and its vague
+"next week" are dropped, as Reception's first reply asks the day and time); `available` asks the name if missing, books, and asks
+the email only after the booking answered (#3935: get the email, then book); `options` and `unavailable` ask the name, if missing,
+once the caller has picked a time, then book it (#3935: let them pick; offer times or ask for another day); `unknown` also asks
+the name if missing before it takes the time as a message. The booking's description changes in one answer: `confirmed` says
+booked, then asks the email once (#3935: the office sends a confirmation email if they gave one). The placeholder
 origin and the shared `X-Dograh-Secret` credential reference that go-live wires like the lookup's. Both are on node 1, after
 the End Call tools. The request bodies differ in one deliberate way from the spec:
 
@@ -358,14 +365,15 @@ with exactly those two presets and no parameter of their names).
 
 **Prompt wording (v1, 2026-11-09).** The order is the standard check's CONV-2. An office visit: the first reply answers the
 request and asks the day and time ("Of course! What day and time works best for you?"; "next week" alone is not one), with no
-address or job question before the time; then the check; when it answers a time open, offers times or answers `unknown`, the name
-if missing, asked once ("What name should I put it under?"), before the booking or, on `unknown`, before the email;
+address or job question; then the check; when it answers a time open, offers times or answers `unknown`, the name
+if missing, asked once ("What name should I put it under?"), before the booking or, on `unknown`, before the email (on offered times, only after the caller has picked one, never in the
+turn that offers them);
 the booking once the caller has taken a time (the one they asked for, or one the check offered); "Your consultation is booked
 for …"; then one email question with its read-back. When the check answers `unknown`, the agent says it cannot confirm right
-now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day (and a
-time if the caller has one), a new project's address, then "I'll request Monday with our office manager, and you'll get a confirmation email once the
+now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day (not asked for an urgent matter, where it is as soon as possible; and a
+time if the caller has one), the service address when the project is new or there is no confirmed caller record, then "I'll request Monday with our office manager, and you'll get a confirmation email once the
 visit is approved." with the email question, never booked or confirmed. A returning caller is asked whether they are the record's
-name; right after the yes, and only when `recent_jobs` lists matching work, "Are you calling about the shingles we repaired last
+name; in the reply right after the yes, before any question about a visit they asked for, and only when `recent_jobs` lists matching work, "Are you calling about the shingles we repaired last
 time?", once, with no amount, address or other person's name. Expected transcripts:
 
 ```

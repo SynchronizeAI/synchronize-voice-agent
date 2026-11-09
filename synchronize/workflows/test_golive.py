@@ -2152,7 +2152,7 @@ class GoLiveTests(unittest.TestCase):
         order = ("the day and time they would like", "the check", "their name if you do not have it", "the booking",
                  "say that it is booked", "step 3")
         self.assertEqual([office.index(step) for step in order], sorted(office.index(step) for step in order))
-        self.assertIn("Ask nothing about the address or the work before the time is settled.", office)
+        self.assertIn("Ask nothing about the address or the work.", office)
         # The name is asked on every answer of the check, so an unknown answer (every text chat) still leaves a name for the
         # owner's record; a week alone is not the day and time the first reply asks for.
         self.assertIn("when it answers a time open, offers times or answers unknown, their name if you do not have it", office)

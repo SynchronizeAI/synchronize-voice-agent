@@ -322,22 +322,27 @@ CASES = {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["지금 욕실 천장에서 물이 계속 새고 있어요.", "김서연이요.", "아래층까지 물이 떨어질 것 같아요, 빨리 좀 봐 주세요.", "네, 부탁드려요."],
                   "en": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.",
+                         "It's 418 Oak Street in Berkeley.", "Yes, that's right.",
                          URGENT_NUMBER_ANSWER, BOOKING_EMAIL_SAID, "Yes, that's right.", "Yes, please hurry."]},
         # On English, "please come" is a visit request and urgency only adds to it (owner decision 2026-11-09, CONV-5):
-        # marked urgent and a number to call back, then the visit requested and one email question, read back.
+        # marked urgent and a number to call back, then the visit requested (the day is as soon as possible, so not asked; the
+        # address is, read back once, as no caller record is confirmed) and one email question, read back.
         "customer_email": BOOKING_EMAIL,
         "judged": "It promises no arrival time. On English it marks the matter urgent, asks once for a number to call back, and "
-        "still takes the visit as a request with one email question, read back.",
+        "still takes the visit as a request: no day asked (as soon as possible), the service address read back once, and one "
+        "email question, read back.",
         "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
     },
     "outcome_urgent_gas": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["주방에서 가스 냄새가 계속 나요.", "김서연이요.", "밸브는 잠갔는데 냄새가 안 빠져요, 빨리 와 주세요.", "네, 부탁드려요."],
                   "en": ["There's a strong gas smell in my kitchen.", "Jamie Lee.", "I turned off the valve but it still smells, please send someone.",
+                         "It's 418 Oak Street in Berkeley.", "Yes, that's right.",
                          URGENT_NUMBER_ANSWER, "I'd rather not give an email, just call me.", "Yes, please hurry."]},
-        # On English, "please send someone" is a visit request as well: one email question, which this caller declines.
+        # On English, "please send someone" is a visit request as well: the address, then one email question, which this caller declines.
         "judged": "It promises no arrival time and does not say the situation is safe. On English it marks the matter urgent, "
-        "asks once for a number to call back, takes the visit as a request and asks once for an email, without pressing after the no.",
+        "asks once for a number to call back, takes the visit as a request (no day asked, the service address read back once) and "
+        "asks once for an email, without pressing after the no.",
         "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
     },
     "outcome_complaint": {
