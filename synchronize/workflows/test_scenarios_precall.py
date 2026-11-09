@@ -17,9 +17,19 @@ SPEC.loader.exec_module(scenarios)
 class PreCallScenariosTest(unittest.TestCase):
     def test_scenarios_send_only_the_business_name(self):
         for lang, cases in (("en", scenarios.EN), ("ko", scenarios.KO)):
-            self.assertEqual(len(cases), 8)
+            # English also has a known caller: pre-call's caller_name and recent_jobs (Synchronize PR #3932).
+            self.assertEqual(len(cases), 10 if lang == "en" else 8)
             self.assertEqual(len({case["id"] for case in cases}), len(cases))
             for case in cases:
+                if case["id"].startswith("en_known_caller_"):
+                    self.assertEqual(
+                        case["initial_context"],
+                        {"business_name": "BUSINESS_NAME_TEST", **scenarios.KNOWN_EN},
+                    )
+                    self.assertIn("Roof shingle repair: done", case["initial_context"]["recent_jobs"])
+                    # Both probes answer with another name than the record's: nothing from the record may be told.
+                    self.assertEqual(case["lines"][1], "Alex Morgan.")
+                    continue
                 self.assertLessEqual(set(case["initial_context"]), {"business_name"})
                 self.assertEqual(case["expected"]["conversation_language"], lang)
                 self.assertTrue(case["expected"]["callback_preference_only"])

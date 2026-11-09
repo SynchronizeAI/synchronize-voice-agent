@@ -33,6 +33,23 @@ class FakeChat(ThreadingHTTPServer):
             {**copy.deepcopy(spec["tool"]), "tool_uuid": str(uuid4()), "status": "active"}
             for spec in golive.end_call_specs("HEAD", "en")
         ]
+        # The office-visit tools as go-live creates them, wired to this fake's own origin, whose routes answer a request
+        # with no secret 401 while served and 404 before Synchronize serves them.
+        self.tools += [office_tool(spec, self.origin) for spec in golive.office_visit_specs("HEAD", "en")]
+        self.office_routes = {golive.AVAILABILITY_ROUTE, golive.BOOK_ROUTE}
+        # What the office-visit routes answer a text chat: unknown (it is not a phone call under way).
+        self.office_answer = {"status": "success", "status_code": 200, "data": dict(golive.OFFICE_UNKNOWN)}
+
+
+def office_tool(spec, origin):
+    """A live office-visit tool as Dograh lists it: the committed template, wired to origin."""
+    tool = copy.deepcopy(spec["tool"])
+    tool["definition"]["config"].update(url=origin + spec["route"], credential_uuid=str(uuid4()))
+    return {**tool, "tool_uuid": str(uuid4()), "status": "active"}
+
+
+# The times the office-visit scripts name, as the fake agent sends them (2026-11-16 is a Monday).
+OFFICE_TIMES = {"Monday at 10 AM": "2026-11-16T10:00:00", "Monday at 7 in the morning": "2026-11-16T07:00:00"}
 
 
 def live_tool(lang, tool_uuid):
@@ -51,7 +68,8 @@ URGENT_WORDS = ("ceiling", "heat has been out")
 OBJECTION, SPANISH, PORTUGUESE = "don't want this call recorded", "Hola", "Olá"
 LANGUAGE = {"end_call_spanish": "es", "end_call_other_language": "pt"}
 # The booking scripts' email as the extraction is told to write it: the address the caller confirmed, with their correction.
-EMAILS = (("l, e, a after the dot", "jamie.lea@gmail.com"), (scenarios_caller.BOOKING_EMAIL_SAID, scenarios_caller.BOOKING_EMAIL))
+EMAILS = (("l, e, a after the dot", "jamie.lea@gmail.com"), (scenarios_caller.BOOKING_EMAIL_SAID, scenarios_caller.BOOKING_EMAIL),
+          *scenarios_caller.VISIT_EMAILS.values())
 
 
 def outcome(lines):
@@ -61,7 +79,8 @@ def outcome(lines):
         (("천장", "가스", "gas smell", *URGENT_WORDS), "booking_request", True),
         (("대출", "card processing"), "spam", False),
         (("중국집", "pizza"), "wrong_number", False),
-        (("move the estimate visit", "cancel the estimate visit", "come out to measure"), "booking_request", False),
+        (("move the estimate visit", "cancel the estimate visit", "come out to measure", "come by your office",
+          "Could someone come"), "booking_request", False),
         (("견적 좀", "a quote for", "a quote to", "new deck", "presupuesto"), "quote_request", False),
     ):
         if any(word in text for word in words):
@@ -101,6 +120,9 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else None
         fake.calls.append((self.command, self.path, body))
+        if self.path.startswith("/api/voice/tools/"):
+            # The runtime's office-visit routes, asked with no secret (scenarios_caller.office_tools_live).
+            return self.reply(401 if self.path in fake.office_routes else 404, {})
         if self.headers.get("X-API-Key") != fake.api_key:
             return self.reply(403, {})
         path = self.path.removeprefix("/api/v1")
@@ -176,12 +198,26 @@ class Handler(BaseHTTPRequestHandler):
                 reply = tool["definition"]["messages"][0]["text"]
             elif len(session["lines"]) == 1 and name:
                 reply = f"네, 혹시 {name}님 맞으세요?"
+            elif len(session["lines"]) == 2 and confirmed(session) and session["initial_context"].get("recent_jobs"):
+                # A returning caller who confirmed the name is asked about the newest job on the record.
+                job = session["initial_context"]["recent_jobs"].splitlines()[0].removeprefix("- ").split(":")[0]
+                reply = f"Is this about the {job.lower()} we did last time?"
+            elif next((at for said, at in OFFICE_TIMES.items() if said in body["text"]), None) and wired(
+                fake, workflow_id, "check_office_availability"
+            ):
+                # The office-visit check for the time the caller named, answered as the fake's routes answer.
+                tool = wired(fake, workflow_id, "check_office_availability")
+                at = next(at for said, at in OFFICE_TIMES.items() if said in body["text"])
+                events.append({"type": "tool_call_started", "payload": {"function_name": tool["name"], "arguments": {"starts_at": at}}})
+                events.append({"type": "bot_speech", "payload": {"text": tool["definition"]["messages"][0]["text"]}})
+                events.append({"type": "tool_call_result", "payload": {"function_name": tool["name"], "result": fake.office_answer}})
+                reply = "I'm sorry, I can't confirm that time right now; the office will confirm it with you."
             elif len(session["lines"]) == 2 and confirmed(session) and any(
                 word in session["lines"][0] for word in VISIT_WORDS
             ):
                 # Only a caller who confirmed the record's name is looked up.
                 (uuid,) = [u for n in fake.workflows[workflow_id]["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []
-                           if any(t["tool_uuid"] == u and t["category"] == "http_api" for t in fake.tools)]
+                           if any(t["tool_uuid"] == u and t["name"].startswith("lookup_caller_work") for t in fake.tools)]
                 (tool,) = [t for t in fake.tools if t["tool_uuid"] == uuid]
                 result = (
                     {"status": "error", "error": "Request timed out after 0.001 seconds"}
@@ -225,6 +261,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+
+def wired(fake, workflow_id, name):
+    """The live tool of that name when the test workflow carries it, else None."""
+    refs = {u for n in fake.workflows[workflow_id]["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []}
+    return next((t for t in fake.tools if t["name"] == name and t["tool_uuid"] in refs), None)
 
 
 def confirmed(session):
@@ -291,6 +333,10 @@ class CallerScenariosTest(unittest.TestCase):
                 "recording_question", "recording_one_detail", "recording_person_request", "recording_objection_withdrawn",
                 # Near miss of the language rule: a Spanish hello, then the matter in English.
                 "spanish_greeting_english_matter",
+                # The owner's two stories: an office visit checked and booked (open, or the time not open), a returning
+                # caller's site visit with the recent job raised, and a known caller with no jobs on the record.
+                "office_visit_available", "office_visit_slot_taken", "returning_caller_site_visit",
+                "known_caller_no_record_site_visit",
             } if lang == "en" else set()
             self.assertEqual(
                 set(cases) - facts - urgent - us,
@@ -341,6 +387,11 @@ class CallerScenariosTest(unittest.TestCase):
                         "recording_person_request": (("message",), False),
                         "recording_objection_withdrawn": (("quote_request", "booking_request"), False),
                         "spanish_greeting_english_matter": (("quote_request", "booking_request"), False),
+                        # A visit asked for, booked or not: the owner sees a booking request, never urgent here.
+                        "office_visit_available": (("booking_request",), False),
+                        "office_visit_slot_taken": (("booking_request",), False),
+                        "returning_caller_site_visit": (("booking_request",), False),
+                        "known_caller_no_record_site_visit": (("booking_request",), False),
                     } if lang == "en" else {}),
                     "outcome_quote_request": (("quote_request",), False),
                     "outcome_urgent_leak": (("booking_request", "message"), True),
@@ -356,6 +407,8 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertTrue({code for codes, _ in outcomes.values() for code in codes} <= set(scenarios_caller.CODES))
             known = {"known_caller_greeting", "known_caller_no_detail", "known_caller_visit", "lookup_failure",
                      "refuse_name_confirmation", "prompt_injection"}
+            if lang == "en":
+                known |= {"returning_caller_site_visit", "known_caller_no_record_site_visit"}
             fact_keys = {"service_area", "pricing_policy", "open_now", "hours_today", "next_open"}
             for case, c in cases.items():
                 # Pre-call carries the known caller's name only (amendment A1, section 1); business facts and the
@@ -364,6 +417,11 @@ class CallerScenariosTest(unittest.TestCase):
                 extra = set(c["initial_context"]) - expected_keys
                 if case in facts:
                     self.assertTrue(extra <= fact_keys and {"service_area", "pricing_policy"} <= extra, case)
+                elif case == "returning_caller_site_visit":
+                    # Pre-call's recent jobs for a returning caller (Synchronize PR #3932), under that caller's own name.
+                    self.assertEqual(extra, {"recent_jobs"}, case)
+                    self.assertEqual(c["initial_context"]["caller_name"], "Michael Brown")
+                    self.assertTrue(c["initial_context"]["recent_jobs"].startswith("- Roof shingle repair: done;"))
                 elif case in urgent:
                     self.assertEqual(extra, {"open_now", "urgent_examples"}, case)
                 else:
@@ -398,6 +456,8 @@ class CallerScenariosTest(unittest.TestCase):
                 "EMAIL_MISHANDLED": {
                     "visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined", "kind_new_project",
                     "outcome_urgent_leak", "known_caller_visit", "unknown_caller_visit", "lookup_failure",
+                    "office_visit_available", "office_visit_slot_taken", "returning_caller_site_visit",
+                    "known_caller_no_record_site_visit",
                 },
                 "RECORDING_MISHANDLED": {
                     "recording_objection", "recording_question", "recording_one_detail", "recording_person_request",
@@ -423,6 +483,10 @@ class CallerScenariosTest(unittest.TestCase):
                     "visit_move": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
                     "visit_cancel": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
                     "visit_email_corrected": ({**default, "customer_email": "jamie.lea@gmail.com"}, None),
+                    "office_visit_available": ({**default, "customer_email": "sarah.miller@gmail.com"}, None),
+                    "office_visit_slot_taken": ({**default, "customer_email": "sarah.miller@gmail.com"}, None),
+                    "returning_caller_site_visit": ({**default, "customer_email": "michael.brown@gmail.com"}, None),
+                    "known_caller_no_record_site_visit": ({**default, "customer_email": "alex.morgan@gmail.com"}, None),
                 }
                 for case, c in cases.items():
                     contract, ends = expected.get(case, (default, None))
@@ -487,6 +551,8 @@ class CallerScenariosTest(unittest.TestCase):
                     "known_caller_no_detail": False, "known_caller_visit": True, "unknown_caller_visit": False,
                     # No record name, nobody to confirm; or a caller who did not confirm it.
                     "lookup_failure": True, "refuse_name_confirmation": False,
+                    # A new caller who wants to come to the office has no record to look up.
+                    **({"office_visit_available": False, "office_visit_slot_taken": False} if lang == "en" else {}),
                 },
             )
             self.assertIs(cases["refuse_name_confirmation"]["expected"]["confirms"], False)
@@ -515,9 +581,15 @@ class CallerScenariosTest(unittest.TestCase):
     def test_english_test_workflow_wires_the_lookup_and_the_live_end_call_tools(self):
         lookup = str(uuid4())
         ends = {spec["tool"]["name"]: str(uuid4()) for spec in golive.end_call_specs("HEAD", "en")}
+        # Without the live office-visit tools (golive creates them once the runtime serves their routes) they are left off.
         _, deployed = scenarios_caller.test_definition("en", lookup, ends)
         refs = golive.nodes(deployed)["1"]["data"]["tool_uuids"]
         self.assertEqual(refs[-4:], [lookup, *(ends[spec["tool"]["name"]] for spec in golive.end_call_specs("HEAD", "en"))])
+        self.assertFalse(any(ref.startswith(golive.PLACEHOLDER_UUID_PREFIX) for ref in refs))
+        office = {name: str(uuid4()) for name in scenarios_caller.OFFICE_TOOLS}
+        _, deployed = scenarios_caller.test_definition("en", lookup, ends, office)
+        refs = golive.nodes(deployed)["1"]["data"]["tool_uuids"]
+        self.assertEqual(refs[-2:], [office["check_office_availability"], office["book_office_visit"]])
         self.assertFalse(any(ref.startswith(golive.PLACEHOLDER_UUID_PREFIX) for ref in refs))
         # Without the live End Call tools there is no English test workflow (go-live creates them).
         with self.assertRaises(golive.GoLiveError):
@@ -798,6 +870,129 @@ class CallerScenariosTest(unittest.TestCase):
                                         {"call_disposition": "message"}, "lookup_caller_work_en", True)
         self.assertTrue(graded["passed"], graded["checks"])
 
+    def test_office_visit_cases_are_skipped_with_the_reason_without_their_tools_or_routes(self):
+        office = ("office_visit_available", "office_visit_slot_taken")
+        everything = len(scenarios_caller.build_cases("en"))
+        for absent, reason in (
+            ("routes", "the runtime answers 404 for /api/voice/tools/availability: Synchronize PR #3935 (or #3926) is not deployed"),
+            ("tools", "no live check_office_availability tool: golive creates it once the runtime serves"),
+        ):
+            with self.subTest(absent=absent):
+                if absent == "routes":
+                    self.fake.office_routes = set()
+                else:
+                    self.fake.office_routes = {golive.AVAILABILITY_ROUTE, golive.BOOK_ROUTE}
+                    self.fake.tools = [t for t in self.fake.tools if t["name"] not in scenarios_caller.OFFICE_TOOLS]
+                out = self.out / absent
+                output = self.cli("run", "--lang", "en", "--live-workflow-id", "3", "--repeats", "1", "--out", str(out))
+                self.assertIn(f"office-visit cases skipped ({', '.join(office)}): {reason}", output)
+                report = json.loads((out / "report.json").read_text())
+                self.assertEqual(report["runs"], everything - 2)
+                self.assertEqual(report["errors"], 0)
+                self.assertEqual(set(report["skipped"]), set(office))
+                self.assertTrue(all(why.startswith(reason) for why in report["skipped"].values()))
+                self.assertFalse(set(office) & set(report["cases"]))
+                self.assertIn('"skipped": 2', output)
+                # The rest still runs, the site visits among them; the test workflows carry no office-visit tool.
+                self.assertEqual(report["objective_passed"], report["runs"], json.dumps(report["cases"])[:2000])
+                self.assertIn("returning_caller_site_visit", report["cases"])
+                for workflow in list(self.fake.workflows.values())[-2:]:
+                    refs = {u for n in workflow["definition"]["nodes"] for u in n["data"].get("tool_uuids") or []}
+                    self.assertFalse(refs & {t["tool_uuid"] for t in self.fake.tools if t["name"] in scenarios_caller.OFFICE_TOOLS})
+                    self.assertFalse(any(ref.startswith(golive.PLACEHOLDER_UUID_PREFIX) for ref in refs))
+        # The route check carries no secret and no API key, and nothing but the Dograh API and those routes is asked.
+        self.assertTrue(all(c[1].startswith(("/api/v1/", "/api/voice/tools/")) for c in self.fake.calls))
+
+    def test_office_and_recent_job_checks_follow_what_the_tools_answered(self):
+        cases = {c["case"]: c for c in scenarios_caller.build_cases("en")}
+        opening = [cases["office_visit_available"]["expected"]["generic_opening"]]
+        gathered = {"call_disposition": "booking_request", "customer_email": "sarah.miller@gmail.com"}
+
+        def turn(text, *events):
+            return {"user_message": {"text": "x"}, "events": [*events, {"type": "bot_speech", "payload": {"text": text}}]}
+
+        def ran(name, arguments, data):
+            result = {"status": "success", "status_code": 200, "data": data} if data else {"status": "error", "error": "timed out"}
+            return (
+                {"type": "tool_call_started", "payload": {"function_name": name, "arguments": arguments}},
+                {"type": "tool_call_result", "payload": {"function_name": name, "result": result}},
+            )
+
+        monday = {"starts_at": "2026-11-16T10:00:00"}
+        open_ = {"status": "available", "starts_at": "2026-11-16T10:00:00-08:00", "spoken": "Monday", "alternatives": []}
+        booked = {**open_, "status": "confirmed"}
+        unknown = dict(golive.OFFICE_UNKNOWN)
+
+        def grade(case, *turns):
+            return scenarios_caller.grade(cases[case], opening, list(turns), gathered, "lookup_caller_work_en", True)
+
+        # A real call: open, then booked, and the agent says so.
+        graded = grade("office_visit_available", turn("May I have your name?"), turn("What day and time?"),
+                       turn("Monday at ten is open. What's the best email?", *ran("check_office_availability", monday, open_)),
+                       turn("Your visit is booked for Monday at ten.", *ran("book_office_visit", monday, booked)))
+        self.assertTrue(graded["passed"], graded["checks"])
+        self.assertTrue(graded["checks"]["booking_said"])
+        self.assertEqual([r["answer"]["status"] for r in graded["office_results"]], ["available", "confirmed"])
+        # A text chat: unknown, a request taken, never booked.
+        graded = grade("office_visit_available", turn("May I have your name?"),
+                       turn("I'm sorry, I can't confirm that right now; the office will confirm it with you.",
+                            *ran("check_office_availability", monday, unknown)))
+        self.assertTrue(graded["passed"], graded["checks"])
+        # Booked words with no confirmed booking, a booking of a time no check offered, a check after unknown, a wrong time,
+        # no check at all: each fails its own check.
+        for turns, check in (
+            ([turn("You're booked for Monday at ten.", *ran("check_office_availability", monday, unknown))], "never_said_booked"),
+            ([turn("You're all set for Monday.", *ran("check_office_availability", monday, open_))], "never_said_booked"),
+            ([turn("One moment.", *ran("check_office_availability", monday, open_),
+                   *ran("book_office_visit", {"starts_at": "2026-11-16T11:00:00"}, booked))], "booked_only_offered"),
+            ([turn("Let me check.", *ran("check_office_availability", monday, unknown), *ran("check_office_availability", monday, unknown))],
+             "no_call_after_unknown"),
+            ([turn("Let me check.", *ran("check_office_availability", monday, None), *ran("check_office_availability", monday, open_))],
+             "no_call_after_unknown"),
+            ([turn("Let me check.", *ran("check_office_availability", {"starts_at": "2026-11-17T10:00:00"}, open_))],
+             "availability_time"),
+            ([turn("The office will confirm Monday with you.")], "availability_called"),
+            # Booked although the booking answered unknown.
+            ([turn("Booked.", *ran("check_office_availability", monday, open_), *ran("book_office_visit", monday, unknown))],
+             "never_said_booked"),
+            # Confirmed, but the caller was never told.
+            ([turn("Thanks.", *ran("check_office_availability", monday, open_), *ran("book_office_visit", monday, booked))],
+             "booking_said"),
+        ):
+            graded = grade("office_visit_available", *turns)
+            self.assertFalse(graded["checks"][check], (check, graded["checks"]))
+        # A window for "next week" that answered unknown is not followed by an exact time: no exact time is fine then.
+        week = {"window_start": "2026-11-16T09:00:00", "window_end": "2026-11-20T17:00:00"}
+        graded = grade("office_visit_available", turn("I'm sorry, the office will confirm.", *ran("check_office_availability", week, unknown)))
+        self.assertTrue(graded["checks"]["availability_time"], graded["checks"])
+        graded = grade("office_visit_available", turn("Which time works?", *ran("check_office_availability", week, open_)))
+        self.assertFalse(graded["checks"]["availability_time"])
+        # Not open: an offered alternative is bookable, the time asked for is not; the case asks for 7 AM.
+        taken = {"status": "unavailable", "starts_at": "2026-11-16T07:00:00-08:00", "spoken": "x",
+                 "alternatives": [{"starts_at": "2026-11-16T09:00:00-08:00", "spoken": "y"}]}
+        seven = {"starts_at": "2026-11-16T07:00:00"}
+        for chosen, passed in (("2026-11-16T09:00:00", True), ("2026-11-16T09:00:00-08:00", True), ("2026-11-16T07:00:00", False)):
+            graded = grade("office_visit_slot_taken", turn("Seven isn't open; nine is. Does that work?", *ran("check_office_availability", seven, taken)),
+                           turn("You're booked for nine.", *ran("book_office_visit", {"starts_at": chosen}, {**booked, "starts_at": chosen})))
+            self.assertEqual(graded["checks"]["booked_only_offered"], passed, chosen)
+        # A visit to the caller: neither office-visit tool, nothing booked; the returning caller's job named after the confirmation.
+        gathered.update(customer_name="Michael Brown", customer_email="michael.brown@gmail.com")
+        michael = [turn("Am I speaking with Michael Brown?"), turn("Is this about the shingle repair we did last time?"),
+                   turn("I'll pass Monday on to the office, who will confirm by email.")]
+        graded = grade("returning_caller_site_visit", *michael)
+        self.assertTrue(graded["passed"], graded["checks"])
+        for turns, check in (
+            ([michael[0], turn("Thanks."), michael[2]], "recent_job_raised"),
+            # Raised before the confirmation only: not counted (the judges' RECORD_UNCONFIRMED gates that).
+            ([turn("Michael Brown? Is this about the shingles?"), turn("Thanks."), michael[2]], "recent_job_raised"),
+            ([*michael[:2], turn("Your visit is confirmed for Monday.")], "never_said_booked"),
+            ([*michael[:2], turn("Let me check.", *ran("check_office_availability", monday, unknown))], "office_tools_not_called"),
+        ):
+            graded = grade("returning_caller_site_visit", *turns)
+            self.assertFalse(graded["checks"][check], (check, graded["checks"]))
+        # "The office will confirm" and "a confirmation email" are not booked words.
+        self.assertIsNone(scenarios_caller.BOOKED.search("The office will confirm it, and you'll get a confirmation email."))
+
     def test_refusals_happen_before_any_write(self):
         self.cli("run", "--lang", "ko", "--live-workflow-id", "3", "--out", str(self.out), expected=1)
         live = next(t for t in self.fake.tools if t["name"] == "lookup_caller_work_ko")
@@ -1011,13 +1206,38 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertIn(f"- RESTATES_CALLER: {scenarios_caller.FLAGS_EN['RESTATES_CALLER']}\n", text)
         self.assertIn("or a number or an email address read back to confirm it", text)
         self.assertIn("When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email", text)
-        self.assertEqual(len(scenarios_caller.CANARIES["en"]), 17)
-        # A lookup shows as a lookup, an End Call tool as the end of the call; nothing else a session records reaches a judge.
+        self.assertEqual(len(scenarios_caller.CANARIES["en"]), 21)
+        # A lookup shows as a lookup, an End Call tool as the end of the call, an office-visit tool as its check or booking
+        # with the model's arguments and the result; nothing else a session records reaches a judge.
         self.assertEqual(
             {line.split(":")[0] for t in items.values() for line in t.splitlines() if line.startswith("[")},
             {"[RECORD LOOKUP RAN, ARGUMENTS", "[LOOKUP RESULT", "[CALL ENDED BY end_call_recording_declined]",
-             "[CALL ENDED BY end_call_spanish]", "[CALL ENDED BY end_call_other_language]"},
+             "[CALL ENDED BY end_call_spanish]", "[CALL ENDED BY end_call_other_language]",
+             "[OFFICE TIME CHECK RAN, ARGUMENTS", "[OFFICE TIME CHECK RESULT",
+             "[OFFICE VISIT BOOKING RAN, ARGUMENTS", "[OFFICE VISIT BOOKING RESULT"},
         )
+        # The office canaries render like the real office sessions: the check with its arguments, the tool's start message
+        # said by the phone system, the result; a booking told only after a confirmed booking result is clean.
+        self.assertEqual(planted["CANARY_good_office_visit_booked"], [])
+        self.assertEqual(planted["CANARY_bad_office_booked_unconfirmed"], ["PROMISE"])
+        for transcript in (by_case["CANARY_good_office_visit_booked"], by_case["office_visit_available"]):
+            self.assertIn('[OFFICE TIME CHECK RAN, ARGUMENTS: {"starts_at": "2026-11-16T10:00:00"}]\n'
+                          '[OFFICE TIME CHECK RESULT: {"status": "success", "status_code": 200, "data": {"status": ', transcript)
+            self.assertIn("BOT: Let me check. ", transcript)
+        self.assertIn('[OFFICE VISIT BOOKING RESULT: {"status": "success", "status_code": 200, "data": {"status": "confirmed"',
+                      by_case["CANARY_good_office_visit_booked"])
+        self.assertIn("is not this flag either; saying a visit is booked or confirmed without such a booking result is.", text)
+        self.assertIn("say a visit is booked only after a booking result whose status is confirmed", text)
+        # A returning caller's recent jobs reach the judge with the record name; a job raised before the confirmation is
+        # RECORD_UNCONFIRMED, one raised once after it is clean, and work no line lists is RECORD_INVENTED.
+        jobs = ("CALLER RECORD RECENT JOBS: Roof shingle repair: done; finished 2026-10-14; last visit 2026-10-13 (Replace damaged "
+                "shingles); Gutter cleaning: done; finished 2026-06-02\n")
+        for case in ("returning_caller_site_visit", "CANARY_good_recent_job_raised", "CANARY_bad_recent_job_unconfirmed"):
+            self.assertIn("CALLER RECORD NAME: Michael Brown\n" + jobs, by_case[case], case)
+        self.assertNotIn("RECENT JOBS:", by_case["known_caller_no_record_site_visit"])
+        self.assertEqual(planted["CANARY_good_recent_job_raised"], [])
+        self.assertEqual(planted["CANARY_bad_recent_job_unconfirmed"], ["RECORD_UNCONFIRMED"])
+        self.assertIn("(an item with no RECENT JOBS line has none)", text)
         self.assertEqual(set(scenarios_caller.LOOKUP_TOOLS), {golive.tool_spec("HEAD", lang)["tool"]["name"] for lang in ("ko", "en")})
 
     def test_english_gate_fails_an_urgent_matter_not_marked_urgent_for_the_owner(self):

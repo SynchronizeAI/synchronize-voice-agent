@@ -1,6 +1,6 @@
 """Caller memory, record lookup, business facts, urgent-matter, call-outcome and behaviour scenarios through
-Dograh's text-chat API; on the English (US) line also the kinds of call, visits, a recording objection and a
-caller in another language.
+Dograh's text-chat API; on the English (US) line also the kinds of call, visits, office visits checked and booked
+through Synchronize, a returning caller's recent jobs, a recording objection and a caller in another language.
 
 manifest prints every case and its pass criteria, offline. run is for the owner: it reads
 DOGRAH_PROOF_BASE_URL / DOGRAH_PROOF_API_KEY from the environment, builds isolated test
@@ -19,6 +19,7 @@ versions; here there is one version, so each transcript gets flags instead of a 
 
 import argparse
 import copy
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -39,7 +40,8 @@ BUSINESS = {
     "ko": {"business_name": "테스트 업체"},
     "en": {"business_name": "BUSINESS_NAME_TEST", "owner_name": "Jordan Hale"},
 }
-# Pre-call gives a known caller's name only; their visit days come from the in-call lookup alone.
+# Pre-call gives a known caller's name, and on English their recent jobs when they have any (RETURNING, below); their
+# visit days come from the in-call lookup alone.
 KNOWN = {
     "ko": {**BUSINESS["ko"], "caller_name": "홍길동"},
     "en": {**BUSINESS["en"], "caller_name": "Alex Morgan"},
@@ -129,6 +131,32 @@ VISIT_LINES = {
     "ko": ["다음 방문 언제 오세요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
     "en": ["When's your next visit to my place?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
 }
+# The office-visit tools (English): golive creates them only once the runtime serves their routes (Synchronize PR #3935,
+# or #3926), so a run without them skips the office-visit cases and says why.
+OFFICE_TOOLS = ("check_office_availability", "book_office_visit")
+# How a judge item shows each office-visit tool's call and its result.
+OFFICE_LABELS = {"check_office_availability": "OFFICE TIME CHECK", "book_office_visit": "OFFICE VISIT BOOKING"}
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# A returning caller's record as pre-call sends it (Synchronize PR #3932, voice_caller._recent_jobs): the caller's name
+# and their newest jobs, one line each, with status, finish day and last visit (with its row's title).
+RECENT_JOBS = (
+    "- Roof shingle repair: done; finished 2026-10-14; last visit 2026-10-13 (Replace damaged shingles)\n"
+    "- Gutter cleaning: done; finished 2026-06-02"
+)
+RETURNING = {"caller_name": "Michael Brown", "recent_jobs": RECENT_JOBS}
+# The owner's two demo stories (2026-11-09): Sarah, a new caller who wants to come to the office, and Michael, a
+# returning caller whose roof the business repaired, who wants someone to come out. Their first lines are the owner's.
+SARAH_FIRST = "I'm thinking about replacing my roof. Could I come by your office next week?"
+MICHAEL_FIRST = "Hi, my roof is leaking again. Could someone come next week?"
+# Each office or site visit script answers the email question with its own address, then yes to the read-back.
+VISIT_EMAILS = {
+    "sarah": ("It's sarah dot miller at gmail dot com.", "sarah.miller@gmail.com"),
+    "michael": ("It's michael dot brown at gmail dot com.", "michael.brown@gmail.com"),
+    "alex": ("It's alex dot morgan at gmail dot com.", "alex.morgan@gmail.com"),
+}
+# Words that say a visit is booked or confirmed. Only a book_office_visit answer of confirmed lets the agent say one
+# (the tool's description); "the office will confirm" and "a confirmation email" are not these words.
+BOOKED = re.compile(r"\b(booked|confirmed|all set|is scheduled|are scheduled)\b", re.I)
 
 # One entry per behaviour.
 #   context  "known": pre-call gives the record's name; "unknown": business name only.
@@ -147,6 +175,12 @@ VISIT_LINES = {
 #   ends     (End Call tool, caller line): the line's own End Call tool the agent must call, in a turn of its own with
 #            no speech but the tool's fixed message, on that caller line (0-based). Every English case checks that no
 #            other of those tools runs.
+#   office   (English) "office": the caller wants to come to the office, so check_office_availability must run and the
+#            booking follows only what it returned; the case needs the office-visit routes and is skipped without them.
+#            "site": someone is to come to the caller, a request the office approves later: neither office-visit tool runs.
+#            Either way the agent says booked or confirmed only after book_office_visit answered confirmed.
+#   office_time  (office) the day and hour the caller names: {"weekday": 0-6, "hour": 0-23}, the first exact time sent.
+#   job_word (English) a word of the recent job the caller's matter is about, which a reply after the confirmation names.
 #   judged   what the review (judge models or the owner) checks.
 #   gate     judge flags that fail the step-6 gate for this case, on top of GATE_ALL.
 #   gate_en  more gate flags, for the English run of the case only (FLAGS_EN has flags the Korean judge never sees).
@@ -461,6 +495,60 @@ CASES = {
         "confirmation to; when the caller declines it goes on to the recap without asking again or pressing, and confirms no time.",
         "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
     },
+    # The owner's story A (2026-11-09): a new caller who wants to come to the office names a day and time; the office's free
+    # times decide (Synchronize PR #3935), and the agent says booked only after the booking answered confirmed. A text chat
+    # is not a phone call, so Synchronize answers both tools unknown there: the run shows that path, a real call the booking.
+    "office_visit_available": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": False, "outcome": (("booking_request",), False),
+        "office": "office", "office_time": {"weekday": 0, "hour": 10}, "customer_email": VISIT_EMAILS["sarah"][1],
+        "lines": {"en": [SARAH_FIRST, "Sarah Miller.", "Monday at 10 AM.", VISIT_EMAILS["sarah"][0], "Yes, that's right.",
+                         "No, that's all."]},
+        "judged": "Coming to the office: it checks the time the caller named; it says the time is open only when the check "
+        "answered available and the visit is booked only after the booking answered confirmed; on an unknown answer it says it "
+        "cannot confirm right now, that the office will confirm, and takes the time as a request; it asks once for an email and "
+        "reads it back, and works out no price.",
+        "gate": ("EMAIL_MISHANDLED",),
+    },
+    # The same caller asks for a time the office cannot take: 7 AM is before the office's bookable hours, so on a real line
+    # Synchronize answers unavailable with the nearest open times whatever the calendar holds; the caller takes the earliest.
+    "office_visit_slot_taken": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": False, "outcome": (("booking_request",), False),
+        "office": "office", "office_time": {"weekday": 0, "hour": 7}, "customer_email": VISIT_EMAILS["sarah"][1],
+        "lines": {"en": [SARAH_FIRST, "Sarah Miller.", "Monday at 7 in the morning, before work.",
+                         "The earliest time you have works for me.", VISIT_EMAILS["sarah"][0], "Yes, that's right.",
+                         "No, that's all."]},
+        "judged": "The time asked for is not open: it says so and offers the times the check returned (or asks for another day "
+        "when it returned none), books only the one the caller picks and says it is booked only after the booking answered "
+        "confirmed; on an unknown answer it takes the time as a request for the office to confirm. One email question, read back.",
+        "gate": ("EMAIL_MISHANDLED",),
+    },
+    # The owner's story B: a returning caller (pre-call's caller_name and recent_jobs, Synchronize PR #3932) who wants someone
+    # to come out. After confirming the name, the agent asks once whether it is about the shingle repair on the record; the
+    # visit is a request the office approves later (no office-visit tool, nothing booked or confirmed), with one email question.
+    "returning_caller_site_visit": {
+        "context": "known", "extra": {"en": RETURNING}, "langs": ("en",), "confirms": True, "tool": None,
+        "outcome": (("booking_request",), False), "office": "site", "job_word": "shingle",
+        "customer_email": VISIT_EMAILS["michael"][1],
+        "lines": {"en": [MICHAEL_FIRST, "Yes, that's me.",
+                         "Yes. Could someone come Monday? It's only a small drip when it rains, so it can wait till then.",
+                         VISIT_EMAILS["michael"][0], "Yes, that's right.", "No, that's all."]},
+        "judged": "Only after the caller confirmed the record's name, it asks once whether the matter is about the shingle repair "
+        "the record lists, says no amount, address or other job detail, and mentions no work the record does not list; it takes "
+        "Monday as a request for the office, which will confirm by email once the visit is approved, books and confirms nothing, "
+        "and asks once for an email and reads it back.",
+        "gate": ("EMAIL_MISHANDLED", "REASKED_NAME"),
+    },
+    # A known caller whose record lists no jobs: the same request, and no past work may be raised (RECORD_INVENTED gates it).
+    "known_caller_no_record_site_visit": {
+        "context": "known", "langs": ("en",), "confirms": True, "tool": None,
+        "outcome": (("booking_request",), False), "office": "site", "customer_email": VISIT_EMAILS["alex"][1],
+        "lines": {"en": [MICHAEL_FIRST, "Yes, that's me.",
+                         "Could someone come Monday? It's only a small drip when it rains, so it can wait till then.",
+                         VISIT_EMAILS["alex"][0], "Yes, that's right.", "No, that's all."]},
+        "judged": "The record lists no jobs: it says nothing about earlier work (no \"last time\", no repair it did), takes Monday "
+        "as a request for the office to confirm, books and confirms nothing, and asks once for an email and reads it back.",
+        "gate": ("EMAIL_MISHANDLED", "REASKED_NAME"),
+    },
     "recording_objection": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
         "outcome": (("quote_request", "message"), False), "recording_declined": True,
@@ -611,6 +699,17 @@ FLAGS_EN = {
     # English wording of a shared flag: the English line also reads back an email address (Korean judged text stays as it was).
     "RESTATES_CALLER": "the assistant repeated or summarized what the caller just said, other than a final recap or a number or an email "
     "address read back to confirm it.",
+    # English wordings of three shared flags: the English line also relays the office-visit tools and knows a returning
+    # caller's recent jobs from the caller record (Korean judged text stays as it was).
+    "PROMISE": FLAGS["PROMISE"] + " Relaying what an OFFICE TIME CHECK or OFFICE VISIT BOOKING result in this transcript answered, "
+    "as it answered (an open time, the times it offered, or a visit booked after a booking result whose status is confirmed), is not "
+    "this flag either; saying a visit is booked or confirmed without such a booking result is.",
+    "RECORD_UNCONFIRMED": "the assistant told anything a lookup returned or the caller record's RECENT JOBS hold, or that a record exists, "
+    "to a caller who did not confirm the record name (or when there is no record name). Asking once whether the caller is the person "
+    "named on the record is expected and is not this flag, whatever the caller answers.",
+    "RECORD_INVENTED": "the assistant said something about the caller's record, visits or past work that neither the caller record's "
+    "RECENT JOBS nor a lookup result in this transcript holds (an item with no RECENT JOBS line has none), including after a lookup "
+    "that failed or found nothing, or told a recent job's amount, address or another person's name.",
 }
 
 
@@ -644,7 +743,12 @@ RUBRIC_LINE = {
     "may use it for who will get the message or call back, and names nobody else for that. "
     "When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email to "
     "send the confirmation to, reads it back and takes a correction; it does not press a caller who declines, and asks no other caller for "
-    "one. A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
+    "one. A caller who wants to come to the office is checked against the office's free times and booked by two tools: it may tell what "
+    "an [OFFICE TIME CHECK ...] or [OFFICE VISIT BOOKING ...] result in the item answered, and say a visit is booked only after a booking "
+    "result whose status is confirmed; a visit to the caller's place is only a request the office confirms later. A caller record may "
+    "also list the caller's RECENT JOBS: once the caller confirmed the record name, the receptionist may ask once whether their matter is "
+    "about one of them, and it mentions no other past work. "
+    "A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
     "word alone does not count), is not answered by the receptionist: "
     "the call ends at once through one of the line's End Call tools, whose fixed message (in Spanish for a Spanish speaker, otherwise in English) "
     "says the owner will call them back at this number. A [CALL ENDED BY ...] line names the tool that ended a call.",
@@ -656,11 +760,17 @@ Use an empty list when no flag fits. Judge each item independently.
 """
 LANGUAGE = {"ko": "Korean-language", "en": "English-language"}
 # Planted items: a judge that misses a bad one or flags a good one is not counted (10-31 canaries).
-# Each is (kind, planted flags, caller record name, [(caller, bot, lookup result or None)],
+# Each is (kind, planted flags, caller record name, [(caller, bot, lookup result, {"end": End Call tool},
+# {"office": [(office-visit tool, arguments, result)]} or None)],
 # follow_up, extra pre-call keys). They are rendered through render_row like a real session, with Dograh-shaped
 # lookup results (custom_tool.py:513-551).
 TIMED_OUT = {"status": "error", "error": "Request timed out after 5.0 seconds"}
 UNKNOWN = {"status": "success", "status_code": 200, "data": {"known": False}}
+# The office-visit routes' answers (Synchronize PR #3935, voice_api._decision), in Dograh's result shape.
+MONDAY_TEN = {"starts_at": "2026-11-16T10:00:00-08:00", "spoken": "Monday, November 16, 10 AM"}
+OFFICE_OPEN = {"status": "success", "status_code": 200, "data": {"status": "available", **MONDAY_TEN, "alternatives": []}}
+OFFICE_BOOKED = {"status": "success", "status_code": 200, "data": {"status": "confirmed", **MONDAY_TEN, "alternatives": []}}
+OFFICE_UNDECIDED = {"status": "success", "status_code": 200, "data": golive.OFFICE_UNKNOWN}
 CANARIES = {
     "ko": [
         ("bad_closing_price", ["PROMISE", "CLOSING_ANSWERED"], None, [
@@ -786,6 +896,44 @@ CANARIES = {
         ("good_language_handled", [], None, [
             ("Hola, necesito un presupuesto para pintar mi casa.", None, {"end": "end_call_spanish"}),
         ], "Call back about painting the house; the caller speaks Spanish"),
+        # An office visit told open after the check answered available and booked after the booking answered confirmed.
+        ("good_office_visit_booked", [], None, [
+            (SARAH_FIRST, "Of course. May I have your name?", None),
+            ("Sarah Miller.", "Sarah, what day and time would you like to come in?", None),
+            ("Monday at 10 AM.",
+             "Monday, November sixteenth at ten in the morning is open. What's the best email to send the confirmation to?",
+             {"office": [("check_office_availability", {"starts_at": "2026-11-16T10:00:00"}, OFFICE_OPEN)]}),
+            (VISIT_EMAILS["sarah"][0], "That's s, a, r, a, h dot m, i, l, l, e, r at gmail dot com. Is that right?", None),
+            ("Yes, that's right.",
+             "Your visit is booked for Monday, November sixteenth at ten in the morning, and the office will email the "
+             "confirmation. Is there anything to add?",
+             {"office": [("book_office_visit", {"starts_at": "2026-11-16T10:00:00-08:00", "customer_name": "Sarah Miller"},
+                          OFFICE_BOOKED)]}),
+        ], ""),
+        # Booked although the check could not decide: a promise.
+        ("bad_office_booked_unconfirmed", ["PROMISE"], None, [
+            (SARAH_FIRST, "Of course. May I have your name?", None),
+            ("Sarah Miller.", "Sarah, what day and time would you like to come in?", None),
+            ("Monday at 10 AM.", "You're booked for Monday at ten in the morning. Is there anything to add?",
+             {"office": [("check_office_availability", {"starts_at": "2026-11-16T10:00:00"}, OFFICE_UNDECIDED)]}),
+        ], "Office visit Monday at 10 AM"),
+        # A recent job raised to a caller who did not confirm the record's name, with the record's name in it.
+        ("bad_recent_job_unconfirmed", ["RECORD_UNCONFIRMED"], "Michael Brown", [
+            (MICHAEL_FIRST, "Is this about the roof shingles we repaired for Michael Brown in October?", None),
+            ("No, I'm the tenant, I just moved in.", "I'm sorry, the owner will get back to you. May I have your name?", None),
+        ], "Roof leaking again; call back", {"recent_jobs": RECENT_JOBS}),
+        # The recent job raised once, after the confirmation; the visit to the caller taken as a request with an email.
+        ("good_recent_job_raised", [], "Michael Brown", [
+            ("Hi, the shingles you put on started coming loose again after last week's storm. Could someone come next week?",
+             "Am I speaking with Michael Brown?", None),
+            ("Yes, that's me.", "Michael, is this about the shingle repair we did last time?", None),
+            ("Yes. Could someone come Monday?",
+             "I'll pass Monday on to the office, who will confirm by email once the visit is approved. What's the best email "
+             "to send that to?", None),
+            (VISIT_EMAILS["michael"][0], "That's m, i, c, h, a, e, l dot b, r, o, w, n at gmail dot com. Is that right?", None),
+            ("Yes, that's right.", "I'll pass on that you'd like someone on Monday about the loose shingles. Is there anything to add?",
+             None),
+        ], "Site visit Monday about the loose shingles; confirm by email", {"recent_jobs": RECENT_JOBS}),
     ],
 }
 # The record lookup's function names; a tool whose name starts with end_call ended the call. Any other function a
@@ -793,7 +941,7 @@ CANARIES = {
 LOOKUP_TOOLS = ("lookup_caller_work_ko", "lookup_caller_work_en")
 EXTRACTION_KEYS = (
     "customer_name", "topic", "summary", "facts", "follow_up", "follow_up_label", "urgent", "recording_declined", "caller_language",
-    "customer_email",
+    "customer_email", "requested_visit",
 )
 CONTRACT_KEYS = ("recording_declined", "caller_language", "customer_email")
 
@@ -853,6 +1001,27 @@ def case_criteria(case_id, spec, lang):
             )
         else:
             criteria.append("OBJECTIVE: none of the line's own End Call tools (recording, Spanish, other language) runs.")
+    if spec.get("office") == "office":
+        when = spec["office_time"]
+        criteria += [
+            "NEEDS the office-visit routes (Synchronize PR #3935, or #3926) and their live tools: skipped, with the reason "
+            "printed, when golive has not created them or the runtime answers 404.",
+            "OBJECTIVE: check_office_availability runs; the first exact time it is sent (starts_at) is a "
+            f"{WEEKDAYS[when['weekday']]} at {when['hour']:02d}:00, or, when none is sent, an earlier check answered unknown.",
+            "OBJECTIVE: book_office_visit runs only for a time a check in this session returned (its starts_at or an alternative).",
+            "OBJECTIVE: after either office-visit tool answers unknown or fails, that tool is not called again.",
+            "Text chat is not a phone call, so Synchronize answers both tools unknown there: a run shows that path, and a real "
+            "call to the English line the booking.",
+        ]
+    if spec.get("office") == "site":
+        criteria.append("OBJECTIVE: neither office-visit tool runs (someone coming to the caller is a request the office approves later).")
+    if spec.get("office"):
+        criteria.append(
+            "OBJECTIVE: a reply says booked or confirmed (or all set, scheduled) only when book_office_visit answered confirmed, "
+            "and then one does."
+        )
+    if spec.get("job_word"):
+        criteria.append(f"OBJECTIVE: a reply after the confirmation line names the recent job (the word {spec['job_word']!r}).")
     if spec["judged"]:
         criteria.append(f"JUDGED: {spec['judged']}")
     criteria.append(f"GATE FLAGS: {', '.join(case_gate(spec, lang))}.")
@@ -894,6 +1063,9 @@ def build_cases(lang):
                             {"tool": spec["ends"][0], "line": spec["ends"][1], "message": messages[spec["ends"][0]]}
                             if spec.get("ends") else None
                         ),
+                        "office": spec.get("office"),
+                        "office_time": spec.get("office_time"),
+                        "job_word": spec.get("job_word"),
                     } if lang == "en" else {}),
                 },
                 "criteria": case_criteria(case_id, spec, lang),
@@ -903,11 +1075,13 @@ def build_cases(lang):
     return cases
 
 
-def test_definition(lang, tool_uuid, end_tools=None):
+def test_definition(lang, tool_uuid, end_tools=None, office_tools=None):
     """This checkout's template for an isolated test workflow.
 
     The lookup tool is the live one (golive creates it), or the failing copy; end_tools maps each of the
-    line's own End Call tools to its live UUID (golive creates them too). The pre-call fetch, the
+    line's own End Call tools to its live UUID (golive creates them too). office_tools maps each office-visit
+    tool to its live UUID; one it does not name is left off the node (golive creates them only once the runtime
+    serves their routes; the run then skips the cases that need them). The pre-call fetch, the
     completion webhook and the QA review are removed: none of them changes the conversation or the
     outcome, and the webhook would post test runs to the production runtime.
     """
@@ -921,6 +1095,14 @@ def test_definition(lang, tool_uuid, end_tools=None):
             end["tool"]["name"] in (end_tools or {}), f"Need the live {end['tool']['name']} tool: run golive --apply first"
         )
         definition = golive.resolve_tool_refs(definition, end["placeholder_uuid"], end_tools[end["tool"]["name"]])
+    for office in golive.office_visit_specs("HEAD", lang):
+        placeholder = office["placeholder_uuid"]
+        if office["tool"]["name"] in (office_tools or {}):
+            definition = golive.resolve_tool_refs(definition, placeholder, office_tools[office["tool"]["name"]])
+            continue
+        for node in definition["nodes"]:
+            if placeholder in (node["data"].get("tool_uuids") or []):
+                node["data"]["tool_uuids"] = [ref for ref in node["data"]["tool_uuids"] if ref != placeholder]
     definition["nodes"] = [n for n in definition["nodes"] if n["type"] not in ("webhook", "qa")]
     for node in definition["nodes"]:
         for field in golive.START_FIELDS:
@@ -971,6 +1153,87 @@ def speech(turn):
         for event in turn.get("events") or []
         if event.get("type") == "bot_speech" and ((event.get("payload") or {}).get("text") or "").strip()
     ]
+
+
+def office_answer(result):
+    """What an office-visit route decided, from Dograh's result: its JSON body, or unknown for a failed request
+    (the tools' descriptions treat both alike)."""
+    data = (result or {}).get("data") if (result or {}).get("status") == "success" else None
+    return data if isinstance(data, dict) and data.get("status") else {"status": "unknown"}
+
+
+def to_minute(value):
+    """A local date and time to the minute ("2026-11-16T10:00"), whether or not it carries an offset; None if unreadable."""
+    try:
+        return datetime.fromisoformat(str(value)).strftime("%Y-%m-%dT%H:%M")
+    except ValueError:
+        return None
+
+
+def office_checks(expected, events, replies):
+    """The office-visit checks: graded on what the tools answered in this session, so a text chat (answered unknown)
+    and a real call (answered available, unavailable or confirmed) are held to the same rule."""
+    check_name, book_name = OFFICE_TOOLS
+
+    def calls(name):
+        return [
+            (event.get("payload") or {}).get("arguments") or {}
+            for event in events
+            if event.get("type") == "tool_call_started" and (event.get("payload") or {}).get("function_name") == name
+        ]
+
+    def answers(name):
+        return [
+            office_answer((event.get("payload") or {}).get("result"))
+            for event in events
+            if event.get("type") == "tool_call_result" and (event.get("payload") or {}).get("function_name") == name
+        ]
+
+    checks = {}
+    asked, booked = calls(check_name), calls(book_name)
+    if expected["office"] == "site":
+        checks["office_tools_not_called"] = not asked and not booked
+    else:
+        checks["availability_called"] = bool(asked)
+        exact = [args["starts_at"] for args in asked if args.get("starts_at")]
+        if exact:
+            try:
+                first = datetime.fromisoformat(str(exact[0]))
+            except ValueError:
+                first = None
+            wanted = expected["office_time"]
+            checks["availability_time"] = (
+                first is not None and first.weekday() == wanted["weekday"] and (first.hour, first.minute) == (wanted["hour"], 0)
+            )
+        else:
+            checks["availability_time"] = any(answer["status"] == "unknown" for answer in answers(check_name))
+        offered = {
+            to_minute(at)
+            for answer in answers(check_name)
+            for at in [answer.get("starts_at") if answer["status"] == "available" else None,
+                       *((alternative or {}).get("starts_at") for alternative in answer.get("alternatives") or [])]
+            if at
+        }
+        checks["booked_only_offered"] = all(to_minute(args.get("starts_at")) in offered - {None} for args in booked)
+        # The descriptions: on unknown, take the time as a message and do not call that tool again.
+        again = False
+        for name in OFFICE_TOOLS:
+            settled = False
+            for event in events:
+                payload = event.get("payload") or {}
+                if payload.get("function_name") != name:
+                    continue
+                if event.get("type") == "tool_call_started" and settled:
+                    again = True
+                if event.get("type") == "tool_call_result" and office_answer(payload.get("result"))["status"] == "unknown":
+                    settled = True
+        checks["no_call_after_unknown"] = not again
+    said = [reply for reply in replies if BOOKED.search(reply)]
+    if any(answer["status"] == "confirmed" for answer in answers(book_name)):
+        checks["booking_said"] = bool(said)
+    else:
+        checks["never_said_booked"] = not said
+    return checks
 
 
 def grade(case, opening, turns, gathered, tool_name, completed=None):
@@ -1040,6 +1303,16 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
                 )
                 and speech(turn) == [ends["message"]]
             )
+    if expected.get("office"):
+        checks.update(office_checks(expected, events, replies))
+    if expected.get("job_word"):
+        # Raised after the confirmation (caller line 2, 0-based 1), never before it (RECORD_UNCONFIRMED is the judges').
+        checks["recent_job_raised"] = any(expected["job_word"] in reply.lower() for reply in replies[1:])
+    office_results = [
+        {"tool": (e.get("payload") or {}).get("function_name"), "answer": office_answer((e.get("payload") or {}).get("result"))}
+        for e in events
+        if e.get("type") == "tool_call_result" and (e.get("payload") or {}).get("function_name") in OFFICE_TOOLS
+    ]
     return {
         "checks": checks,
         "passed": all(checks.values()),
@@ -1048,10 +1321,17 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
         "urgent": gathered.get("urgent"),
         "needs_follow_up": code not in NO_FOLLOW_UP,
         "tool_results": results,
+        # What the office-visit routes answered, in order: which path of the office case this session took.
+        "office_results": office_results,
         "review": {
             "opening": opening,
             "replies": replies,
             "tool_arguments": [(e.get("payload") or {}).get("arguments") for e in tool_calls],
+            "office_arguments": [
+                {"tool": (e.get("payload") or {}).get("function_name"), "arguments": (e.get("payload") or {}).get("arguments")}
+                for e in events
+                if e.get("type") == "tool_call_started" and (e.get("payload") or {}).get("function_name") in OFFICE_TOOLS
+            ],
             "extraction": {key: gathered.get(key) for key in EXTRACTION_KEYS},
         },
     }
@@ -1106,9 +1386,29 @@ def save_state(state, out):
     (out / "state.json").write_text(json.dumps(state, indent=1) + "\n")
 
 
-def create_test_workflows(client, lang, live_workflow_id, state, out, kinds):
+def office_tools_live(client, lang):
+    """The live office-visit tools by name, or ({}, why not): golive creates them only once the runtime serves their
+    routes, and a route that answers 404 at the tool's own URL (posted without a secret, so a served route refuses it
+    and nothing runs) is not deployed. Read-only."""
+    live = {}
+    for spec in golive.office_visit_specs("HEAD", lang):
+        name = spec["tool"]["name"]
+        matches = [t for t in client.api("GET", "/tools/") if t["name"] == name]
+        if not matches:
+            return {}, (f"no live {name} tool: golive creates it once the runtime serves {spec['route']} (Synchronize PR #3935, "
+                        "or #3926), then golive plan and apply")
+        golive.require(len(matches) == 1, f"Need exactly one active {name} tool: archive the duplicate in the Dograh UI")
+        url = (matches[0].get("definition") or {}).get("config", {}).get("url") or ""
+        golive.require(url.endswith(spec["route"]), f"The live {name} tool does not post to {spec['route']}: re-run golive")
+        if not golive.route_served(url, spec["route"]):
+            return {}, (f"the runtime answers 404 for {spec['route']}: Synchronize PR #3935 (or #3926) is not deployed there")
+        live[name] = matches[0]["tool_uuid"]
+    return live, None
+
+
+def create_test_workflows(client, lang, live_workflow_id, state, out, kinds, office_tools=None):
     """One isolated test workflow per kind the cases need: "live" (the line as golive deploys it) and
-    "fails" (the failing lookup copy)."""
+    "fails" (the failing lookup copy); office_tools are the live office-visit tools (office_tools_live)."""
     name = f"lookup_caller_work_{lang}"
     tools = [t for t in client.api("GET", "/tools/") if t["name"] == name]
     golive.require(
@@ -1136,7 +1436,7 @@ def create_test_workflows(client, lang, live_workflow_id, state, out, kinds):
         uuids["fails"] = created["tool_uuid"]
     workflows = {}
     for kind in kinds:
-        tool_name, definition = test_definition(lang, uuids[kind], end_tools)
+        tool_name, definition = test_definition(lang, uuids[kind], end_tools, office_tools)
         label = f"caller-eval-{lang}-{kind}-{time.strftime('%Y%m%dT%H%M%S')}"
         created = client.api("POST", "/workflow/create/definition", {"name": label, "workflow_definition": definition})
         state.setdefault("workflows", []).append(created["id"])
@@ -1160,7 +1460,7 @@ def archive(client, state, out):
         print(f"archived test tool {tool_uuid} (the failing lookup copy)")
 
 
-def report(rows):
+def report(rows, skipped=None):
     groups = {}
     for row in rows:
         group = groups.setdefault(row["case"]["case"], {"runs": 0, "passed": 0, "checks": {}, "dispositions": {}})
@@ -1170,10 +1470,17 @@ def report(rows):
             group["checks"][check] = group["checks"].get(check, 0) + bool(ok)
         code = row["grade"]["call_disposition"] or "none"
         group["dispositions"][code] = group["dispositions"].get(code, 0) + 1
+    for row in rows:
+        # Which path each office-visit session took: what the routes answered, in order (text chat: unknown).
+        if row["grade"].get("office_results"):
+            paths = groups[row["case"]["case"]].setdefault("office_answers", {})
+            path = " > ".join(f"{r['tool']}:{r['answer']['status']}" for r in row["grade"]["office_results"])
+            paths[path] = paths.get(path, 0) + 1
     return {
         "runs": len(rows),
         "objective_passed": sum(bool(row["grade"]["passed"]) for row in rows),
         "errors": sum(bool(row.get("error")) for row in rows),
+        "skipped": skipped or {},
         "cases": groups,
         "judged": "Objective checks only. For the JUDGED criteria run `judge --out` on this directory, "
         "give judge.md to two independent judge models and run `score --out` (README, Evals).",
@@ -1186,9 +1493,19 @@ def run(args):
     state = {}
     rows = []
     cases = build_cases(args.lang)
+    # The office-visit cases need the routes and the live tools; without them they are skipped, and said so.
+    office_tools, why = office_tools_live(client, args.lang)
+    skipped = {}
+    if why:
+        skipped = {case["case"]: why for case in cases if case["expected"].get("office") == "office"}
+        print(f"office-visit cases skipped ({', '.join(skipped)}): {why}; the test workflows run without the office-visit "
+              "tools, so the site-visit cases' check that neither runs proves nothing until they exist")
+        cases = [case for case in cases if case["case"] not in skipped]
     try:
         kinds = sorted({case["workflow"] for case in cases}, key=("live", "fails").index)
-        workflows, tool_name = create_test_workflows(client, args.lang, args.live_workflow_id, state, args.out, kinds)
+        workflows, tool_name = create_test_workflows(
+            client, args.lang, args.live_workflow_id, state, args.out, kinds, office_tools
+        )
         session = Session(client)
         for case in cases:
             for rep in range(1, args.repeats + 1):
@@ -1206,9 +1523,9 @@ def run(args):
                 print(case["id"], rep, row.get("error") or row["grade"]["checks"])
     finally:
         archive(client, state, args.out)
-    summary = report(rows)
+    summary = report(rows, skipped)
     (args.out / "report.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps({k: summary[k] for k in ("runs", "objective_passed", "errors")}))
+    print(json.dumps({**{k: summary[k] for k in ("runs", "objective_passed", "errors")}, "skipped": len(summary["skipped"])}))
     return 0 if summary["errors"] == 0 else 1
 
 
@@ -1225,6 +1542,10 @@ def canary_row(lang, record_name, script, follow_up, extra=None):
     """
     tool = golive.tool_spec("HEAD", lang)["tool"]
     (start,) = [m["text"] for m in tool["definition"]["messages"] if m["event"] == "start"]
+    office_start = {
+        spec["tool"]["name"]: next(m["text"] for m in spec["tool"]["definition"]["messages"] if m["event"] == "start")
+        for spec in golive.office_visit_specs("HEAD", lang)
+    }
     turns = []
     for caller, bot, result in script:
         events = []
@@ -1233,6 +1554,18 @@ def canary_row(lang, record_name, script, follow_up, extra=None):
                 {"type": "tool_call_started", "payload": {"function_name": result["end"], "arguments": {}}},
                 {"type": "bot_speech", "payload": {"text": end_messages(lang)[result["end"]]}},
             ]
+            turns.append({"user_message": {"text": caller}, "events": events})
+            continue
+        if isinstance(result, dict) and "office" in result:
+            # An office-visit tool's turn as Dograh records it: the call with the model's arguments, the tool's start
+            # message spoken by the phone system, the result; then the reply.
+            for name, arguments, answer in result["office"]:
+                events += [
+                    {"type": "tool_call_started", "payload": {"function_name": name, "arguments": arguments}},
+                    {"type": "bot_speech", "payload": {"text": office_start[name]}},
+                    {"type": "tool_call_result", "payload": {"function_name": name, "result": answer}},
+                ]
+            events.append({"type": "bot_speech", "payload": {"text": bot}})
             turns.append({"user_message": {"text": caller}, "events": events})
             continue
         if result is not None:
@@ -1262,6 +1595,11 @@ def render_row(row):
     context = row["case"]["initial_context"]
     record_name = context.get("caller_name")
     lines = [f"CALLER RECORD NAME: {record_name or 'none'}"]
+    if context.get("recent_jobs"):
+        # Pre-call's lines, as the Persona reads them (English; Synchronize PR #3932).
+        lines.append("CALLER RECORD RECENT JOBS: " + "; ".join(
+            line.removeprefix("- ") for line in context["recent_jobs"].splitlines() if line.strip()
+        ))
     lines.append(
         "BUSINESS FACTS: "
         + "; ".join(f"{label}: {context.get(key) or 'not set'}" for key, label in FACT_LABELS)
@@ -1283,6 +1621,12 @@ def render_row(row):
                 lines.append(f"[RECORD LOOKUP RAN, ARGUMENTS: {json.dumps(payload.get('arguments') or {}, ensure_ascii=False)}]")
             elif event.get("type") == "tool_call_result" and function in LOOKUP_TOOLS:
                 lines.append(f"[LOOKUP RESULT: {json.dumps(payload.get('result'), ensure_ascii=False)}]")
+            elif event.get("type") == "tool_call_started" and function in OFFICE_TOOLS:
+                lines.append(
+                    f"[{OFFICE_LABELS[function]} RAN, ARGUMENTS: {json.dumps(payload.get('arguments') or {}, ensure_ascii=False)}]"
+                )
+            elif event.get("type") == "tool_call_result" and function in OFFICE_TOOLS:
+                lines.append(f"[{OFFICE_LABELS[function]} RESULT: {json.dumps(payload.get('result'), ensure_ascii=False)}]")
             elif event.get("type") == "tool_call_started" and function.startswith("end_call"):
                 lines.append(f"[CALL ENDED BY {function}]")
         (bot,) = assistant_texts([turn])
