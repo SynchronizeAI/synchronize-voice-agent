@@ -1,0 +1,63 @@
+{
+  "placeholder_uuid": "00000000-0000-4000-8000-000000000107",
+  "tool": {
+    "name": "book_office_visit",
+    "description": "Books the office visit on the calendar. Use only for an office visit, and only for a specific time the caller chose that check_office_availability just returned. Never for a site visit. Say nothing while it runs; the phone system says the waiting line. Then say only what it answered, using its spoken value: confirmed: the visit is booked for that time, and if they gave an email the office will send a confirmation email there; this is the only answer that lets you say booked. unavailable: that time was just taken; offer the times in alternatives. unknown: you cannot confirm right now and the office will confirm with them; take the time as a message and do not call again.",
+    "category": "http_api",
+    "icon": "calendar",
+    "icon_color": "#3B82F6",
+    "definition": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "type": "text",
+          "text": "One moment.",
+          "event": "start"
+        },
+        {
+          "type": "text",
+          "text": "One moment, please.",
+          "event": "delayed",
+          "after_ms": 2500
+        }
+      ],
+      "type": "http_api",
+      "config": {
+        "method": "POST",
+        "url": "https://synchronize.example.invalid/api/voice/tools/book",
+        "headers": null,
+        "credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>",
+        "parameters": [
+          {
+            "name": "starts_at",
+            "type": "string",
+            "description": "The starts_at value of the time the caller chose, copied exactly from check_office_availability.",
+            "required": true
+          },
+          {
+            "name": "customer_name",
+            "type": "string",
+            "description": "The caller's name as they gave it.",
+            "required": false
+          }
+        ],
+        "preset_parameters": [
+          {
+            "name": "workflow_run_id",
+            "type": "string",
+            "value_template": "{{initial_context.workflow_run_id}}",
+            "required": true
+          }
+        ],
+        "timeout_ms": 8000,
+        "body_template": {
+          "workflow_run_id": "{{initial_context.workflow_run_id}}",
+          "language": "en",
+          "starts_at": "{{starts_at}}",
+          "customer_name": "{{customer_name}}"
+        },
+        "body_format": "json"
+      }
+    }
+  }
+}

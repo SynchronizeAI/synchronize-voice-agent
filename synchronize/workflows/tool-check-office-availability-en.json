@@ -1,0 +1,70 @@
+{
+  "placeholder_uuid": "00000000-0000-4000-8000-000000000106",
+  "tool": {
+    "name": "check_office_availability",
+    "description": "Finds out whether the office can see the caller. Use only for an office visit, when the caller wants to come in. If they named a day and time, send starts_at. If they were vague (a day, a part of the day, next week), send window_start and window_end for what they said. If they gave no time at all, send neither. Say nothing while it runs; the phone system says the waiting line. Then say only what it answered, using each spoken value: available: that time is open; get their email if you have not asked, then call book_office_visit with that starts_at. options: offer the times in alternatives and let them pick one. unavailable: that time is not open; offer the times in alternatives, or ask for another day if there are none. unknown: you cannot confirm right now and the office will confirm with them; take the time as a message and do not call again. Never say a visit is booked from this tool.",
+    "category": "http_api",
+    "icon": "calendar",
+    "icon_color": "#3B82F6",
+    "definition": {
+      "schema_version": 1,
+      "messages": [
+        {
+          "type": "text",
+          "text": "Let me check.",
+          "event": "start"
+        },
+        {
+          "type": "text",
+          "text": "One moment, please.",
+          "event": "delayed",
+          "after_ms": 2500
+        }
+      ],
+      "type": "http_api",
+      "config": {
+        "method": "POST",
+        "url": "https://synchronize.example.invalid/api/voice/tools/availability",
+        "headers": null,
+        "credential_uuid": "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>",
+        "parameters": [
+          {
+            "name": "starts_at",
+            "type": "string",
+            "description": "The exact time the caller named, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Leave out if they named no exact time.",
+            "required": false
+          },
+          {
+            "name": "window_start",
+            "type": "string",
+            "description": "The start of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning starts at 09:00, afternoon at 12:00. Leave out if they gave no time at all.",
+            "required": false
+          },
+          {
+            "name": "window_end",
+            "type": "string",
+            "description": "The end of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning ends at 12:00, afternoon and a whole day at 17:00. Leave out if they gave no time at all.",
+            "required": false
+          }
+        ],
+        "preset_parameters": [
+          {
+            "name": "workflow_run_id",
+            "type": "string",
+            "value_template": "{{initial_context.workflow_run_id}}",
+            "required": true
+          },
+          {
+            "name": "language",
+            "type": "string",
+            "value_template": "en",
+            "required": true
+          }
+        ],
+        "timeout_ms": 5000,
+        "body_template": null,
+        "body_format": "json"
+      }
+    }
+  }
+}

@@ -2,8 +2,10 @@
 
 Successor to the proof workspace's deploy_live.py: the same exact-once line/word
 merge, with local git refs, explicit targets, credential wiring and rollback.
-One run also creates or updates the caller-work HTTP tool (by its unique name),
-resolves its UUID into the nodes and applies, of the workflow settings, only the
+One run also creates or updates the line's HTTP tools (the caller-work lookup and,
+on English, the two office-visit tools) and End Call tools (each by its unique name),
+refuses to wire an HTTP tool to a route the runtime does not serve (404),
+resolves their UUIDs into the nodes and applies, of the workflow settings, only the
 template's delta of the ones it owns (SETTINGS_KEYS and the model override's
 MODEL_KEYS, with each model connection named by its placeholder resolved by name).
 Standard library only. Nothing contacts Railway or fetches git refs.
@@ -44,6 +46,26 @@ PLACEHOLDER_UUID_PREFIX = "00000000-0000-4000-8000-"
 PLACEHOLDER_ORIGIN = "https://synchronize.example.invalid"
 PRE_CALL_ROUTE = "/api/voice/pre-call"
 TOOL_ROUTE = "/api/voice/tools/caller-work"
+# Synchronize's in-call office-visit routes (PR #3935, docs/architecture/voice-office-visit-workflow.md there;
+# #3926 has the same routes and parameters): a free-time check and a booking, each answering
+# {"status": ..., "starts_at"?, "spoken"?, "alternatives": [...]} and {"status": "unknown", "alternatives": []} for a run
+# that is not a phone call under way on a US line.
+AVAILABILITY_ROUTE = "/api/voice/tools/availability"
+BOOK_ROUTE = "/api/voice/tools/book"
+# The line's HTTP tools: each template file (per language; absent at older refs and on Korean) and the route its URL names.
+HTTP_TOOLS = (
+    ("tool-lookup-caller-work-{lang}.json", TOOL_ROUTE),
+    ("tool-check-office-availability-{lang}.json", AVAILABILITY_ROUTE),
+    ("tool-book-office-visit-{lang}.json", BOOK_ROUTE),
+)
+# A route whose tool sends no body template: its body is the model's arguments laid over the presets (custom_tool.py
+# execute_http_tool, `resolved_arguments`), so the model could also set the run id there. Only the availability check
+# is allowed that shape, because a body template renders an argument the model left out as "" (template_renderer.py
+# _render_string) and Synchronize refuses "" for its optional times (starts_at, window_start, window_end). It only reads
+# free times, of a run that must be a phone call under way on a US line; the booking, which writes, sends a body template.
+MODEL_BODY_ROUTES = (AVAILABILITY_ROUTE,)
+# The availability tool's presets: the run id from the run's context and the language, as the #3935 spec has them.
+LANGUAGE_PRESET = {"name": "language", "type": "string", "required": True}
 TOOL_FIELDS = ("name", "description", "category", "icon", "icon_color", "definition")
 # scenarios_caller.py gives every tool it creates (the failing lookup copy) this icon. A copy keeps the
 # live tool's name, because that name is the function the model calls; the icon is the one field neither the model
@@ -78,6 +100,11 @@ PROBE_RUN_ID = -2147483647  # Receiver ignores run ids; cannot identify a real c
 # Largest digit-text id accepted by the runtime's _run_id validator. Unlike
 # "0", this exercises the unknown-run lookup path rather than invalid-body handling.
 PROBE_COMPLETION_RUN_ID = "2147483647"  # Largest id Dograh's 32-bit column can hold; never a real run.
+# The booking probe's time: a weekday morning far past the two-week booking horizon, so even a run that existed could
+# not be booked by it (office_visits.inside_office_hours); the probe's run id names none.
+PROBE_STARTS_AT = "2099-01-05T10:00:00"
+# What both office-visit routes answer for a run that is not a phone call under way (voice_api._decision of UNKNOWN).
+OFFICE_UNKNOWN = {"status": "unknown", "alternatives": []}
 # The lookup tool's whole request body. At 1.51 a body template sends only its own keys, and
 # the namespaced initial_context it reads is the run's, set after the model's arguments
 # (api/services/workflow/tools/custom_tool.py:472-482); without it the body is the model's
@@ -295,9 +322,9 @@ def settings_template(ref, lang):
     return git_file(ref, f"consultation-{lang}-settings.json")["workflow_configurations"]
 
 
-def tool_spec(ref, lang):
-    """The caller-work HTTP tool at a ref, or None for refs from before the tool."""
-    spec = git_file(ref, f"tool-lookup-caller-work-{lang}.json", optional=True)
+def http_tool_spec(ref, name, route):
+    """One of the line's HTTP tools at a ref (its route with it), or None for refs from before the tool."""
+    spec = git_file(ref, name, optional=True)
     if spec is None:
         return None
     placeholder = str(UUID(spec["placeholder_uuid"]))
@@ -309,12 +336,63 @@ def tool_spec(ref, lang):
     config = tool["definition"]["config"]
     require(
         tool["category"] == tool["definition"]["type"] == "http_api"
-        and config["url"] == PLACEHOLDER_ORIGIN + TOOL_ROUTE
+        and config["url"] == PLACEHOLDER_ORIGIN + route
         and config["credential_uuid"] == "<DOGRAH_WEBHOOK_CREDENTIAL_UUID>"
         and set(tool) == set(TOOL_FIELDS),
-        "Tool template must be an HTTP API tool on the placeholder caller-work route",
+        f"Tool template must be an HTTP API tool on the placeholder {route} route",
     )
-    return {"placeholder_uuid": placeholder, "tool": tool}
+    return {"placeholder_uuid": placeholder, "tool": tool, "route": route}
+
+
+def tool_spec(ref, lang):
+    """The caller-work HTTP tool at a ref, or None for refs from before the tool."""
+    name, route = HTTP_TOOLS[0]
+    return http_tool_spec(ref, name.format(lang=lang), route)
+
+
+def office_visit_specs(ref, lang):
+    """The office-visit HTTP tools at a ref (the free-time check, then the booking); none on Korean or before them."""
+    found = [http_tool_spec(ref, name.format(lang=lang), route) for name, route in HTTP_TOOLS[1:]]
+    return [spec for spec in found if spec is not None]
+
+
+def http_body_contract(spec, lang):
+    """Refuse an HTTP tool whose request the model could steer to another run.
+
+    A tool with a body template sends only its keys (custom_tool.py execute_http_tool): the run id from the run's own
+    context, the line's language as a constant and each of the tool's parameters as its own placeholder, with the run-id
+    preset as the fail-closed guard (README, Caller memory). Only a MODEL_BODY_ROUTES tool may send the model's
+    arguments as the body, with the run-id and language presets, and no parameter may name a preset or a context.
+    """
+    config = spec["tool"]["definition"]["config"]
+    params = [parameter["name"] for parameter in config.get("parameters") or []]
+    body = config.get("body_template")
+    if body is None and spec.get("route") in MODEL_BODY_ROUTES:
+        require(
+            config.get("preset_parameters") == [*RUN_PRESET, {**LANGUAGE_PRESET, "value_template": lang}]
+            and not {"workflow_run_id", "language", "initial_context", "gathered_context"} & set(params),
+            f"Tool {spec['tool']['name']} must send the run id and its language as presets, and no parameter of those names",
+        )
+        return
+    require(
+        isinstance(body, dict)
+        and body == {**run_body(lang), **{name: "{{%s}}" % name for name in params}}
+        and not {"workflow_run_id", "language"} & set(params)
+        and config.get("preset_parameters") == RUN_PRESET,
+        "Tool template must send only the run id, from its body template, and its language",
+    )
+
+
+def route_served(url, route):
+    """Whether the runtime serves a POST route: any answer but 404. No secret is sent, so a served route refuses the
+    request itself (401, or 503 while the runtime has no Dograh) and nothing runs. Read-only."""
+    try:
+        status, _ = request("POST", url, {}, {})
+    except UncertainWrite:
+        raise GoLiveError(
+            f"Cannot reach the runtime origin to check {route}; nothing was read from or written to Dograh"
+        ) from None
+    return status != 404
 
 
 def end_call_spec(ref, name):
@@ -351,9 +429,13 @@ def end_call_specs(ref, lang):
 
 
 def tool_specs(ref, lang):
-    """Every tool a ref's template names by placeholder: the caller-work tool, then the End Call tools."""
+    """Every tool a ref's template names by placeholder, in placeholder order: the caller-work tool, the End Call tools,
+    then the office-visit tools."""
     lookup = tool_spec(ref, lang)
-    specs = ([lookup] if lookup else []) + end_call_specs(ref, lang)
+    specs = sorted(
+        ([lookup] if lookup else []) + end_call_specs(ref, lang) + office_visit_specs(ref, lang),
+        key=lambda spec: spec["placeholder_uuid"],
+    )
     require(
         len({spec["placeholder_uuid"] for spec in specs}) == len(specs)
         and len({spec["tool"]["name"] for spec in specs}) == len(specs),
@@ -689,22 +771,22 @@ def validate_wiring(definition, original, runtime, credential_uuid, lang, final=
 
 
 def planned_tool(spec, runtime, credential_uuid):
-    """The tool as go-live writes it: the caller-work tool wired to the runtime; an End Call tool as is."""
+    """The tool as go-live writes it: an HTTP tool wired to its route on the runtime; an End Call tool as is."""
     tool = copy.deepcopy(spec["tool"])
     if tool["category"] == "http_api":
         tool["definition"]["config"].update(
-            url=runtime + TOOL_ROUTE, credential_uuid=credential_uuid
+            url=runtime + spec["route"], credential_uuid=credential_uuid
         )
     return tool
 
 
-def validate_tool(tool, runtime, credential_uuid):
+def validate_tool(tool, runtime, credential_uuid, route=TOOL_ROUTE):
     config = tool["definition"]["config"]
     require(
         tool["category"] == "end_call"
         or (
             tool["category"] == "http_api"
-            and config["url"] == runtime + TOOL_ROUTE
+            and config["url"] == runtime + route
             and config["credential_uuid"] == credential_uuid
         ),
         "Tool wiring verification failed",
@@ -777,7 +859,7 @@ def tool_mode(existing, old_planned, planned):
 
 
 def wire_tool_refs(client, definition, templates, spec, tool_ref):
-    """The caller-work tool reference is wiring, like the URLs.
+    """A tool reference (the caller-work tool, an office-visit or End Call tool) is wiring, like the URLs.
 
     Every node the new template gives the tool references tool_ref once. A reference to an
     inactive tool of the same name (archived in the Dograh UI) is replaced where it stands;
@@ -834,14 +916,14 @@ def wire_tool_refs(client, definition, templates, spec, tool_ref):
     return out
 
 
-def show_tool(planned, existing, change, mode=None):
+def show_tool(planned, existing, change, mode=None, route=TOOL_ROUTE):
     name = planned["name"]
     if change is None:
         print(f"tool {name}: unchanged")
         return
     if change == "create":
         print(
-            f"tool {name}: create (route {TOOL_ROUTE}; credential reference only)"
+            f"tool {name}: create (route {route}; credential reference only)"
             if planned["category"] == "http_api"
             else f"tool {name}: create (End Call; its fixed start message only)"
         )
@@ -1394,13 +1476,18 @@ def deploy(args):
             f"Template does not reference the placeholder of tool {spec['tool']['name']}",
         )
         if spec["tool"]["category"] == "http_api":
-            config = spec["tool"]["definition"]["config"]
+            http_body_contract(spec, args.lang)
+    client = Dograh()  # Checks the connection values only; no request yet.
+    # Every HTTP tool must have its route on the runtime before anything is read from Dograh: an office-visit tool wired
+    # before Synchronize serves its route would fail every call that asks for a visit.
+    for spec in specs:
+        if spec["tool"]["category"] == "http_api":
             require(
-                config.get("body_template") == run_body(args.lang)
-                and config.get("preset_parameters") == RUN_PRESET,
-                "Tool template must send only the run id, from its body template, and its language",
+                route_served(runtime + spec["route"], spec["route"]),
+                f"The runtime origin answers 404 for {spec['route']}, the route of tool {spec['tool']['name']}: deploy the "
+                "Synchronize release that serves it first (the office-visit routes: PR #3935, or #3926), check it with "
+                "golive probe, then re-plan. Nothing was read from or written to Dograh",
             )
-    client = Dograh()
     snapshot, path = backup(
         client,
         args.workflow_id,
@@ -1450,7 +1537,10 @@ def deploy(args):
     if any(settings_values(new_settings)[f"settings.{MODEL_OVERRIDE}.{key}"] is not MISSING for key in MODEL_KEYS):
         check_model(client, settings)
     for entry in entries:
-        show_tool(entry["tool"], entry["existing"], entry["change"], field_modes.get(tool_label(entry["tool"]["name"])))
+        show_tool(
+            entry["tool"], entry["existing"], entry["change"], field_modes.get(tool_label(entry["tool"]["name"])),
+            entry["spec"].get("route"),
+        )
     merged = {
         field
         for field, mode in field_modes.items()
@@ -1509,7 +1599,7 @@ def deploy(args):
         for entry in entries:
             existing_tool = entry["existing"]
             tool = planned_tool(entry["spec"], runtime, ident)
-            validate_tool(tool, runtime, ident)
+            validate_tool(tool, runtime, ident, entry["spec"].get("route"))
             written = None
             if existing_tool is None:
                 written = state.write(
@@ -1666,7 +1756,7 @@ def probe(args):
     while wrong == secret:
         wrong = "wrong-" + uuid4().hex
     lang = TARGETS[args.workflow_id]
-    for route, url, payload, headers in (
+    probes = [
         # The URL go-live wires, with the line's language (pre_call_url).
         ("pre-call", pre_call_url(runtime, lang), body, {"Idempotency-Key": f"dograh-pre-call-{PROBE_RUN_ID}"}),
         ("call-ended", runtime + "/api/voice/call-ended", {"workflow_run_id": PROBE_COMPLETION_RUN_ID}, {}),
@@ -1677,7 +1767,19 @@ def probe(args):
             {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID), "language": lang},
             {},
         ),
-    ):
+    ]
+    # The office-visit routes, for a line whose committed template has the tools (English): last, so the routes already
+    # live print first. Each body is the one its tool sends: the availability presets render the run id as text; the
+    # booking's body template keeps it an integer and carries the time the model chose.
+    for spec in office_visit_specs("HEAD", lang):
+        payload = (
+            {"workflow_run_id": PROBE_COMPLETION_RUN_ID, "language": lang}
+            if spec["route"] == AVAILABILITY_ROUTE
+            else {"workflow_run_id": int(PROBE_COMPLETION_RUN_ID), "language": lang,
+                  "starts_at": PROBE_STARTS_AT, "customer_name": ""}
+        )
+        probes.append((spec["route"].removeprefix("/api/voice/"), runtime + spec["route"], payload, {}))
+    for route, url, payload, headers in probes:
         status, data = request(
             "POST",
             url,
@@ -1685,6 +1787,11 @@ def probe(args):
             payload,
         )
         print(status)
+        require(
+            not (status == 404 and route in ("tools/availability", "tools/book")),
+            f"{route} answers 404: the runtime does not serve the office-visit routes yet (Synchronize PR #3935, or "
+            "#3926, is not deployed); golive plan and apply refuse until it does",
+        )
         require(
             status == 200 and isinstance(data, dict),
             f"Authenticated {route} probe expected HTTP 200 JSON object",
@@ -1695,6 +1802,11 @@ def probe(args):
             require(
                 data == {"known": False},
                 'Unknown-run caller-work probe expected {"known": false}',
+            )
+        if route in ("tools/availability", "tools/book"):
+            require(
+                data == OFFICE_UNKNOWN,
+                f'Unknown-run {route} probe expected {{"status": "unknown", "alternatives": []}}',
             )
         status, _ = request(
             "POST",
