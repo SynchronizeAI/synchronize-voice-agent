@@ -125,7 +125,7 @@ VISIT_LINES = {
 #            False: it never runs; None: either.
 #   lookup   "live": the live tool; "fails": a copy of it that times out (archived at the end).
 #   outcome  (codes, urgent) read from gathered_context, or None.
-#   recording_declined, caller_language, caller_email
+#   recording_declined, caller_language, customer_email
 #            what the English line's extraction must carry for Synchronize (default false, empty and empty); checked on
 #            every English case, because a wrong recording_declined deletes a call's recording and transcript, and an email
 #            on a call whose caller gave none is an invented value.
@@ -407,7 +407,7 @@ CASES = {
     # recap, read back, corrected when the caller corrects it, never pressed after a no. Each script answers that question.
     "visit_move": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
-        "caller_email": BOOKING_EMAIL,
+        "customer_email": BOOKING_EMAIL,
         "lines": {"en": ["Hi, I need to move the estimate visit I have with you on Thursday.", "Jamie Lee.",
                          "Monday or Tuesday next week, any time after one in the afternoon.", BOOKING_EMAIL_SAID,
                          "Yes, that's right.", "No, that's all."]},
@@ -417,7 +417,7 @@ CASES = {
     },
     "visit_cancel": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
-        "caller_email": BOOKING_EMAIL,
+        "customer_email": BOOKING_EMAIL,
         "lines": {"en": ["Hi, I need to cancel the estimate visit on Thursday.", "Jamie Lee.", "No thanks, I'd rather just cancel.",
                          "We decided to put the project off for now.", BOOKING_EMAIL_SAID, "Yes, that's right.", "No, that's all."]},
         "judged": "Before taking the cancellation it offers once to find another time; then it asks why, asks once for an email to "
@@ -427,7 +427,7 @@ CASES = {
     # The new day and window come with the reason, so the email is the one question left; the caller corrects one letter.
     "visit_email_corrected": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
-        "caller_email": "jamie.lea@gmail.com",
+        "customer_email": "jamie.lea@gmail.com",
         "lines": {"en": ["Hi, I need to move the estimate visit on Thursday to Monday morning instead.", "Jamie Lee.",
                          BOOKING_EMAIL_SAID, "Almost: it's l, e, a after the dot, not l, e, e.", "Yes, that's right.",
                          "No, that's all."]},
@@ -776,9 +776,9 @@ CANARIES = {
 LOOKUP_TOOLS = ("lookup_caller_work_ko", "lookup_caller_work_en")
 EXTRACTION_KEYS = (
     "customer_name", "topic", "summary", "facts", "follow_up", "follow_up_label", "urgent", "recording_declined", "caller_language",
-    "caller_email",
+    "customer_email",
 )
-CONTRACT_KEYS = ("recording_declined", "caller_language", "caller_email")
+CONTRACT_KEYS = ("recording_declined", "caller_language", "customer_email")
 
 
 def case_gate(spec, lang):
@@ -786,8 +786,8 @@ def case_gate(spec, lang):
 
 
 def contract(spec):
-    """What the English line's extraction must carry for Synchronize: recording_declined, caller_language and caller_email."""
-    return bool(spec.get("recording_declined")), spec.get("caller_language", ""), spec.get("caller_email", "")
+    """What the English line's extraction must carry for Synchronize: recording_declined, caller_language and customer_email."""
+    return bool(spec.get("recording_declined")), spec.get("caller_language", ""), spec.get("customer_email", "")
 
 
 def end_messages(lang):
@@ -824,7 +824,7 @@ def case_criteria(case_id, spec, lang):
         declined, language, email = contract(spec)
         criteria.append(f"OBJECTIVE: gathered_context.recording_declined is {'true' if declined else 'not true'}.")
         criteria.append(f"OBJECTIVE: gathered_context.caller_language is {language or 'empty (English)'}.")
-        criteria.append(f"OBJECTIVE: gathered_context.caller_email is {email or 'empty (no email given)'}.")
+        criteria.append(f"OBJECTIVE: gathered_context.customer_email is {email or 'empty (no email given)'}.")
         if spec.get("ends"):
             tool, line = spec["ends"]
             criteria.append(
@@ -998,7 +998,7 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
         language = normal(gathered.get("caller_language")).lower().split("-")[0]
         checks["caller_language"] = ("" if language == "en" else language) == wanted["caller_language"]
         # The address the caller confirmed, as an address; case and stray spaces do not count.
-        checks["caller_email"] = "".join(str(gathered.get("caller_email") or "").split()).lower() == wanted["caller_email"]
+        checks["customer_email"] = "".join(str(gathered.get("customer_email") or "").split()).lower() == wanted["customer_email"]
     if expected.get("end_tools") is not None:
         ends = expected.get("ends")
         ended = [

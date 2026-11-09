@@ -213,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
             said = " ".join(session["lines"])
             email = next((address for words, address in EMAILS if words in said), None)
             if email:
-                session["gathered_context"]["caller_email"] = email
+                session["gathered_context"]["customer_email"] = email
             if confirmed(session):
                 session["gathered_context"]["customer_name"] = session["initial_context"]["caller_name"]
         return self.reply(200, session)
@@ -412,7 +412,7 @@ class CallerScenariosTest(unittest.TestCase):
                 # Both values Synchronize reads after an English call are checked on every English case: a recording_declined on
                 # an ordinary call would erase its details. The objection and the other languages end through their own tool,
                 # on the line named, and no other case may run any of those tools.
-                default = {"recording_declined": False, "caller_language": "", "caller_email": ""}
+                default = {"recording_declined": False, "caller_language": "", "customer_email": ""}
                 messages = {spec["tool"]["name"]: spec["tool"]["definition"]["messages"][0]["text"]
                             for spec in golive.end_call_specs("HEAD", "en")}
                 expected = {
@@ -420,9 +420,9 @@ class CallerScenariosTest(unittest.TestCase):
                     "spanish_caller": ({**default, "caller_language": "es"}, ("end_call_spanish", 0)),
                     "other_language_caller": ({**default, "caller_language": "pt"}, ("end_call_other_language", 0)),
                     # Only a visit whose caller gave an email carries one: the address confirmed, after the correction.
-                    "visit_move": ({**default, "caller_email": "jamie.lee@gmail.com"}, None),
-                    "visit_cancel": ({**default, "caller_email": "jamie.lee@gmail.com"}, None),
-                    "visit_email_corrected": ({**default, "caller_email": "jamie.lea@gmail.com"}, None),
+                    "visit_move": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
+                    "visit_cancel": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
+                    "visit_email_corrected": ({**default, "customer_email": "jamie.lea@gmail.com"}, None),
                 }
                 for case, c in cases.items():
                     contract, ends = expected.get(case, (default, None))
@@ -461,7 +461,7 @@ class CallerScenariosTest(unittest.TestCase):
                 for c in cases.values():
                     self.assertFalse({"contract", "ends", "end_tools"} & set(c["expected"]))
                     self.assertFalse(any(
-                        key in line for key in ("recording_declined", "caller_language", "caller_email") for line in c["criteria"]
+                        key in line for key in ("recording_declined", "caller_language", "customer_email") for line in c["criteria"]
                     ))
             if lang == "en":
                 for case in marked:
@@ -572,7 +572,7 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual(cases[case]["checks"]["urgent"], 1, case)
         # The English line's values for Synchronize are not the Korean line's: no Korean case checks them.
         for case, group in cases.items():
-            self.assertFalse({"recording_declined", "caller_language", "caller_email", "end_tool", "end_turn"} & set(group["checks"]), case)
+            self.assertFalse({"recording_declined", "caller_language", "customer_email", "end_tool", "end_turn"} & set(group["checks"]), case)
         # Two test workflows (live lookup, failing lookup) and the failing copy, all archived.
         self.assertEqual(len(self.fake.workflows), 2)
         for workflow in self.fake.workflows.values():
@@ -619,12 +619,12 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(cases["spanish_caller"]["checks"]["caller_language"], 1)
         self.assertEqual(cases["other_language_caller"]["checks"]["caller_language"], 1)
         for case, group in cases.items():
-            self.assertTrue({"recording_declined", "caller_language", "caller_email", "end_tool"} <= set(group["checks"]), case)
+            self.assertTrue({"recording_declined", "caller_language", "customer_email", "end_tool"} <= set(group["checks"]), case)
         # The visits' email, as the caller confirmed it (after the correction), and none where the caller declined.
         for case in ("visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined"):
-            self.assertEqual(cases[case]["checks"]["caller_email"], 1, case)
+            self.assertEqual(cases[case]["checks"]["customer_email"], 1, case)
         row = json.loads((self.out / "en_visit_email_corrected-r1.json").read_text())
-        self.assertEqual(row["grade"]["review"]["extraction"]["caller_email"], "jamie.lea@gmail.com")
+        self.assertEqual(row["grade"]["review"]["extraction"]["customer_email"], "jamie.lea@gmail.com")
         for case in ("recording_question", "recording_one_detail", "recording_person_request", "recording_objection_withdrawn"):
             self.assertEqual((cases[case]["checks"]["end_tool"], cases[case]["checks"]["recording_declined"]), (1, 1), case)
         near = cases["spanish_greeting_english_matter"]["checks"]
@@ -734,18 +734,18 @@ class CallerScenariosTest(unittest.TestCase):
             graded = scenarios_caller.grade(case, en_opening, [], gathered, "lookup_caller_work_en", True)
             self.assertEqual(graded["passed"], passed, gathered)
         # An email on a call whose caller gave none is an invented value.
-        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "message", "caller_email": "jamie.lee@gmail.com"},
+        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "message", "customer_email": "jamie.lee@gmail.com"},
                                         "lookup_caller_work_en", True)
-        self.assertFalse(graded["checks"]["caller_email"])
+        self.assertFalse(graded["checks"]["customer_email"])
         # A visit's email is the address the caller confirmed: case and stray spaces aside, the corrected one only.
         case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "visit_email_corrected")
         for email, passed in (("jamie.lea@gmail.com", True), (" Jamie.Lea@Gmail.com ", True), ("jamie.lee@gmail.com", False),
                               ("jamie dot lea at gmail dot com", False), ("", False), (None, False)):
-            graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "booking_request", "caller_email": email},
+            graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "booking_request", "customer_email": email},
                                             "lookup_caller_work_en", True)
-            self.assertEqual(graded["checks"]["caller_email"], passed, email)
+            self.assertEqual(graded["checks"]["customer_email"], passed, email)
         case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "visit_email_declined")
-        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "booking_request", "caller_email": ""},
+        graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "booking_request", "customer_email": ""},
                                         "lookup_caller_work_en", True)
         self.assertTrue(graded["passed"], graded["checks"])
         case = next(c for c in scenarios_caller.build_cases("en") if c["case"] == "kind_ongoing_project")

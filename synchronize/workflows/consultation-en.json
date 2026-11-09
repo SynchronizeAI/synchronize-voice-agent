@@ -70,7 +70,7 @@
               "prompt": "Only when the assistant called the tool end_call_spanish or end_call_other_language: the BCP-47 code of the language the caller spoke, such as es for Spanish. Empty otherwise."
             },
             {
-              "name": "caller_email",
+              "name": "customer_email",
               "type": "string",
               "prompt": "The email address the caller gave and confirmed when the assistant read it back, with any correction they made, written as an address: lowercase, spelled-out letters joined, \"at\" as @ and \"dot\" as . (such as name@example.com). Empty if none was given or confirmed."
             }

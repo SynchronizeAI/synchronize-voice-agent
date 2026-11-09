@@ -238,7 +238,7 @@ All of it is general rules in the lines the model already reads, not one sentenc
   step 3 asks once, before the recap, for the best email to send the confirmation to, reads it back (Speech, below) and takes a correction; a
   caller who would rather not give one, or has none, is not asked again. No other call is asked for an email, an urgent one included (the
   owner calls back), so the question costs a turn only on a booking. The recap reads out no email, as it reads out no phone number. The
-  extraction writes the address the caller confirmed as `caller_email` (Values for Synchronize, below).
+  extraction writes the address the caller confirmed as `customer_email` (Values for Synchronize, below).
 - **Recording and language end the call at once.** Each has its own End Call tool (Dograh's End Call type, like `end_call_wrong_number`: one
   fixed start message, no reason parameter, since a reason would replace the call's outcome), which go-live creates from
   `tool-end-call-*-en.json` (Live wiring). The agent calls it in a turn with no speech of its own, so the caller never waits for another turn or
@@ -274,11 +274,11 @@ All of it is general rules in the lines the model already reads, not one sentenc
   the assistant called `end_call_recording_declined`, an event the extraction reads in the conversation as `[Tool Call: …]`,
   `api/services/workflow/conversation_history.py`; Synchronize erases a call's details on it, so nothing said about the recording alone may
   set it) and `caller_language` (the BCP-47 code of the language the caller spoke, such as `es`, only when `end_call_spanish` or
-  `end_call_other_language` ran; empty otherwise) and `caller_email` (the email address the caller gave and confirmed at the read-back, with
+  `end_call_other_language` ran; empty otherwise) and `customer_email` (the email address the caller gave and confirmed at the read-back, with
   their correction, written as an address: lowercase, spelled letters joined, "at" as `@`, "dot" as `.`; empty when none was given or
   confirmed). Dograh writes every extracted variable at the top of the run's `gathered_context`
   (`api/services/workflow/pipecat_engine.py:697-707`), so Synchronize reads `gathered_context.recording_declined`,
-  `gathered_context.caller_language` and `gathered_context.caller_email` where it reads `gathered_context.urgent`. The extraction writes a phone number as E.164 and a date the
+  `gathered_context.caller_language` and `gathered_context.customer_email` where it reads `gathered_context.urgent`. The extraction writes a phone number as E.164 and a date the
   caller named by its day as `YYYY-MM-DD` (dated by Dograh's `{{current_time}}`, which is UTC); a day named relative to the call (tomorrow,
   next Tuesday) stays in the caller's words, because one shared workflow does not know the business's time zone and UTC would move an evening
   call's "tomorrow" by a day.
@@ -571,7 +571,7 @@ and its near misses and `LANGUAGE_NOT_HANDLED` the two languages and their near 
 every case, on `AI_DENIED`. Every English case checks that none of those three tools ran unless the case asks for it (`end_tool`, so a call ended by
 mistake fails whatever the extraction says) and the two values Synchronize reads: `recording_declined` (true only for the objection; a wrong one
 erases a call's details), `caller_language` (`es` or `es-…` for the Spanish caller, `pt` for the Portuguese one; `en` and `en-…` count as English,
-for which Synchronize stores nothing) and `caller_email` (`jamie.lee@gmail.com` for the move and the cancellation, `jamie.lea@gmail.com` after the
+for which Synchronize stores nothing) and `customer_email` (`jamie.lee@gmail.com` for the move and the cancellation, `jamie.lea@gmail.com` after the
 correction, empty on every other case, the declined one included; case and stray spaces aside). English has its own `WRONG_LANGUAGE` wording, as its
 call review has it: the fixed sentence in the caller's language and the fixed goodbye are not the flag; and its own `RESTATES_CALLER` wording, which
 leaves out an email address read back to confirm it, as it leaves out a number.
@@ -588,7 +588,7 @@ live workflow or the live tool. It scores the objective checks: the opening text
 `customer_name` equal to the confirmed name (empty when the caller does not confirm); the lookup called exactly once and never before the
 confirmation line when a known caller asks about a visit, also when it fails, and not called when they never ask, will not confirm, or are
 unknown; for each outcome case and the two hand-over lookup cases the code (the leak and the gas smell may be `booking_request` or
-`message`, a complaint is `message`) and the `urgent` flag; on English, every case's `recording_declined`, `caller_language`, `caller_email` and `end_tool`, and for
+`message`, a complaint is `message`) and the `urgent` flag; on English, every case's `recording_declined`, `caller_language`, `customer_email` and `end_tool`, and for
 the recording objection and the two languages `end_turn`. Every session file keeps a review block: the replies, the lookup's arguments and results, and the extraction for the owner.
 `cleanup --out DIR` archives what a crashed run left (`DIR/state.json`, workflows and the failing copy).
 

@@ -2036,11 +2036,11 @@ class GoLiveTests(unittest.TestCase):
                     self.assertEqual(connection[rule["target"]["provider_connection_uuid"]][0], "openai")
                     self.assertEqual(rule["target"]["settings"], {"model": "gpt-4.1-mini"})
                 # The values Synchronize reads after the call travel like urgent: node 1's extraction, so
-                # gathered_context.recording_declined, gathered_context.caller_language and gathered_context.caller_email.
+                # gathered_context.recording_declined, gathered_context.caller_language and gathered_context.customer_email.
                 extracted = {v["name"]: v["type"] for v in start["extraction_variables"]}
                 self.assertEqual(
-                    {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language", "caller_email")},
-                    {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string", "caller_email": "string"},
+                    {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language", "customer_email")},
+                    {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string", "customer_email": "string"},
                 )
                 # A visit to book, move or cancel (not an urgent matter) is the one call that asks for an email: once, read back
                 # as the Persona's read-back rule says, and never pressed; the extraction writes only the address the caller
@@ -2057,7 +2057,7 @@ class GoLiveTests(unittest.TestCase):
                     "an email address (saying \"at\" and \"dot\", and spelling out letter by letter only a part that could be misheard",
                     golive.nodes(definition)["4"]["data"]["prompt"],
                 )
-                email = next(v["prompt"] for v in start["extraction_variables"] if v["name"] == "caller_email")
+                email = next(v["prompt"] for v in start["extraction_variables"] if v["name"] == "customer_email")
                 self.assertTrue(email.startswith("The email address the caller gave and confirmed when the assistant read it back"))
                 self.assertTrue(email.endswith("Empty if none was given or confirmed."))
             # Urgency is its own flag, extracted in every conversation node.
