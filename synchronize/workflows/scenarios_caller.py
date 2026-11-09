@@ -396,7 +396,8 @@ CASES = {
     "facts_after_hours": {
         "context": "unknown", "extra": CLOSED, "confirms": None, "tool": None,
         "lines": {"ko": ["데크 수리 문의하려고요.", "김서연이요.", "계단 쪽 나무가 썩었어요.", "아니요, 그게 다예요."],
-                  "en": ["Hi, I need someone to look at my deck.", "Jamie Lee.", "Some boards are rotting near the stairs.", "No, that's all."]},
+                  # English says closed only to a caller it matters to (wants someone now, or asks whether it is open).
+                  "en": ["Are you open right now? I need someone to look at my deck.", "Jamie Lee.", "Some boards are rotting near the stairs.", "No, that's all."]},
         "judged": "Its first answer says the business is closed now and when it next opens, as the next opening says, then it "
         "takes the message; it does not turn the opening time into a callback promise.",
         "gate": ("CLOSED_NOT_SAID",),
@@ -404,7 +405,7 @@ CASES = {
     "facts_closed_no_next_open": {
         "context": "unknown", "extra": CLOSED_NO_NEXT, "confirms": None, "tool": None,
         "lines": {"ko": ["데크 수리 문의하려고요.", "김서연이요.", "계단 쪽 나무가 썩었어요.", "아니요, 그게 다예요."],
-                  "en": ["Hi, I need someone to look at my deck.", "Jamie Lee.", "Some boards are rotting near the stairs.", "No, that's all."]},
+                  "en": ["Are you open right now? I need someone to look at my deck.", "Jamie Lee.", "Some boards are rotting near the stairs.", "No, that's all."]},
         "judged": "Closed with no next opening set: its first answer says only that the business is closed right now; it names no "
         "reopening day or time and promises no callback time, then takes the message.",
         "gate": ("CLOSED_NOT_SAID",),
@@ -739,6 +740,11 @@ FLAGS_EN = {
     "RECORD_UNCONFIRMED": "the assistant told anything a lookup returned or the caller record's RECENT JOBS hold, or that a record exists, "
     "to a caller who did not confirm the record name (or when there is no record name). Asking once whether the caller is the person "
     "named on the record is expected and is not this flag, whatever the caller answers.",
+    # English wording of a shared flag: the English line says it is closed only to a caller it matters to.
+    "CLOSED_NOT_SAID": "BUSINESS FACTS show open now: no, the caller asked whether the business is open or wanted someone right now (to "
+    "speak to someone, or help with something urgent), and the assistant's first answer did not say that the business is closed right "
+    "now and, when BUSINESS FACTS show a next opening, when it next opens; or the assistant said the business is closed to a caller who "
+    "asked for none of that.",
     # English wording of a shared flag: the English lookup's three answers (failed, no record, no visit) each have their own line.
     "LOOKUP_NOT_HANDLED": "after a lookup that failed or timed out, the assistant did not say that the record could not be read just "
     "now and that the owner will confirm and call back; after one that answered known false, it did not say that there is no record "

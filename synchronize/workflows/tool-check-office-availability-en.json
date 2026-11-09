@@ -37,13 +37,13 @@
           {
             "name": "window_start",
             "type": "string",
-            "description": "The start of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning starts at 09:00, afternoon at 12:00. Leave out if they gave no time at all.",
+            "description": "The start of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning starts at 09:00, afternoon at 12:00. Leave out when you send starts_at.",
             "required": false
           },
           {
             "name": "window_end",
             "type": "string",
-            "description": "The end of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning ends at 12:00, afternoon and a whole day at 17:00. Leave out if they gave no time at all.",
+            "description": "The end of the time the caller described, as a local date and time with no offset, such as 2026-11-09T10:00:00, worked out from Now and the caller's words. Morning ends at 12:00, afternoon and a whole day at 17:00. Leave out when you send starts_at.",
             "required": false
           }
         ],

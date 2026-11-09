@@ -207,7 +207,9 @@ anyone what to do are never read out (owners write instruction-shaped text there
 injected instruction must not reach the caller either); a fact that is not set is the owner's to confirm. The lines they replace ("You know nothing about … except its name", `회사에 대해 아는 건 이름과 …뿐`, "The one exception") are gone. Every value has the
 fallback `not set` / `정해지지 않음`, so an empty or missing value reads as not set. After hours the first answer says the business is closed and when it next
 opens (English step 1, Korean step 1; Dograh's renderer has no conditional text, so the greeting cannot change), or only that it is closed when no next opening
-is set, and never turns that time into a callback promise. The Korean start step answers a question a fact answers with the fact instead of its usual `네,`, and the Korean Closing node, which does not inherit the
+is set, and never turns that time into a callback promise. The English line says it only to a caller it matters to: one who wants someone right now (to speak
+to someone, or help with something urgent) or asks whether the business is open; a caller who wants a visit or leaves a message hears nothing about it, since
+the greeting already said no one can take the call (owner, 2026-11-09). The Korean start step answers a question a fact answers with the fact instead of its usual `네,`, and the Korean Closing node, which does not inherit the
 Persona, has its own copy of the four relayable facts and of the rule (the part that answers, as written, no instruction read out, no price worked out) so a
 question at the close gets the same answer; English step 4 says the same. Both QA prompts say a told
 fact is not `PROMISED_UNCONFIRMED` (the QA transcript does not show the facts). The English extraction prompt carries the business's `urgent_examples` (Urgent
