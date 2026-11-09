@@ -2153,6 +2153,19 @@ class GoLiveTests(unittest.TestCase):
                  "say that it is booked", "step 3")
         self.assertEqual([office.index(step) for step in order], sorted(office.index(step) for step in order))
         self.assertIn("Ask nothing about the address or the work before the time is settled.", office)
+        # The name is asked on every answer of the check, so an unknown answer (every text chat) still leaves a name for the
+        # owner's record; a week alone is not the day and time the first reply asks for.
+        self.assertIn("when it answers a time open, offers times or answers unknown, their name if you do not have it", office)
+        self.assertIn("before the booking or, on unknown, before the email", office)
+        self.assertIn("unknown: you cannot confirm right now and the office will confirm with them; take the time as a message, "
+                      "ask their name if you do not have it", check["tool"]["description"])
+        self.assertIn("a week alone, such as next week, is not a day and time", start["prompt"])
+        # A site visit asks a time only if the caller has one, so "Could someone come Monday?" goes straight to the request.
+        self.assertIn("a site visit, whatever the kind of call: the day, and a time if they have one, unless they said it",
+                      start["prompt"])
+        # No turn passes LONG_TURN: statements before the question share one sentence, and the recap is one sentence.
+        self.assertIn("when a step gives you more than one thing to say before your question, put them in one sentence", persona)
+        self.assertIn("Say in one short sentence, in a few words of your own, what you will pass on", start["prompt"])
         # One sentence, so the site visit's turn with its email question stays within two sentences (QA LONG_TURN).
         self.assertIn("I'll request Monday with our office manager, and you'll get a confirmation email once the visit is approved.",
                       start["prompt"])
@@ -2164,6 +2177,9 @@ class GoLiveTests(unittest.TestCase):
         # The first reply answers the request; the greeting already said what the line is, so no self-introduction.
         self.assertNotIn("Ask nothing about the matter yet.", start["prompt"])
         self.assertIn("Never introduce yourself again or repeat that you are an AI or that the call is recorded", persona)
+        # ...which leaves the recording question answerable (When to hand off: it is on and cannot be switched off).
+        self.assertIn("Say it again only when the caller asks whether they are talking to a person or an AI, or asks about the "
+                      "recording.", persona)
         # Urgency by the situation, the business's examples first, and it adds to a visit request (CONV-5).
         self.assertIn("Judge it by what is happening now, not by a word such as leak", persona)
         self.assertIn("Urgency only adds: a visit the caller asks for is still requested or booked, with its email", persona)

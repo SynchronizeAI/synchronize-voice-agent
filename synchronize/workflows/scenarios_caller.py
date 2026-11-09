@@ -522,6 +522,8 @@ CASES = {
     },
     # The same caller asks for a time the office cannot take: 7 AM is before the office's bookable hours, so on a real line
     # Synchronize answers unavailable with the nearest open times whatever the calendar holds; the caller takes the earliest.
+    # A text chat gets unknown, so there the third line answers nothing the agent asked: read this case as informational
+    # until a real call shows the unavailable path.
     "office_visit_slot_taken": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": False, "outcome": (("booking_request",), False),
         "office": "office", "office_time": {"weekday": 0, "hour": 7}, "customer_email": VISIT_EMAILS["sarah"][1],

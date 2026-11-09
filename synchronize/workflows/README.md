@@ -236,9 +236,9 @@ All of it is general rules in the lines the model already reads, not one sentenc
 
 - **The first reply answers the request.** Reception step 1 answers what the caller asked for in a few words and asks the one question that
   moves it forward: a known caller is asked whether they are the record's name; a caller who wants to come to the office is asked the day and
-  time (the name comes once a time is found); a caller who wants a visit without saying where is asked whether they would like to come in or
+  time, a week alone ("next week") not being one (the name comes after the check); a caller who wants a visit without saying where is asked whether they would like to come in or
   have someone come out; anyone else is asked their name. The agent does not introduce itself again or repeat the disclosure (the greeting did),
-  unless the caller asks whether it is a person or an AI. This replaces the old "answer, ask the name, ask nothing about the matter yet" gate,
+  unless the caller asks whether it is a person or an AI, or asks about the recording (it is on and cannot be switched off). This replaces the old "answer, ask the name, ask nothing about the matter yet" gate,
   which a real call showed as form-filling ("Can I book an appointment with the owner?" answered with "I am the AI assistant here. May I have
   your name, please?"). A request to book time with the owner is a visit, not a request to speak to someone.
 - **Kinds of call.** Then Reception step 2 asks what the owner needs for the kind of call, judged from what the caller said, one
@@ -247,8 +247,8 @@ All of it is general rules in the lines the model already reads, not one sentenc
   when. Any other call keeps the one question that builds on what the caller said (or the callback time when a person was asked for). A visit
   the caller asks for comes first and replaces the other questions of the kind, except the ones its own line names.
 - **Visits.** A visit at the office is booked in the call, only when the availability tool says the time is open (Office visits and recent
-  jobs, below). A site visit (someone comes out) is a request: the day and time wanted, and for a new project the service address (read back
-  once); then, in one sentence, "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is
+  jobs, below). A site visit (someone comes out) is a request: the day wanted, and a time if the caller has one, and for a new project the
+  service address (read back once); then, in one sentence, "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is
   approved.", never booked or confirmed. Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why;
   the owner confirms either (the approval card after the call is Synchronize's). All are `booking_request`, and `follow_up` carries the window.
 - **An email for a visit's confirmation.** When the caller wants to book, move or cancel a visit, urgent or not (urgency adds to a visit
@@ -283,7 +283,9 @@ All of it is general rules in the lines the model already reads, not one sentenc
   call the model reads a Spanish caller's words as English recognition heard them, and the Spanish message is spoken by the line's own voice:
   **the Spanish path needs one real Spanish call to verify** (runbook step 8, call 4); text chat cannot show either.
 - **AI.** Whenever the caller asks whether it is a real person or a robot, the agent says plainly that it is an AI assistant and carries on.
-- **Speech.** One short sentence per turn, or two when a step has the agent answer and then ask, with at most one question. Numbers, times,
+- **Speech.** One short sentence per turn, or two when a step has the agent answer and then ask, with at most one question; when a step gives
+  more than one thing to say before the question (closed right now, marked urgent), they go in one sentence, and the recap is one sentence
+  before "anything to add?", so no turn passes Call QA's `LONG_TURN` (more than two sentences). Numbers, times,
   dates, prices and addresses are said as words ("Monday, November tenth", "four one eight Oak Street"), also in a business fact told as written
   and a day or time a lookup or an office-visit tool gives, and abbreviations and symbols in full ("Avenue", "percent"); the name is read back
   once by using it in the next question; a new project's address and another callback number (three, three and four digits, each as a word;
@@ -355,12 +357,13 @@ context, the language and each parameter as its own placeholder; only the availa
 with exactly those two presets and no parameter of their names).
 
 **Prompt wording (v1, 2026-11-09).** The order is the standard check's CONV-2. An office visit: the first reply answers the
-request and asks the day and time ("Of course! What day and time works best for you?"), with no address or job question before
-the time; then the check; when it answers a time open, the name if missing, asked once ("What name should I put it under?");
+request and asks the day and time ("Of course! What day and time works best for you?"; "next week" alone is not one), with no
+address or job question before the time; then the check; when it answers a time open, offers times or answers `unknown`, the name
+if missing, asked once ("What name should I put it under?"), before the booking or, on `unknown`, before the email;
 the booking once the caller has taken a time (the one they asked for, or one the check offered); "Your consultation is booked
 for …"; then one email question with its read-back. When the check answers `unknown`, the agent says it cannot confirm right
-now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day and
-time, a new project's address, then "I'll request Monday with our office manager, and you'll get a confirmation email once the
+now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day (and a
+time if the caller has one), a new project's address, then "I'll request Monday with our office manager, and you'll get a confirmation email once the
 visit is approved." with the email question, never booked or confirmed. A returning caller is asked whether they are the record's
 name; right after the yes, and only when `recent_jobs` lists matching work, "Are you calling about the shingles we repaired last
 time?", once, with no amount, address or other person's name. Expected transcripts:
