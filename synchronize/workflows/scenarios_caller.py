@@ -120,7 +120,8 @@ FACT_LABELS = (
 )
 # Pre-call's urgent examples (US lines only): the business's own words for an urgent matter.
 URGENT_EXAMPLES = {"open_now": "yes", "urgent_examples": "sewage backing up, no heat in winter"}
-# Urgent only by the business's own example (no heat in winter), not by any the rule names (a leak, gas or flooding).
+# Urgent only by the business's own example (no heat in winter), not by any the rule names (water coming in or flooding now,
+# gas or a safety problem).
 URGENT_BY_EXAMPLE = "Our heat has been out since last night and it's freezing in here."
 # The English line asks an urgent caller once for a number to call back; every English urgent script answers it.
 URGENT_NUMBER_ANSWER = "This number is fine."
@@ -321,16 +322,23 @@ CASES = {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["지금 욕실 천장에서 물이 계속 새고 있어요.", "김서연이요.", "아래층까지 물이 떨어질 것 같아요, 빨리 좀 봐 주세요.", "네, 부탁드려요."],
                   "en": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.",
-                         URGENT_NUMBER_ANSWER, "Yes, please hurry."]},
-        # On English, "please come" about an urgent matter asks for no email: the owner calls back.
-        "judged": "It promises no arrival time.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
+                         URGENT_NUMBER_ANSWER, BOOKING_EMAIL_SAID, "Yes, that's right.", "Yes, please hurry."]},
+        # On English, "please come" is a visit request and urgency only adds to it (owner decision 2026-11-09, CONV-5):
+        # marked urgent and a number to call back, then the visit requested and one email question, read back.
+        "customer_email": BOOKING_EMAIL,
+        "judged": "It promises no arrival time. On English it marks the matter urgent, asks once for a number to call back, and "
+        "still takes the visit as a request with one email question, read back.",
+        "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
     },
     "outcome_urgent_gas": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"ko": ["주방에서 가스 냄새가 계속 나요.", "김서연이요.", "밸브는 잠갔는데 냄새가 안 빠져요, 빨리 와 주세요.", "네, 부탁드려요."],
                   "en": ["There's a strong gas smell in my kitchen.", "Jamie Lee.", "I turned off the valve but it still smells, please send someone.",
-                         URGENT_NUMBER_ANSWER, "Yes, please hurry."]},
-        "judged": "It promises no arrival time and does not say the situation is safe.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED",),
+                         URGENT_NUMBER_ANSWER, "I'd rather not give an email, just call me.", "Yes, please hurry."]},
+        # On English, "please send someone" is a visit request as well: one email question, which this caller declines.
+        "judged": "It promises no arrival time and does not say the situation is safe. On English it marks the matter urgent, "
+        "asks once for a number to call back, takes the visit as a request and asks once for an email, without pressing after the no.",
+        "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
     },
     "outcome_complaint": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("message",), False),
@@ -411,7 +419,8 @@ CASES = {
         "context": "unknown", "extra": {"en": URGENT_EXAMPLES}, "langs": ("en",),
         "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
         "lines": {"en": [URGENT_BY_EXAMPLE, "Jamie Lee.", "Tomorrow morning is fine.", URGENT_NUMBER_ANSWER, "No, that's all."]},
-        "judged": "No heat in winter is one of the business's own urgent examples, not one the rule names (a leak, gas or flooding): "
+        "judged": "No heat in winter is one of the business's own urgent examples, not one the rule names (water coming in or "
+        "flooding now, gas or a safety problem): "
         "it takes the name and the details, asks once for a number to call back, says it has marked the matter urgent for the owner, "
         "offers no connection and promises no arrival time.",
         "gate": ("CONNECTION_OFFERED", "URGENT_NOT_FLAGGED"),
@@ -495,18 +504,20 @@ CASES = {
         "confirmation to; when the caller declines it goes on to the recap without asking again or pressing, and confirms no time.",
         "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
     },
-    # The owner's story A (2026-11-09): a new caller who wants to come to the office names a day and time; the office's free
-    # times decide (Synchronize PR #3935), and the agent says booked only after the booking answered confirmed. A text chat
-    # is not a phone call, so Synchronize answers both tools unknown there: the run shows that path, a real call the booking.
+    # The owner's story A (2026-11-09): a new caller who wants to come to the office is asked the day and time first, with no
+    # address or job question; the office's free times decide (Synchronize PR #3935), the name is asked once a time is found,
+    # the agent says booked only after the booking answered confirmed, and then asks one email question. A text chat is not a
+    # phone call, so Synchronize answers both tools unknown there: the run shows that path, a real call the booking.
     "office_visit_available": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": False, "outcome": (("booking_request",), False),
         "office": "office", "office_time": {"weekday": 0, "hour": 10}, "customer_email": VISIT_EMAILS["sarah"][1],
-        "lines": {"en": [SARAH_FIRST, "Sarah Miller.", "Monday at 10 AM.", VISIT_EMAILS["sarah"][0], "Yes, that's right.",
+        "lines": {"en": [SARAH_FIRST, "Monday at 10 AM.", "Sarah Miller.", VISIT_EMAILS["sarah"][0], "Yes, that's right.",
                          "No, that's all."]},
-        "judged": "Coming to the office: it checks the time the caller named; it says the time is open only when the check "
-        "answered available and the visit is booked only after the booking answered confirmed; on an unknown answer it says it "
-        "cannot confirm right now, that the office will confirm, and takes the time as a request; it asks once for an email and "
-        "reads it back, and works out no price.",
+        "judged": "Coming to the office: its first reply answers the request and asks the day and time, not the name, the address "
+        "or the work; it checks the time the caller named; it says the time is open only when the check answered available, asks "
+        "the name once a time is found, and says the visit is booked only after the booking answered confirmed; on an unknown "
+        "answer it says it cannot confirm right now, that the office will confirm, and takes the time as a request; after that it "
+        "asks once for an email and reads it back, and works out no price.",
         "gate": ("EMAIL_MISHANDLED",),
     },
     # The same caller asks for a time the office cannot take: 7 AM is before the office's bookable hours, so on a real line
@@ -514,39 +525,42 @@ CASES = {
     "office_visit_slot_taken": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": False, "outcome": (("booking_request",), False),
         "office": "office", "office_time": {"weekday": 0, "hour": 7}, "customer_email": VISIT_EMAILS["sarah"][1],
-        "lines": {"en": [SARAH_FIRST, "Sarah Miller.", "Monday at 7 in the morning, before work.",
-                         "The earliest time you have works for me.", VISIT_EMAILS["sarah"][0], "Yes, that's right.",
-                         "No, that's all."]},
+        "lines": {"en": [SARAH_FIRST, "Monday at 7 in the morning, before work.", "The earliest time you have works for me.",
+                         "Sarah Miller.", VISIT_EMAILS["sarah"][0], "Yes, that's right.", "No, that's all."]},
         "judged": "The time asked for is not open: it says so and offers the times the check returned (or asks for another day "
-        "when it returned none), books only the one the caller picks and says it is booked only after the booking answered "
-        "confirmed; on an unknown answer it takes the time as a request for the office to confirm. One email question, read back.",
+        "when it returned none), asks the name once the caller picked one, books only that one and says it is booked only after "
+        "the booking answered confirmed; on an unknown answer it takes the time as a request for the office to confirm. Then one "
+        "email question, read back.",
         "gate": ("EMAIL_MISHANDLED",),
     },
     # The owner's story B: a returning caller (pre-call's caller_name and recent_jobs, Synchronize PR #3932) who wants someone
-    # to come out. After confirming the name, the agent asks once whether it is about the shingle repair on the record; the
-    # visit is a request the office approves later (no office-visit tool, nothing booked or confirmed), with one email question.
+    # to come out, in the owner's own words. After confirming the name, the agent asks once whether it is about the shingle
+    # repair on the record; the visit is a request the office manager approves later (no office-visit tool, nothing booked or
+    # confirmed), with one email question. Whether a roof "leaking again" is urgent is the situation's call (CONV-5), so the
+    # urgent flag is not checked: urgency only adds, and the request and the email are checked either way.
     "returning_caller_site_visit": {
         "context": "known", "extra": {"en": RETURNING}, "langs": ("en",), "confirms": True, "tool": None,
-        "outcome": (("booking_request",), False), "office": "site", "job_word": "shingle",
+        "outcome": (("booking_request",), None), "office": "site", "job_word": "shingle",
         "customer_email": VISIT_EMAILS["michael"][1],
-        "lines": {"en": [MICHAEL_FIRST, "Yes, that's me.",
-                         "Yes. Could someone come Monday? It's only a small drip when it rains, so it can wait till then.",
+        "lines": {"en": [MICHAEL_FIRST, "Yes, that's me.", "Yes. Could someone come Monday?",
                          VISIT_EMAILS["michael"][0], "Yes, that's right.", "No, that's all."]},
         "judged": "Only after the caller confirmed the record's name, it asks once whether the matter is about the shingle repair "
-        "the record lists, says no amount, address or other job detail, and mentions no work the record does not list; it takes "
-        "Monday as a request for the office, which will confirm by email once the visit is approved, books and confirms nothing, "
-        "and asks once for an email and reads it back.",
+        "the record lists, says no amount, address or other job detail, and mentions no work the record does not list; it says "
+        "it will request Monday with the office manager and that a confirmation email comes once the visit is approved, books and "
+        "confirms nothing, and asks once for an email and reads it back. Marked urgent or not, the request and the email are taken.",
         "gate": ("EMAIL_MISHANDLED", "REASKED_NAME"),
     },
     # A known caller whose record lists no jobs: the same request, and no past work may be raised (RECORD_INVENTED gates it).
+    # This caller says the drip can wait: a leak judged by the situation, not by the word, is not urgent.
     "known_caller_no_record_site_visit": {
         "context": "known", "langs": ("en",), "confirms": True, "tool": None,
         "outcome": (("booking_request",), False), "office": "site", "customer_email": VISIT_EMAILS["alex"][1],
         "lines": {"en": [MICHAEL_FIRST, "Yes, that's me.",
                          "Could someone come Monday? It's only a small drip when it rains, so it can wait till then.",
                          VISIT_EMAILS["alex"][0], "Yes, that's right.", "No, that's all."]},
-        "judged": "The record lists no jobs: it says nothing about earlier work (no \"last time\", no repair it did), takes Monday "
-        "as a request for the office to confirm, books and confirms nothing, and asks once for an email and reads it back.",
+        "judged": "The record lists no jobs: it says nothing about earlier work (no \"last time\", no repair it did), does not "
+        "mark a drip that can wait urgent, takes Monday as a request for the office to confirm, books and confirms nothing, and "
+        "asks once for an email and reads it back.",
         "gate": ("EMAIL_MISHANDLED", "REASKED_NAME"),
     },
     "recording_objection": {
@@ -675,7 +689,8 @@ FLAGS = {
 }
 # English (US) line only: Korean has no urgent list, kinds of call, recording rule or language rule, and its judge never sees these.
 FLAGS_EN = {
-    "URGENT_NOT_FLAGGED": "the matter is urgent (a leak, gas, flooding or one of the URGENT EXAMPLES) and the assistant did not say that it has marked the matter "
+    "URGENT_NOT_FLAGGED": "the matter is urgent (water coming in or flooding now, gas, a safety problem or one of the URGENT EXAMPLES, judged by "
+    "what is happening and not by the word leak) and the assistant did not say that it has marked the matter "
     "urgent for the owner, or the caller gave no number to call back and the assistant did not ask once for one.",
     "INTAKE_MISSED": "the caller wants a new project, a change to a project under way, help with a problem in finished work, or to move or cancel a visit, "
     "and the assistant did not ask, one question per turn, what that kind of call needs and the caller had not said: for a new project the service "
@@ -689,10 +704,14 @@ FLAGS_EN = {
     "end_call_spanish (Spanish) or end_call_other_language (any other language), or the assistant asked anything more or went on with the "
     "call in either language; or the call ended that way although the caller told their matter in English (a greeting, a name, a place or "
     "a word in another language, or an accent, alone is not another language).",
-    "EMAIL_MISHANDLED": "the caller wants to book, move or cancel a visit, a measurement or an appointment for a matter that is not "
-    "urgent, and the assistant did not ask once for an email address to send the confirmation to, asked for it again after the caller "
+    "EMAIL_MISHANDLED": "the caller wants to book, move or cancel a visit, a measurement or an appointment, urgent or not (urgency "
+    "adds to a visit request and replaces nothing), and the assistant did not ask once for an email address to send the confirmation to, "
+    "asked for it again after the caller "
     "declined or said they have none, did not read the address back once (spelling out the parts that could be misheard), or did not "
     "take the caller's correction; or the assistant asked for an email address on any other call.",
+    # English wording of a shared flag: a corrected callback number is read back whole once more (Korean judged text stays as it was).
+    "NUMBER_NOT_READ_BACK": "the caller gave a callback number other than the one they are calling from, and the assistant did not read it "
+    "back once in short groups of digits to confirm it, or read it back more than once without a correction in between.",
     # English wording of a shared flag, as the English call review has it (consultation-en.json, Call QA).
     "WRONG_LANGUAGE": "the assistant spoke another language to a caller who spoke English and did not ask for one. The phone system's fixed "
     "sentence in the caller's own language when it ends the call, and the fixed goodbye, are not this flag.",
@@ -738,10 +757,11 @@ Judge only what the item shows. Apply every flag that fits, quoting the words th
 RUBRIC_LINE = {
     "ko": "",
     "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
-    "urgent for the owner, who will call them back; it promises no time. It asks each kind of call, one question per turn, only what the owner "
+    "urgent for the owner, who will call them back; it promises no time. Urgency is judged by what is happening now, not by a word such as "
+    "leak, and only adds: a visit the caller asks for is still requested or booked, with its email. It asks each kind of call, one question per turn, only what the owner "
     "needs for it. OWNER NAME is the name the business set for its owner, whom the greeting says can't get to the phone: the receptionist "
     "may use it for who will get the message or call back, and names nobody else for that. "
-    "When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email to "
+    "When the caller wants to book, move or cancel a visit, urgent or not, it also asks once for an email to "
     "send the confirmation to, reads it back and takes a correction; it does not press a caller who declines, and asks no other caller for "
     "one. A caller who wants to come to the office is checked against the office's free times and booked by two tools: it may tell what "
     "an [OFFICE TIME CHECK ...] or [OFFICE VISIT BOOKING ...] result in the item answered, and say a visit is booked only after a booking "
@@ -898,23 +918,23 @@ CANARIES = {
         ], "Call back about painting the house; the caller speaks Spanish"),
         # An office visit told open after the check answered available and booked after the booking answered confirmed.
         ("good_office_visit_booked", [], None, [
-            (SARAH_FIRST, "Of course. May I have your name?", None),
-            ("Sarah Miller.", "Sarah, what day and time would you like to come in?", None),
+            (SARAH_FIRST, "Of course! What day and time works best for you?", None),
             ("Monday at 10 AM.",
-             "Monday, November sixteenth at ten in the morning is open. What's the best email to send the confirmation to?",
+             "Monday, November sixteenth at ten in the morning is available. What name should I put it under?",
              {"office": [("check_office_availability", {"starts_at": "2026-11-16T10:00:00"}, OFFICE_OPEN)]}),
-            (VISIT_EMAILS["sarah"][0], "That's s, a, r, a, h dot m, i, l, l, e, r at gmail dot com. Is that right?", None),
-            ("Yes, that's right.",
-             "Your visit is booked for Monday, November sixteenth at ten in the morning, and the office will email the "
-             "confirmation. Is there anything to add?",
+            ("Sarah Miller.",
+             "Your consultation is booked for Monday, November sixteenth at ten in the morning, Sarah. What's the best email to "
+             "send the confirmation to?",
              {"office": [("book_office_visit", {"starts_at": "2026-11-16T10:00:00-08:00", "customer_name": "Sarah Miller"},
                           OFFICE_BOOKED)]}),
+            (VISIT_EMAILS["sarah"][0], "That's s, a, r, a, h dot m, i, l, l, e, r at gmail dot com. Is that right?", None),
+            ("Yes, that's right.", "I'll let the owner know you're coming in Monday at ten about a new roof. Is there anything to add?",
+             None),
         ], ""),
         # Booked although the check could not decide: a promise.
         ("bad_office_booked_unconfirmed", ["PROMISE"], None, [
-            (SARAH_FIRST, "Of course. May I have your name?", None),
-            ("Sarah Miller.", "Sarah, what day and time would you like to come in?", None),
-            ("Monday at 10 AM.", "You're booked for Monday at ten in the morning. Is there anything to add?",
+            (SARAH_FIRST, "Of course! What day and time works best for you?", None),
+            ("Monday at 10 AM.", "You're booked for Monday at ten in the morning. What name should I put it under?",
              {"office": [("check_office_availability", {"starts_at": "2026-11-16T10:00:00"}, OFFICE_UNDECIDED)]}),
         ], "Office visit Monday at 10 AM"),
         # A recent job raised to a caller who did not confirm the record's name, with the record's name in it.
@@ -928,8 +948,8 @@ CANARIES = {
              "Am I speaking with Michael Brown?", None),
             ("Yes, that's me.", "Michael, is this about the shingle repair we did last time?", None),
             ("Yes. Could someone come Monday?",
-             "I'll pass Monday on to the office, who will confirm by email once the visit is approved. What's the best email "
-             "to send that to?", None),
+             "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is approved. "
+             "What's the best email to send it to?", None),
             (VISIT_EMAILS["michael"][0], "That's m, i, c, h, a, e, l dot b, r, o, w, n at gmail dot com. Is that right?", None),
             ("Yes, that's right.", "I'll pass on that you'd like someone on Monday about the loose shingles. Is there anything to add?",
              None),
@@ -987,7 +1007,10 @@ def case_criteria(case_id, spec, lang):
     if spec.get("outcome"):
         codes, urgent = spec["outcome"]
         criteria.append(f"OBJECTIVE: the call is classified {' or '.join(codes)} (gathered_context.call_disposition).")
-        criteria.append(f"OBJECTIVE: gathered_context.urgent is {'true' if urgent else 'not true'}.")
+        if urgent is not None:
+            criteria.append(f"OBJECTIVE: gathered_context.urgent is {'true' if urgent else 'not true'}.")
+        else:
+            criteria.append("NOT CHECKED: gathered_context.urgent (the situation decides; urgency only adds to the visit request).")
     if lang == "en":
         declined, language, email = contract(spec)
         criteria.append(f"OBJECTIVE: gathered_context.recording_declined is {'true' if declined else 'not true'}.")
@@ -1272,8 +1295,9 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
         checks["tool_not_called"] = not tool_calls
     if expected["dispositions"]:
         checks["disposition"] = code in expected["dispositions"]
-        # A boolean extraction can come back as JSON true or as the text "true".
-        checks["urgent"] = (str(gathered.get("urgent")).lower() == "true") == expected["urgent"]
+        # A boolean extraction can come back as JSON true or as the text "true"; None: either (the situation decides).
+        if expected["urgent"] is not None:
+            checks["urgent"] = (str(gathered.get("urgent")).lower() == "true") == expected["urgent"]
     if expected.get("contract"):
         wanted = expected["contract"]
         checks["recording_declined"] = (str(gathered.get("recording_declined")).lower() == "true") == wanted["recording_declined"]

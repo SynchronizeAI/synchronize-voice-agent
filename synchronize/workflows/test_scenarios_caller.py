@@ -390,7 +390,8 @@ class CallerScenariosTest(unittest.TestCase):
                         # A visit asked for, booked or not: the owner sees a booking request, never urgent here.
                         "office_visit_available": (("booking_request",), False),
                         "office_visit_slot_taken": (("booking_request",), False),
-                        "returning_caller_site_visit": (("booking_request",), False),
+                        # A roof "leaking again": the situation decides whether it is urgent, so the flag is not checked.
+                        "returning_caller_site_visit": (("booking_request",), None),
                         "known_caller_no_record_site_visit": (("booking_request",), False),
                     } if lang == "en" else {}),
                     "outcome_quote_request": (("quote_request",), False),
@@ -451,11 +452,12 @@ class CallerScenariosTest(unittest.TestCase):
                     "kind_new_project", "kind_ongoing_project", "kind_problem_warranty", "visit_move", "visit_cancel",
                     "visit_email_corrected", "visit_email_declined",
                 },
-                # The visits ask for an email; a new project with no visit asked for, an urgent "please come" and a question
-                # about the next visit (known, unknown, or a lookup that fails) do not.
+                # The visits ask for an email, an urgent "please come" or "please send someone" too (urgency adds); a new
+                # project with no visit asked for and a question about the next visit (known, unknown, or a lookup that
+                # fails) do not.
                 "EMAIL_MISHANDLED": {
                     "visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined", "kind_new_project",
-                    "outcome_urgent_leak", "known_caller_visit", "unknown_caller_visit", "lookup_failure",
+                    "outcome_urgent_leak", "outcome_urgent_gas", "known_caller_visit", "unknown_caller_visit", "lookup_failure",
                     "office_visit_available", "office_visit_slot_taken", "returning_caller_site_visit",
                     "known_caller_no_record_site_visit",
                 },
@@ -483,6 +485,8 @@ class CallerScenariosTest(unittest.TestCase):
                     "visit_move": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
                     "visit_cancel": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
                     "visit_email_corrected": ({**default, "customer_email": "jamie.lea@gmail.com"}, None),
+                    # An urgent leak with "please come": the visit's email is taken too (urgency adds).
+                    "outcome_urgent_leak": ({**default, "customer_email": "jamie.lee@gmail.com"}, None),
                     "office_visit_available": ({**default, "customer_email": "sarah.miller@gmail.com"}, None),
                     "office_visit_slot_taken": ({**default, "customer_email": "sarah.miller@gmail.com"}, None),
                     "returning_caller_site_visit": ({**default, "customer_email": "michael.brown@gmail.com"}, None),
@@ -1205,7 +1209,8 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertIn("BOT: That's j, a, m, i, e dot l, e, e at gmail dot com. Is that right?", by_case["CANARY_good_email_read_back"])
         self.assertIn(f"- RESTATES_CALLER: {scenarios_caller.FLAGS_EN['RESTATES_CALLER']}\n", text)
         self.assertIn("or a number or an email address read back to confirm it", text)
-        self.assertIn("When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email", text)
+        self.assertIn("When the caller wants to book, move or cancel a visit, urgent or not, it also asks once for an email", text)
+        self.assertIn("Urgency is judged by what is happening now, not by a word such as leak, and only adds", text)
         self.assertEqual(len(scenarios_caller.CANARIES["en"]), 21)
         # A lookup shows as a lookup, an End Call tool as the end of the call, an office-visit tool as its check or booking
         # with the model's arguments and the result; nothing else a session records reaches a judge.
