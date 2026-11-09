@@ -57,10 +57,11 @@ about price, schedule, feasibility or the status of existing work. `consultation
 industry. The business name is the variable `{{business_name | fallback:...}}` in the greeting and the global prompt (verified: it renders
 in both, and the fallback fills in when the value is missing). Dograh gives a production call no such value by itself (workflow-level
 context variables apply to test calls only). Both start nodes now use inbound-only Pre-Call Data Fetch: Synchronize's `POST /api/voice/pre-call`
-uses the called number and returns `initial_context` with `business_name` and the business facts and hours (Business facts and hours, below), or `{}` for an unknown number.
+uses the called number and returns `initial_context` with `business_name`, on a US line `owner_name` when the company saved one, and the business facts and hours
+(Business facts and hours, below), or `{}` for an unknown number.
 Keep the name before a noun (`... AI 비서입니다`), never before a Korean particle. A conversation node's prompt must not contain `{{` or `}}` other than
 the call variables `business_name`, `caller_name`, `service_area`, `pricing_policy`, `open_now`, `hours_today` and `next_open` (and, on the English line only,
-`urgent_examples`, and Dograh's own `current_time` in the extraction prompt), each with a non-empty fallback: Dograh renders every `{{word}}` in a prompt from the
+`owner_name`, `urgent_examples`, and Dograh's own `current_time` in the extraction prompt), each with a non-empty fallback: Dograh renders every `{{word}}` in a prompt from the
 call's context, a variable it does not have becomes an empty string, and `{{x | fallback:}}` with nothing after the colon stays in the prompt as literal braces
 (`../UPGRADE-1.51.md`, Fields). Who the caller is goes in the first line of `facts` (`구분:` or
 `Caller type:`), so the Synchronize page needs no extra field.
@@ -181,6 +182,7 @@ with closed dates, in the owner's time zone. Synchronize's pre-call sends them p
 | `service_area`, `pricing_policy` | the owner's text, as written |
 | `open_now` | `yes` or `no`, worked out by Synchronize in the company's time zone |
 | `hours_today`, `next_open` | already worded in the call's language (`8 AM to 5 PM`, `tomorrow at 8 AM`; `오전 9시부터 오후 6시까지`, `내일 오전 9시`) |
+| `owner_name` | US lines only: the owner's name as the company saved it in its own field; absent when none is saved (Business context in the prompts, below) |
 
 The call's language is a constant in each workflow's pre-call URL, `/api/voice/pre-call?language=en` or `?language=ko`: Dograh 1.51's pre-call body is fixed
 (`api/services/pipecat/pre_call_fetch.py:109-123`), so the URL is the workflow's one place for it, as the lookup tool's body template is for the lookup.
@@ -504,11 +506,17 @@ No live reachability, deployed image/API equivalence, runtime redeployment, call
 
 `business_name` stays in the static greeting and Persona, with `our office` / `저희 회사` fallbacks. The value is data, never instructions, and the backend collapses whitespace, applies the length cap and omits an empty name. Dograh's renderer does not trim tenant values, so that normalization remains the backend contract.
 
+The English (US) greeting also names the owner, who can't get to the phone, with `owner_name` and the fallback `The team`, so a company with no saved name still hears a whole
+sentence; it keeps the AI disclosure and the recording notice, promises no callback and does not guess the owner's gender. The English Persona lists the
+name under `# Owner` (fallback `not set`) as data, like the business name: the agent may use it in place of "the owner" when it says who will get the
+message or call back, says "the owner" when none is set, and gives no other name for who will call back. Synchronize sends `owner_name` only for a
+US line whose company saved one; the Korean template does not read it.
+
 The exact greeting templates are:
 
 ```text
-Thank you for calling {{business_name | fallback:our office}}. I'm an AI assistant, and this call is recorded.
-How may I help you?
+Thanks for calling {{business_name | fallback:our office}}. {{owner_name | fallback:The team}} can't get to the phone right now, so you've reached the AI assistant, and this call is recorded.
+Tell me what you need, and I can help or pass it on.
 ```
 
 ```text
@@ -601,7 +609,9 @@ as `[CALL ENDED BY <tool>]`, and no other function a session records reaches the
 every function a session recorded showed as a record lookup, so a Korean step change (each Detail or Closing move is a function call named
 from its edge) could show as a lookup with a result. Korean judge transcripts now render differently from runs judged before it, and Korean
 judged baselines from those runs shift) and every transcript as a numbered
-item with the caller record name, the business facts, on English the business's urgent examples when set, the lookup calls and results and the after-call
+item with the caller record name, the business facts, on English the business's urgent examples when set and the owner's name (every English case and
+canary carries `owner_name`, `Jordan Hale`; the opening check expects it in the greeting, and the rubric says the agent may name that person for who will
+call back), the lookup calls and results and the after-call
 `follow_up`, in a deterministic shuffle with planted canaries (a price stated at the close, a record invented after a failed lookup, 반말 or curt speech, a price
 worked out from the pricing line, on English a connection offered to a caller who asked for the owner, an urgent matter neither marked urgent for the owner nor asked for a callback number,
 a new project with no address, work or timing asked, a caller pressed for an email after declining one, a recording objection answered with "the recording is off" and more questions, a Spanish caller answered in English,

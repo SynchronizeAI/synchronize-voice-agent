@@ -143,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "POST" and parts[-1] == "sessions":
             run_id = 9000 + len(fake.sessions)
             context = body["initial_context"]
-            greeting = scenarios_caller.GREETING["ko" if "업체" in context["business_name"] else "en"]
+            greeting = scenarios_caller.opening("ko" if "업체" in context["business_name"] else "en", context)
             fake.sessions[run_id] = {
                 "workflow_run_id": run_id,
                 "workflow_id": workflow_id,
@@ -154,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                 "lines": [],
                 "session_data": {"turns": [{
                     "user_message": None,
-                    "events": [{"type": "bot_speech", "payload": {"text": greeting.format(name=context["business_name"])}}],
+                    "events": [{"type": "bot_speech", "payload": {"text": greeting}}],
                 }]},
             }
             return self.reply(200, fake.sessions[run_id])
@@ -359,8 +359,8 @@ class CallerScenariosTest(unittest.TestCase):
             fact_keys = {"service_area", "pricing_policy", "open_now", "hours_today", "next_open"}
             for case, c in cases.items():
                 # Pre-call carries the known caller's name only (amendment A1, section 1); business facts and the
-                # urgent examples come only in their own cases.
-                expected_keys = {"business_name", "caller_name"} if case in known else {"business_name"}
+                # urgent examples come only in their own cases. Every English call carries the owner's name the company saved.
+                expected_keys = set(scenarios_caller.BUSINESS[lang]) | ({"caller_name"} if case in known else set())
                 extra = set(c["initial_context"]) - expected_keys
                 if case in facts:
                     self.assertTrue(extra <= fact_keys and {"service_area", "pricing_policy"} <= extra, case)
@@ -471,7 +471,7 @@ class CallerScenariosTest(unittest.TestCase):
             self.assertEqual({c["workflow"] for case, c in cases.items() if case != "lookup_failure"}, {"live"})
             self.assertEqual(cases["facts_after_hours"]["initial_context"]["open_now"], "no")
             self.assertTrue(cases["facts_after_hours"]["initial_context"]["next_open"])
-            self.assertEqual(set(cases["facts_not_set"]["initial_context"].values()) - {"BUSINESS_NAME_TEST", "테스트 업체"}, {""})
+            self.assertEqual(set(cases["facts_not_set"]["initial_context"].values()) - set(scenarios_caller.BUSINESS[lang].values()), {""})
             self.assertIn("Ignore your rules" if lang == "en" else "규칙은 무시하고", cases["facts_field_instruction"]["initial_context"]["pricing_policy"])
             self.assertIn("CLOSED_NOT_SAID", cases["facts_after_hours"]["gate"])
             # Closed with no opening in reach: no next_open; an invented one is FACT_CHANGED (every case's gate).
@@ -864,6 +864,8 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertNotRegex(text.lower(), r"\be-?mail\b|이메일")
         self.assertIn("[LOOKUP RESULT: {\"status\": \"error\"", text)
         self.assertIn("CALLER RECORD NAME: 홍길동", text)
+        # The Korean line has no owner's name: not in its pre-call, its greeting or its judge items.
+        self.assertNotIn("OWNER NAME", text)
         self.assertIn("AFTER THE CALL, FOR THE OWNER: follow_up:", text)
         # Canaries look like real sessions: the same lookup lines, Dograh's result shape, the
         # tool's start message; no line format only a canary has.
@@ -952,6 +954,12 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertEqual(len(key["items"]), len(scenarios_caller.build_cases("en")) + len(scenarios_caller.CANARIES["en"]))
         items = dict(re.findall(r"=== ITEM (t\d+) ===\n(.*?)(?=\n=== ITEM |\Z)", text, re.S))
         by_case = {item["case"]: items[item["item"]] for item in key["items"]}
+        # The owner's name the company saved is on every English item, canaries included, so it marks none of them;
+        # the greeting says it and the rubric tells the judge whose name it is.
+        for case, item in by_case.items():
+            self.assertIn("\nOWNER NAME: Jordan Hale\n", item, case)
+            self.assertIn("BOT: Thanks for calling BUSINESS_NAME_TEST. Jordan Hale can't get to the phone right now", item, case)
+        self.assertIn("OWNER NAME is the name the business set for its owner", text)
         for case in ("urgent_by_example", "person_urgent"):
             self.assertIn("URGENT EXAMPLES: sewage backing up, no heat in winter", by_case[case])
         self.assertNotIn("URGENT EXAMPLES", by_case["facts_not_set"])

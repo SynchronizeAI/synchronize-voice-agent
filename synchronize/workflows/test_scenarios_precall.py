@@ -33,8 +33,10 @@ class PreCallScenariosTest(unittest.TestCase):
     def test_workflow_templates_keep_the_exact_two_line_greetings(self):
         expected = {
             "en": (
-                "Thank you for calling {{business_name | fallback:our office}}. "
-                "I'm an AI assistant, and this call is recorded.\nHow may I help you?"
+                "Thanks for calling {{business_name | fallback:our office}}. "
+                "{{owner_name | fallback:The team}} can't get to the phone right now, "
+                "so you've reached the AI assistant, and this call is recorded.\n"
+                "Tell me what you need, and I can help or pass it on."
             ),
             "ko": (
                 "안녕하세요, {{business_name | fallback:저희 회사}} AI 비서입니다. "

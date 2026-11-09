@@ -33,15 +33,30 @@ CODES = ("quote_request", "booking_request", "message", "done", "spam", "wrong_n
 # Contract: outcomes that leave the owner nothing to do. Everything else needs follow-up.
 NO_FOLLOW_UP = ("done", "spam", "wrong_number")
 DEFAULT_REPEATS = 5
+# What pre-call sends on every call of the line: the business name and, on a US line whose company saved one, the
+# owner's name (the pre-call proof, scenarios_precall.py, runs the English greeting without it).
+BUSINESS = {
+    "ko": {"business_name": "테스트 업체"},
+    "en": {"business_name": "BUSINESS_NAME_TEST", "owner_name": "Jordan Hale"},
+}
 # Pre-call gives a known caller's name only; their visit days come from the in-call lookup alone.
 KNOWN = {
-    "ko": {"business_name": "테스트 업체", "caller_name": "홍길동"},
-    "en": {"business_name": "BUSINESS_NAME_TEST", "caller_name": "Alex Morgan"},
+    "ko": {**BUSINESS["ko"], "caller_name": "홍길동"},
+    "en": {**BUSINESS["en"], "caller_name": "Alex Morgan"},
 }
+# Written out here, not read from the template, so a template change shows up as a failed opening check.
 GREETING = {
     "ko": "안녕하세요, {name} AI 비서입니다. 통화 내용은 녹음되어 담당자에게 전달됩니다.\n어떤 일로 전화하셨나요?",
-    "en": "Thank you for calling {name}. I'm an AI assistant, and this call is recorded.\nHow may I help you?",
+    "en": "Thanks for calling {name}. {owner} can't get to the phone right now, so you've reached the AI assistant, "
+    "and this call is recorded.\nTell me what you need, and I can help or pass it on.",
 }
+
+
+def opening(lang, context):
+    """The greeting a call with this pre-call context hears, with the template's fallback for a missing owner name."""
+    return GREETING[lang].format(name=context["business_name"], owner=context.get("owner_name") or "The team")
+
+
 # Lines from the 10-31 measurement (~/work/voice-polite-proof-20261031/scenarios.py), restored.
 L1031 = {
     "ai_question": {
@@ -625,7 +640,9 @@ RUBRIC_LINE = {
     "ko": "",
     "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
     "urgent for the owner, who will call them back; it promises no time. It asks each kind of call, one question per turn, only what the owner "
-    "needs for it. When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email to "
+    "needs for it. OWNER NAME is the name the business set for its owner, whom the greeting says can't get to the phone: the receptionist "
+    "may use it for who will get the message or call back, and names nobody else for that. "
+    "When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email to "
     "send the confirmation to, reads it back and takes a correction; it does not press a caller who declines, and asks no other caller for "
     "one. A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
     "word alone does not count), is not answered by the receptionist: "
@@ -801,9 +818,12 @@ def end_messages(lang):
 def case_criteria(case_id, spec, lang):
     criteria = []
     if spec["context"] == "unknown":
-        criteria.append("OBJECTIVE: the opening is today's greeting with the business name.")
+        criteria.append(
+            "OBJECTIVE: the opening is today's greeting with the business name"
+            + (" and the owner's name." if lang == "en" else ".")
+        )
     else:
-        criteria.append("OBJECTIVE: the opening is the unchanged greeting (the name cannot be in the canned greeting; see README).")
+        criteria.append("OBJECTIVE: the opening is the greeting an unknown caller hears (the caller's name cannot be in the canned greeting; see README).")
         criteria.append("OBJECTIVE: the agent's first reply uses the caller's name from caller_name (to confirm it, not to ask for it).")
         if spec["confirms"]:
             criteria.append("OBJECTIVE: gathered_context.customer_name is the confirmed caller_name (Synchronize names the call by it).")
@@ -848,7 +868,7 @@ def build_cases(lang):
         if spec["context"] == "known":
             context = dict(KNOWN[lang])
         else:
-            context = {"business_name": KNOWN[lang]["business_name"]}
+            context = dict(BUSINESS[lang])
         context.update((spec.get("extra") or {}).get(lang) or {})
         outcome = spec.get("outcome") or (None, None)
         cases.append(
@@ -861,7 +881,7 @@ def build_cases(lang):
                 # The test workflow: the failing lookup copy, or the line as deployed.
                 "workflow": "fails" if spec.get("lookup") == "fails" else "live",
                 "expected": {
-                    "generic_opening": GREETING[lang].format(name=context["business_name"]),
+                    "generic_opening": opening(lang, context),
                     "caller_name": context.get("caller_name"),
                     "confirms": spec["confirms"],
                     "tool_called": spec["tool"],
@@ -1223,7 +1243,7 @@ def canary_row(lang, record_name, script, follow_up, extra=None):
             ]
         events.append({"type": "bot_speech", "payload": {"text": bot}})
         turns.append({"user_message": {"text": caller}, "events": events})
-    context = {"business_name": KNOWN[lang]["business_name"], **(extra or {})}
+    context = {**BUSINESS[lang], **(extra or {})}
     if record_name:
         context["caller_name"] = record_name
     return {
@@ -1231,7 +1251,7 @@ def canary_row(lang, record_name, script, follow_up, extra=None):
             "initial_context": context,
             "workflow": "live",
         },
-        "opening": [GREETING[lang].format(name=context["business_name"])],
+        "opening": [opening(lang, context)],
         "turns": turns,
         "gathered_context": {"follow_up": follow_up},
     }
@@ -1248,6 +1268,8 @@ def render_row(row):
     )
     if "urgent_examples" in context:
         lines.append(f"URGENT EXAMPLES: {context['urgent_examples']}")
+    if "owner_name" in context:
+        lines.append(f"OWNER NAME: {context['owner_name']}")
     lines += [f"BOT: {text}" for text in row.get("opening") or [] if text]
     for turn in row.get("turns") or []:
         caller = (turn.get("user_message") or {}).get("text")
