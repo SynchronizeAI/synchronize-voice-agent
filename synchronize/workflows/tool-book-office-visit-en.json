@@ -2,7 +2,7 @@
   "placeholder_uuid": "00000000-0000-4000-8000-000000000107",
   "tool": {
     "name": "book_office_visit",
-    "description": "Books the office visit on the calendar. Use only for an office visit, and only for a specific time the caller chose that check_office_availability just returned. Never for a site visit. Say nothing while it runs; the phone system says the waiting line. Then say only what it answered, using its spoken value: confirmed: the visit is booked for that time, and if they gave an email the office will send a confirmation email there; this is the only answer that lets you say booked. unavailable: that time was just taken; offer the times in alternatives. unknown: you cannot confirm right now and the office will confirm with them; take the time as a message and do not call again.",
+    "description": "Books the office visit on the calendar. Use only for an office visit, and only for a specific time the caller chose that check_office_availability just returned. Never for a site visit. Say nothing while it runs; the phone system says the waiting line. Then say only what it answered, using its spoken value: confirmed: say the visit is booked for that time, then ask once for the best email to send the confirmation to; this is the only answer that lets you say booked. unavailable: that time was just taken; offer the times in alternatives. unknown: you cannot confirm right now and the office will confirm with them; take the time as a message and do not call again.",
     "category": "http_api",
     "icon": "calendar",
     "icon_color": "#3B82F6",

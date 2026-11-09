@@ -2140,10 +2140,31 @@ class GoLiveTests(unittest.TestCase):
         for name in specs:
             self.assertIn(name, start["prompt"])
             self.assertIn(name, persona)
-        self.assertIn("For a visit at the office, where the caller comes in, check_office_availability and book_office_visit decide",
+        self.assertIn("A visit at the office, where the caller comes in: check_office_availability and book_office_visit decide",
                       start["prompt"])
-        self.assertIn("for any other visit, say the owner will confirm it with them; never confirm, book or move a time yourself.",
+        self.assertIn("Never confirm, book or move a time yourself: only book_office_visit books, and only a visit at the office.",
                       start["prompt"])
+        # The owner's two stories (v1, 2026-11-09). An office visit: the day and time first, the check, the name once a time
+        # is found, the booking, then the email; nothing about the address or the work before the time (CONV-2). A site
+        # visit: a request with the office manager, confirmed by email once approved, never booked. Both tools' descriptions
+        # follow that order.
+        office = start["prompt"].split("   - A visit at the office", 1)[1].split("\n", 1)[0]
+        order = ("the day and time they would like", "the check", "their name if you do not have it", "the booking",
+                 "say that it is booked", "step 3")
+        self.assertEqual([office.index(step) for step in order], sorted(office.index(step) for step in order))
+        self.assertIn("Ask nothing about the address or the work before the time is settled.", office)
+        self.assertIn("I'll request Monday with our office manager. You'll get a confirmation email once the visit is approved.",
+                      start["prompt"])
+        self.assertIn("A site visit is only a request: never say it is booked or confirmed.", start["prompt"])
+        self.assertIn("ask for their email only after the booking answered", check["tool"]["description"])
+        self.assertIn("confirmed: say the visit is booked for that time, then ask once for the best email", book["tool"]["description"])
+        self.assertNotIn("get their email if you have not asked", check["tool"]["description"])
+        # The first reply answers the request; the greeting already said what the line is, so no self-introduction.
+        self.assertNotIn("Ask nothing about the matter yet.", start["prompt"])
+        self.assertIn("Never introduce yourself again or repeat that you are an AI or that the call is recorded", persona)
+        # Urgency by the situation, the business's examples first, and it adds to a visit request (CONV-5).
+        self.assertIn("Judge it by what is happening now, not by a word such as leak", persona)
+        self.assertIn("Urgency only adds: a visit the caller asks for is still requested or booked, with its email", persona)
         self.assertIn("say that the visit is booked only after book_office_visit answered confirmed", persona)
         self.assertIn("\n# Now\n{{current_time_America/Los_Angeles | fallback:not known}}, ", persona)
         (qa,) = [n["data"]["qa_system_prompt"] for n in definition["nodes"] if n["type"] == "qa"]
@@ -2269,12 +2290,12 @@ class GoLiveTests(unittest.TestCase):
                     {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language", "customer_email")},
                     {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string", "customer_email": "string"},
                 )
-                # A visit to book, move or cancel (not an urgent matter) is the one call that asks for an email: once, read back
+                # A visit to book, move or cancel (urgent or not: urgency adds) is the one call that asks for an email: once, read back
                 # as the Persona's read-back rule says, and never pressed; the extraction writes only the address the caller
                 # confirmed, as an address, and the recap reads it out no more than a phone number.
                 reception = start["prompt"]
                 self.assertIn(
-                    "if they want to book, move or cancel a visit and the matter is not urgent, ask once for the best email to send "
+                    "if they want to book, move or cancel a visit, urgent or not, ask once for the best email to send "
                     "the confirmation to, read it back as Unclear audio says and take any correction, and if they would rather not "
                     "give one or have none, go on without asking again. Ask no other caller for an email.",
                     reception,
