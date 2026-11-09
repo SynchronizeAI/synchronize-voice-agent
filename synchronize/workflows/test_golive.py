@@ -1446,7 +1446,7 @@ class GoLiveTests(unittest.TestCase):
         )
         self.assertEqual(
             {(r["condition"]["type"], r["target"]["provider_connection_uuid"]) for r in override["llm_fallback"]["rules"]},
-            {("no_output", uuid_of["synchronize-bedrock"]), ("error", uuid_of["synchronize-bedrock"])},
+            {("no_output", uuid_of["synchronize-openai"]), ("error", uuid_of["synchronize-openai"])},
         )
         self.assertNotIn(golive.PLACEHOLDER_UUID_PREFIX, json.dumps(settings))
         self.assertIn(
@@ -1485,16 +1485,20 @@ class GoLiveTests(unittest.TestCase):
 
     def test_a_missing_ambiguous_or_foreign_model_connection_is_refused_before_any_write(self):
         listed = copy.deepcopy(self.fake.connections)
-        gemini, bedrock, deepgram = listed[:3]
+        gemini, openai, deepgram = listed[:3]
         for change, message in (
             (lambda c: c.remove(next(x for x in c if x["name"] == "synchronize-gemini")),
-             "Model connection synchronize-gemini (google) is missing: add it in Dograh (runbook step 5)"),
+             "Model connection synchronize-gemini (google) is missing: give the google connection that name in Dograh "
+             "(runbook step 5)"),
+            # Found by name, never by provider: another active OpenAI connection is not taken for the fallback.
+            (lambda c: c.remove(next(x for x in c if x["name"] == "synchronize-openai")),
+             "Model connection synchronize-openai (openai) is missing: give the openai connection that name in Dograh"),
             (lambda c: c.append({**deepgram, "uuid": str(uuid4())}),
              "Model connection name synchronize-deepgram is ambiguous"),
-            (lambda c: next(x for x in c if x["name"] == "synchronize-bedrock").update(provider="openrouter"),
-             "Model connection synchronize-bedrock must be an active aws_bedrock connection"),
-            (lambda c: next(x for x in c if x["name"] == "synchronize-bedrock").update(is_active=False),
-             "Model connection synchronize-bedrock must be an active aws_bedrock connection"),
+            (lambda c: next(x for x in c if x["name"] == "synchronize-openai").update(provider="openrouter"),
+             "Model connection synchronize-openai must be an active openai connection"),
+            (lambda c: next(x for x in c if x["name"] == "synchronize-openai").update(is_active=False),
+             "Model connection synchronize-openai must be an active openai connection"),
         ):
             with self.subTest(message=message):
                 self.fake.select("en")
@@ -1506,7 +1510,8 @@ class GoLiveTests(unittest.TestCase):
                     self.assertIn(message, err)
                 self.assertEqual(self.writes(), [])
                 self.assertEqual(self.fake.workflow, self.fake.original)
-        self.assertEqual((gemini["provider"], bedrock["provider"]), ("google", "aws_bedrock"))
+        self.assertEqual((gemini["provider"], openai["provider"]), ("google", "openai"))
+        self.assertIn("openai", [c["provider"] for c in listed[3:]])
 
     def test_the_english_end_call_tools_follow_the_contract(self):
         """A recording objection or a caller in another language ends the call in one tool-only turn, and only
@@ -1639,8 +1644,7 @@ class GoLiveTests(unittest.TestCase):
         # Dograh resolves the planned override as a call would, and the plan says what the call will run.
         self.assertIn(
             "model check (as a call resolves it): llm google gemini-3.6-flash; stt deepgram nova-3-general en; "
-            "fallback no_output 1500 ms → aws_bedrock us.anthropic.claude-haiku-4-5-20251001-v1:0, "
-            "error → aws_bedrock us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "fallback no_output 1500 ms → openai gpt-4.1-mini, error → openai gpt-4.1-mini",
             out,
         )
         resolve = [c for c in self.fake.calls if c[1] == "/api/v1/model-connections/resolve"]
@@ -1997,9 +2001,10 @@ class GoLiveTests(unittest.TestCase):
             self.assertEqual(settings["turn_stop_strategy"], "turn_analyzer")
             start = golive.nodes(definition)["1"]["data"]
             if lang == "ko":
-                # Korea is a separate product: its greeting, call limit and model stay as they are.
+                # Korea is a separate product: its greeting, call limit and model stay as they are, and it asks for no email.
                 self.assertNotIn("allow_greeting_interrupt", start)
                 self.assertFalse({"max_call_duration", golive.MODEL_OVERRIDE} & set(settings))
+                self.assertNotRegex(json.dumps(definition, ensure_ascii=False).lower(), r"\be-?mail\b|이메일")
             else:
                 # The greeting plays to the end; the caller can interrupt every turn after it.
                 self.assertIs(start["allow_greeting_interrupt"], False)
@@ -2021,22 +2026,40 @@ class GoLiveTests(unittest.TestCase):
                 # Deepgram itself, not Dograh's managed STT (which sends en to Flux), on nova-3-general in English.
                 self.assertEqual(connection[override["stt"]["provider_connection_uuid"]][0], "deepgram")
                 self.assertEqual(override["stt"]["settings"], {"model": "nova-3-general", "language": "en"})
-                # One hedged race: Haiku 4.5 on Bedrock starts when Gemini gives no output for 1.5 s or fails.
+                # One hedged race: gpt-4.1-mini on the OpenAI connection starts when Gemini gives no output for 1.5 s or fails.
                 rules = override["llm_fallback"]["rules"]
                 self.assertEqual(
                     sorted((r["condition"]["type"], r["condition"].get("after_ms")) for r in rules),
                     [("error", None), ("no_output", 1500)],
                 )
                 for rule in rules:
-                    self.assertEqual(connection[rule["target"]["provider_connection_uuid"]][0], "aws_bedrock")
-                    self.assertEqual(rule["target"]["settings"], {"model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"})
-                # The two values Synchronize reads after the call travel like urgent: node 1's extraction, so
-                # gathered_context.recording_declined and gathered_context.caller_language.
+                    self.assertEqual(connection[rule["target"]["provider_connection_uuid"]][0], "openai")
+                    self.assertEqual(rule["target"]["settings"], {"model": "gpt-4.1-mini"})
+                # The values Synchronize reads after the call travel like urgent: node 1's extraction, so
+                # gathered_context.recording_declined, gathered_context.caller_language and gathered_context.caller_email.
                 extracted = {v["name"]: v["type"] for v in start["extraction_variables"]}
                 self.assertEqual(
-                    {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language")},
-                    {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string"},
+                    {k: extracted[k] for k in ("urgent", "recording_declined", "caller_language", "caller_email")},
+                    {"urgent": "boolean", "recording_declined": "boolean", "caller_language": "string", "caller_email": "string"},
                 )
+                # A visit to book, move or cancel (not an urgent matter) is the one call that asks for an email: once, read back
+                # as the Persona's read-back rule says, and never pressed; the extraction writes only the address the caller
+                # confirmed, as an address, and the recap reads it out no more than a phone number.
+                reception = start["prompt"]
+                self.assertIn(
+                    "if they want to book, move or cancel a visit and the matter is not urgent, ask once for the best email to send "
+                    "the confirmation to, read it back as Unclear audio says and take any correction, and if they would rather not "
+                    "give one or have none, go on without asking again. Ask no other caller for an email.",
+                    reception,
+                )
+                self.assertIn("do not read out phone numbers or an email address in the recap", reception)
+                self.assertIn(
+                    "an email address (saying \"at\" and \"dot\", and spelling out letter by letter only a part that could be misheard",
+                    golive.nodes(definition)["4"]["data"]["prompt"],
+                )
+                email = next(v["prompt"] for v in start["extraction_variables"] if v["name"] == "caller_email")
+                self.assertTrue(email.startswith("The email address the caller gave and confirmed when the assistant read it back"))
+                self.assertTrue(email.endswith("Empty if none was given or confirmed."))
             # Urgency is its own flag, extracted in every conversation node.
             conversation = [
                 n for n in definition["nodes"]
@@ -2191,17 +2214,16 @@ class GoLiveTests(unittest.TestCase):
             WorkflowConfigurationDefaults.model_validate(resolved).model_dump(mode="json", exclude_unset=True), resolved
         )
         # The models are ids 1.51 accepts for their providers: gemini-3.6-flash is free text on Google (1.51 drops its
-        # sampling temperature, as for every Gemini from 3.6), Haiku 4.5 is in Bedrock's own list, nova-3-general takes en.
+        # sampling temperature, as for every Gemini from 3.6), gpt-4.1-mini is in OpenAI's own list, nova-3-general takes en.
         with patch.dict(
             os.environ,
             {"DATABASE_URL": "postgresql://unused/unused", "REDIS_URL": "redis://unused"},
         ), patch.object(sys, "path", [str(golive.ROOT), *sys.path]):
             from api.services.configuration import registry
             from api.services.configuration.options.deepgram import DEEPGRAM_LANGUAGES, DEEPGRAM_STT_MODELS
-        schemas = {"google": registry.GoogleLLMService, "aws_bedrock": registry.AWSBedrockLLMConfiguration,
+        schemas = {"google": registry.GoogleLLMService, "openai": registry.OpenAILLMService,
                    "deepgram": registry.DeepgramSTTConfiguration}
-        credentials = {"google": {"api_key": "k"}, "deepgram": {"api_key": "k"},
-                       "aws_bedrock": {"aws_access_key": "a", "aws_secret_key": "b"}}
+        credentials = {"google": {"api_key": "k"}, "deepgram": {"api_key": "k"}, "openai": {"api_key": "k"}}
         template = golive.settings_template("HEAD", "en")[golive.MODEL_OVERRIDE]
         selections = [template["llm"], template["stt"], *(rule["target"] for rule in template["llm_fallback"]["rules"])]
         for selection in selections:
@@ -2209,7 +2231,7 @@ class GoLiveTests(unittest.TestCase):
             service = schemas[provider].model_validate({**selection["settings"], **credentials[provider]})
             self.assertEqual(service.model, selection["settings"]["model"])
         self.assertIsNone(registry.GoogleLLMService(model="gemini-3.6-flash", api_key="k").temperature)
-        self.assertIn("us.anthropic.claude-haiku-4-5-20251001-v1:0", registry.AWS_BEDROCK_MODELS)
+        self.assertIn("gpt-4.1-mini", registry.OPENAI_MODELS)
         self.assertIn("nova-3-general", DEEPGRAM_STT_MODELS)
         self.assertIn("en", DEEPGRAM_LANGUAGES)
         self.assertNotIn(golive.PLACEHOLDER_UUID_PREFIX, json.dumps(resolved))

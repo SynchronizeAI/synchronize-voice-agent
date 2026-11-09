@@ -61,11 +61,11 @@ SETTINGS_KEYS = ("call_dispositions", "max_call_duration")
 MODEL_OVERRIDE = "model_configuration_override"
 MODEL_KEYS = ("llm", "llm_fallback", "stt")
 # The provider connections a settings template names by a reserved placeholder UUID (the tool placeholders' family):
-# the Dograh provider each must be and the name the operator gave it in Dograh. The connection holds the key, typed
-# at a silent read (runbook step 5), never in git; go-live writes only its UUID, and no placeholder is ever published.
+# the Dograh provider each must be and the name the operator gave it in Dograh (runbook step 5 renames the existing
+# connections). The connection holds the key, never git; go-live writes only its UUID, and no placeholder is published.
 MODEL_CONNECTIONS = {
     "00000000-0000-4000-8000-000000000201": ("google", "synchronize-gemini"),
-    "00000000-0000-4000-8000-000000000202": ("aws_bedrock", "synchronize-bedrock"),
+    "00000000-0000-4000-8000-000000000202": ("openai", "synchronize-openai"),
     "00000000-0000-4000-8000-000000000203": ("deepgram", "synchronize-deepgram"),
 }
 CONNECTIONS_ROUTE = "/model-connections/provider-connections"
@@ -892,7 +892,8 @@ def model_connections(client, *templates):
         matches = [entry for entry in listed if entry["name"] == name]
         require(
             matches,
-            f"Model connection {name} ({provider}) is missing: add it in Dograh (runbook step 5), then re-plan",
+            f"Model connection {name} ({provider}) is missing: give the {provider} connection that name in Dograh "
+            "(runbook step 5), then re-plan",
         )
         require(
             len(matches) == 1,

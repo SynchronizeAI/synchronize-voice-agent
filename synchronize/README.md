@@ -17,8 +17,8 @@ Postgres and Redis services, `OSS_JWT_SECRET`, `TELEPHONY_WS_TOKEN_SECRET`, `FOR
 and a variable set from a pipe must not also redirect stdin.
 
 One-time operator setup, all through Dograh's own UI and API (no code): sign up the first user and create an API key; add the OpenAI and
-ElevenLabs provider connections and a model configuration (`POST /api/v1/model-connections/...`), set it as the default, and the English line's
-Gemini, Bedrock and Deepgram connections by the names go-live resolves (`workflows/README.md`, Model, speech recognition and call limit); load the
+ElevenLabs provider connections and a model configuration (`POST /api/v1/model-connections/...`), set it as the default, and give the Gemini,
+OpenAI and Deepgram connections the names go-live resolves for the English line (`workflows/README.md`, Model, speech recognition and call limit); load the
 workflow and enter its settings (`workflows/README.md`); add the Twilio telephony configuration and the number routed to the workflow (Dograh pushes its inbound webhook to Twilio and
 rejects unsigned requests). The Synchronize backend needs `DOGRAH_BASE_URL` and `DOGRAH_API_KEY`.
 

@@ -47,7 +47,7 @@
             "target": {
               "provider_connection_uuid": "00000000-0000-4000-8000-000000000202",
               "settings": {
-                "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                "model": "gpt-4.1-mini"
               }
             }
           },
@@ -58,7 +58,7 @@
             "target": {
               "provider_connection_uuid": "00000000-0000-4000-8000-000000000202",
               "settings": {
-                "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                "model": "gpt-4.1-mini"
               }
             }
           }

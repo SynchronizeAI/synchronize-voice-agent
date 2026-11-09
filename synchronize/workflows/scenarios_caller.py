@@ -107,6 +107,9 @@ URGENT_EXAMPLES = {"open_now": "yes", "urgent_examples": "sewage backing up, no 
 URGENT_BY_EXAMPLE = "Our heat has been out since last night and it's freezing in here."
 # The English line asks an urgent caller once for a number to call back; every English urgent script answers it.
 URGENT_NUMBER_ANSWER = "This number is fine."
+# The email a booking script gives, as a caller says it, and as the extraction must write it.
+BOOKING_EMAIL_SAID = "It's jamie dot lee at gmail dot com."
+BOOKING_EMAIL = "jamie.lee@gmail.com"
 VISIT_LINES = {
     "ko": ["다음 방문 언제 오세요?", "네, 맞아요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
     "en": ["When's your next visit to my place?", "Yes, that's me.", "Okay, thanks.", "No, that's all."],
@@ -122,9 +125,10 @@ VISIT_LINES = {
 #            False: it never runs; None: either.
 #   lookup   "live": the live tool; "fails": a copy of it that times out (archived at the end).
 #   outcome  (codes, urgent) read from gathered_context, or None.
-#   recording_declined, caller_language
-#            what the English line's extraction must carry for Synchronize (default false and empty); checked on
-#            every English case, because a wrong recording_declined deletes a call's recording and transcript.
+#   recording_declined, caller_language, caller_email
+#            what the English line's extraction must carry for Synchronize (default false, empty and empty); checked on
+#            every English case, because a wrong recording_declined deletes a call's recording and transcript, and an email
+#            on a call that gave none means the agent asked a caller it should not have.
 #   ends     (End Call tool, caller line): the line's own End Call tool the agent must call, in a turn of its own with
 #            no speech but the tool's fixed message, on that caller line (0-based). Every English case checks that no
 #            other of those tools runs.
@@ -269,7 +273,8 @@ CASES = {
         "lines": {"ko": ["지금 욕실 천장에서 물이 계속 새고 있어요.", "김서연이요.", "아래층까지 물이 떨어질 것 같아요, 빨리 좀 봐 주세요.", "네, 부탁드려요."],
                   "en": ["Water is pouring through my bathroom ceiling right now.", "Jamie Lee.", "It's dripping onto the floor below, please come as soon as you can.",
                          URGENT_NUMBER_ANSWER, "Yes, please hurry."]},
-        "judged": "It promises no arrival time.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED",),
+        # On English, "please come" about an urgent matter asks for no email: the owner calls back.
+        "judged": "It promises no arrival time.", "gate": (), "gate_en": ("URGENT_NOT_FLAGGED", "EMAIL_MISHANDLED"),
     },
     "outcome_urgent_gas": {
         "context": "unknown", "confirms": None, "tool": None, "outcome": (("booking_request", "message"), True),
@@ -381,8 +386,8 @@ CASES = {
         "lines": {"en": ["Hi, I'm looking to get a new deck built behind my house.", "Jamie Lee.", "It's 418 Oak Street in Berkeley.",
                          "Yes, that's right.", "About twelve by sixteen feet, and I'd like it done this spring.", "No, that's all."]},
         "judged": "A new project: it asks, one per turn, for the service address (read back once), the work and when, only what "
-        "the caller has not said, and promises no price or date.",
-        "gate": ("INTAKE_MISSED",),
+        "the caller has not said, asks for no email (the caller asked for no visit), and promises no price or date.",
+        "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
     },
     "kind_ongoing_project": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("message",), False),
@@ -398,20 +403,48 @@ CASES = {
         "judged": "A problem with finished work: it asks what is wrong and since when, and promises no repair, visit or cost.",
         "gate": ("INTAKE_MISSED",),
     },
+    # A visit to book, move or cancel (not an urgent matter) also takes an email for the confirmation: asked once before the
+    # recap, read back, corrected when the caller corrects it, never pressed after a no. Each script answers that question.
     "visit_move": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
+        "caller_email": BOOKING_EMAIL,
         "lines": {"en": ["Hi, I need to move the estimate visit I have with you on Thursday.", "Jamie Lee.",
-                         "Monday or Tuesday next week, any time after one in the afternoon.", "No, that's all."]},
-        "judged": "It takes the day and time window the caller would like instead, says the owner will confirm it, and confirms no time.",
-        "gate": ("INTAKE_MISSED",),
+                         "Monday or Tuesday next week, any time after one in the afternoon.", BOOKING_EMAIL_SAID,
+                         "Yes, that's right.", "No, that's all."]},
+        "judged": "It takes the day and time window the caller would like instead, asks once for an email to send the confirmation "
+        "to and reads it back, says the owner will confirm it, and confirms no time.",
+        "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
     },
     "visit_cancel": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
+        "caller_email": BOOKING_EMAIL,
         "lines": {"en": ["Hi, I need to cancel the estimate visit on Thursday.", "Jamie Lee.", "No thanks, I'd rather just cancel.",
-                         "We decided to put the project off for now.", "No, that's all."]},
-        "judged": "Before taking the cancellation it offers once to find another time; then it asks why, says the owner will confirm, "
-        "and confirms nothing itself.",
-        "gate": ("INTAKE_MISSED",),
+                         "We decided to put the project off for now.", BOOKING_EMAIL_SAID, "Yes, that's right.", "No, that's all."]},
+        "judged": "Before taking the cancellation it offers once to find another time; then it asks why, asks once for an email to "
+        "send the confirmation to and reads it back, says the owner will confirm, and confirms nothing itself.",
+        "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
+    },
+    # The new day and window come with the reason, so the email is the one question left; the caller corrects one letter.
+    "visit_email_corrected": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
+        "caller_email": "jamie.lea@gmail.com",
+        "lines": {"en": ["Hi, I need to move the estimate visit on Thursday to Monday morning instead.", "Jamie Lee.",
+                         BOOKING_EMAIL_SAID, "Almost: it's l, e, a after the dot, not l, e, e.", "Yes, that's right.",
+                         "No, that's all."]},
+        "judged": "The caller already gave the new day and window, so it asks no more about them; it asks once for an email to send "
+        "the confirmation to, reads it back with the parts that could be misheard spelled out, takes the corrected letter and "
+        "spells back only that part, once. It confirms no time.",
+        "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
+    },
+    # A measurement visit for a new project: the intake, then the email question, which the caller declines.
+    "visit_email_declined": {
+        "context": "unknown", "langs": ("en",), "confirms": None, "tool": None, "outcome": (("booking_request",), False),
+        "lines": {"en": ["Hi, can someone come out to measure my windows for new blinds? Any weekday afternoon next week works.",
+                         "Jamie Lee.", "It's 418 Oak Street in Berkeley.", "Yes, that's right.",
+                         "I'd rather not give an email. The owner can just call me.", "No, that's all."]},
+        "judged": "A measurement visit for a new project: after the address, read back once, it asks once for an email to send the "
+        "confirmation to; when the caller declines it goes on to the recap without asking again or pressing, and confirms no time.",
+        "gate": ("INTAKE_MISSED", "EMAIL_MISHANDLED"),
     },
     "recording_objection": {
         "context": "unknown", "langs": ("en",), "confirms": None, "tool": None,
@@ -553,9 +586,16 @@ FLAGS_EN = {
     "end_call_spanish (Spanish) or end_call_other_language (any other language), or the assistant asked anything more or went on with the "
     "call in either language; or the call ended that way although the caller told their matter in English (a greeting, a name, a place or "
     "a word in another language, or an accent, alone is not another language).",
+    "EMAIL_MISHANDLED": "the caller wants to book, move or cancel a visit, a measurement or an appointment for a matter that is not "
+    "urgent, and the assistant did not ask once for an email address to send the confirmation to, asked for it again after the caller "
+    "declined or said they have none, did not read the address back once (spelling out the parts that could be misheard), or did not "
+    "take the caller's correction; or the assistant asked for an email address on any other call.",
     # English wording of a shared flag, as the English call review has it (consultation-en.json, Call QA).
     "WRONG_LANGUAGE": "the assistant spoke another language to a caller who spoke English and did not ask for one. The phone system's fixed "
     "sentence in the caller's own language when it ends the call, and the fixed goodbye, are not this flag.",
+    # English wording of a shared flag: the English line also reads back an email address (Korean judged text stays as it was).
+    "RESTATES_CALLER": "the assistant repeated or summarized what the caller just said, other than a final recap or a number or an email "
+    "address read back to confirm it.",
 }
 
 
@@ -585,7 +625,9 @@ RUBRIC_LINE = {
     "ko": "",
     "en": " For an urgent matter it takes the details, asks once for a callback number when the caller gave none, and says it has marked the matter "
     "urgent for the owner, who will call them back; it promises no time. It asks each kind of call, one question per turn, only what the owner "
-    "needs for it. A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
+    "needs for it. When the caller wants to book, move or cancel a visit and the matter is not urgent, it also asks once for an email to "
+    "send the confirmation to, reads it back and takes a correction; it does not press a caller who declines, and asks no other caller for "
+    "one. A caller who says they do not want this call recorded, or who tells their matter in another language (a greeting, name or "
     "word alone does not count), is not answered by the receptionist: "
     "the call ends at once through one of the line's End Call tools, whose fixed message (in Spanish for a Spanish speaker, otherwise in English) "
     "says the owner will call them back at this number. A [CALL ENDED BY ...] line names the tool that ended a call.",
@@ -683,6 +725,23 @@ CANARIES = {
             ("Tom Reyes", "Tom, what number should the owner call you back on?", None),
             ("This number is fine", "I'll pass on that water is pouring through your bathroom ceiling, marked urgent. Is there anything to add?", None),
         ], "Urgent: water through the bathroom ceiling; call back as soon as possible"),
+        ("bad_email_pressed", ["EMAIL_MISHANDLED"], None, [
+            ("Hi, I need to move my estimate visit on Thursday to Monday morning.", "May I have your name?", None),
+            ("Jamie Lee", "Jamie, what's the best email to send the confirmation to?", None),
+            ("I'd rather not give my email.", "I'm sorry, the owner needs an email to confirm the visit. Could you give me one?", None),
+            ("No, just call me.", "I'll pass on that you'd like to move Thursday's visit to Monday morning. Is there anything to add?", None),
+        ], "Move the Thursday estimate visit to Monday morning; call back to confirm"),
+        # The email read back with the parts that could be misheard spelled out, and only the corrected part spelled again.
+        ("good_email_read_back", [], None, [
+            ("Hi, I need to move my estimate visit on Thursday to Monday morning.",
+             "I'm sorry, the owner will confirm the new time with you. May I have your name?", None),
+            ("Jamie Lee", "Jamie, what's the best email to send the confirmation to?", None),
+            ("It's jamie dot lee at gmail dot com.", "That's j, a, m, i, e dot l, e, e at gmail dot com. Is that right?", None),
+            ("Almost: it's l, e, a after the dot, not l, e, e.", "L, e, a. Is that right?", None),
+            ("Yes, that's right.",
+             "I'll pass on that you'd like Thursday's visit moved to Monday morning, for the owner to confirm. Is there anything to add?",
+             None),
+        ], "Confirm moving the Thursday estimate visit to Monday morning"),
         ("bad_intake_missed", ["INTAKE_MISSED"], None, [
             ("Hi, I'm looking to get a new deck built behind my house.", "May I have your name?", None),
             ("Jamie Lee", "Jamie, how did you hear about us?", None),
@@ -717,7 +776,9 @@ CANARIES = {
 LOOKUP_TOOLS = ("lookup_caller_work_ko", "lookup_caller_work_en")
 EXTRACTION_KEYS = (
     "customer_name", "topic", "summary", "facts", "follow_up", "follow_up_label", "urgent", "recording_declined", "caller_language",
+    "caller_email",
 )
+CONTRACT_KEYS = ("recording_declined", "caller_language", "caller_email")
 
 
 def case_gate(spec, lang):
@@ -725,8 +786,8 @@ def case_gate(spec, lang):
 
 
 def contract(spec):
-    """What the English line's extraction must carry for Synchronize: recording_declined and caller_language."""
-    return bool(spec.get("recording_declined")), spec.get("caller_language", "")
+    """What the English line's extraction must carry for Synchronize: recording_declined, caller_language and caller_email."""
+    return bool(spec.get("recording_declined")), spec.get("caller_language", ""), spec.get("caller_email", "")
 
 
 def end_messages(lang):
@@ -760,9 +821,10 @@ def case_criteria(case_id, spec, lang):
         criteria.append(f"OBJECTIVE: the call is classified {' or '.join(codes)} (gathered_context.call_disposition).")
         criteria.append(f"OBJECTIVE: gathered_context.urgent is {'true' if urgent else 'not true'}.")
     if lang == "en":
-        declined, language = contract(spec)
+        declined, language, email = contract(spec)
         criteria.append(f"OBJECTIVE: gathered_context.recording_declined is {'true' if declined else 'not true'}.")
         criteria.append(f"OBJECTIVE: gathered_context.caller_language is {language or 'empty (English)'}.")
+        criteria.append(f"OBJECTIVE: gathered_context.caller_email is {email or 'empty (no email given)'}.")
         if spec.get("ends"):
             tool, line = spec["ends"]
             criteria.append(
@@ -806,7 +868,7 @@ def build_cases(lang):
                     "dispositions": outcome[0],
                     "urgent": outcome[1],
                     **({
-                        "contract": dict(zip(("recording_declined", "caller_language"), contract(spec))),
+                        "contract": dict(zip(CONTRACT_KEYS, contract(spec))),
                         "end_tools": sorted(messages),
                         "ends": (
                             {"tool": spec["ends"][0], "line": spec["ends"][1], "message": messages[spec["ends"][0]]}
@@ -935,6 +997,8 @@ def grade(case, opening, turns, gathered, tool_name, completed=None):
         # BCP-47: Spanish may come back as es or es-US; en and en-* are English, for which Synchronize stores nothing.
         language = normal(gathered.get("caller_language")).lower().split("-")[0]
         checks["caller_language"] = ("" if language == "en" else language) == wanted["caller_language"]
+        # The address the caller confirmed, as an address; case and stray spaces do not count.
+        checks["caller_email"] = "".join(str(gathered.get("caller_email") or "").split()).lower() == wanted["caller_email"]
     if expected.get("end_tools") is not None:
         ends = expected.get("ends")
         ended = [
@@ -1251,8 +1315,8 @@ def score(args):
     key = json.loads((args.out / "judge-key.json").read_text())
     gates = {case["case"]: set(case["gate"]) for case in build_cases(key["lang"])}
     flags_of = flags_for(key["lang"])
-    # A clean canary must also be left without the English-only gate flag.
-    gate_flags = set(GATE_ALL) | {"LOOKUP_NOT_HANDLED"} | set(FLAGS_EN if key["lang"] == "en" else ())
+    # A clean canary must also be left without the English-only gate flags (not the English wording of a shared flag).
+    gate_flags = set(GATE_ALL) | {"LOOKUP_NOT_HANDLED"} | (set(FLAGS_EN) - set(FLAGS) if key["lang"] == "en" else set())
     judges = {}
     for path in sorted(args.out.glob("judge.*.out")):
         name = path.name.removeprefix("judge.").removesuffix(".out")
