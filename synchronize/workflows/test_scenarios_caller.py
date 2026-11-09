@@ -522,8 +522,13 @@ class CallerScenariosTest(unittest.TestCase):
                     self.assertEqual(lines[lines.index(said):], [said, "Yes, that's right.", "No, that's all."], case)
                 self.assertEqual(cases["visit_email_corrected"]["lines"][2:4], [said, "Almost: it's l, e, a after the dot, not l, e, e."])
                 self.assertIn("rather not give an email", cases["visit_email_declined"]["lines"][4])
+                # An urgent caller who asks for someone to come is asked for an email too (urgency adds): the leak caller
+                # gives one after the callback number, the gas caller declines.
+                self.assertEqual(cases["outcome_urgent_leak"]["lines"][3:6],
+                                 [scenarios_caller.URGENT_NUMBER_ANSWER, said, "Yes, that's right."])
+                self.assertIn("rather not give an email", cases["outcome_urgent_gas"]["lines"][4])
                 for case, c in cases.items():
-                    if case not in ("visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined"):
+                    if case not in ("visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined", "outcome_urgent_gas"):
                         self.assertNotRegex(" ".join(c["lines"]).lower(), r"\be-?mail\b", case)
             else:
                 for c in cases.values():
@@ -1174,7 +1179,8 @@ class CallerScenariosTest(unittest.TestCase):
         self.assertFalse("urgent" in said or "number" in said)
         self.assertIn("- URGENT_NOT_FLAGGED: ", text)
         self.assertIn("It never connects a call to anyone. For an urgent matter it takes the details, asks once for a callback number", text)
-        self.assertIn("marked the matter urgent for the owner, who will call them back; it promises no time. It asks each kind of call", text)
+        self.assertIn("marked the matter urgent for the owner, who will call them back; it promises no time. Urgency is judged", text)
+        self.assertIn("a visit the caller asks for is still requested or booked, with its email. It asks each kind of call", text)
         # The recording and language rules: an End Call tool ends the call at once, and the judge sees which.
         self.assertIn("A [CALL ENDED BY ...] line names the tool that ended a call.\nEach ITEM is one call", text)
         # English WRONG_LANGUAGE leaves out the fixed sentence in the caller's language and the fixed goodbye.
