@@ -288,9 +288,9 @@ All of it is general rules in the lines the model already reads, not one sentenc
 - **Speech.** One short sentence per turn, or two when a step has the agent answer and then ask, with at most one question; when a step gives
   more than one thing to say before the question (closed right now, marked urgent), they go in one sentence, and the recap is one sentence
   before "anything to add?", so no turn passes Call QA's `LONG_TURN` (more than two sentences). Numbers, times,
-  dates, prices and addresses are said as words ("Monday, November sixteenth", "four one eight Oak Street"), also in a business fact told as written
+  dates, prices and addresses are said as words ("Monday, November sixteenth"), also in a business fact told as written
   and a day or time a lookup or an office-visit tool gives, and abbreviations and symbols in full ("Avenue", "percent"); the name is read back
-  once by using it in the next question; the service address of a new project or a site visit and another callback number (three, three and four digits, each as a word;
+  once by using it in the next question; a service address the caller said and another callback number (three, three and four digits, each as a word;
   a corrected number read back whole once more) are each read back once in a turn of their own that asks whether it is right; the
   read-backs and the recap are the only exceptions to "do not repeat the caller"; the recap keeps
   a requested day, time or window and reads out no phone number or email; an email address is read back once in a turn of its own, with "at"
