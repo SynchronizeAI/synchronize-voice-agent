@@ -1,7 +1,7 @@
 # Consultation workflows
 
 The AI phone consultation, ready to load: `consultation-ko.json` and `consultation-en.json` are the body of
-`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the six call outcomes and the turn strategy, and on English the call limit and the model services, see Model, speech recognition and call limit below; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or no call is classified. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. Both need the caller-work HTTP tool (`tool-lookup-caller-work-*.json`, see Caller memory below) and `consultation-en.json` also needs two End Call tools created first (see English, below). Customers never see this text.
+`POST /api/v1/workflow/create/definition`; `*-settings.json` holds its settings (the six call outcomes and the turn strategy, and on English the call limit and the model services, see Model, speech recognition and call limit below; set the deployment's `dictionary`, see below): after loading the workflow, enter them in Dograh's workflow settings and publish it, or no call is classified. Use the pair that matches the deployment's default language. One published workflow serves many businesses; the called number supplies the business context. Fill the deployment values below before loading either JSON. Both need the caller-work HTTP tool (`tool-lookup-caller-work-*.json`, see Caller memory below) and `consultation-en.json` also needs its End Call tools created first (see English, below) and the two office-visit HTTP tools (`tool-check-office-availability-en.json`, `tool-book-office-visit-en.json`, see Office visits and recent jobs below). Customers never see this text.
 
 Korean is three steps, the shape Dograh's own guide gives (one phase per node, a specific edge condition per exit). The start node plays the greeting, takes the
 reason with a short "네,", and asks the name. The Detail node asks one open question that continues from what the caller said (a bare "anything else?" ended
@@ -285,6 +285,80 @@ All of it is general rules in the lines the model already reads, not one sentenc
   next Tuesday) stays in the caller's words, because one shared workflow does not know the business's time zone and UTC would move an evening
   call's "tomorrow" by a day.
 
+## Office visits and recent jobs (English, US lines only)
+
+The owner's two demo stories (2026-11-09): a new caller who wants to come to the office is told only a time the office's
+free times allow and is booked only when the booking answered confirmed; a returning caller is asked, after confirming the
+record's name, whether the matter is about the job the business did last time, and a visit to their place is a request the
+office approves later (Synchronize's approval card), confirmed to them by email. This section is the wiring (phase A); the
+prompt wording of both stories is a later change. One English workflow serves every US number, applied by `golive.py`
+to workflow 3 (owner decision 2026-11-09): the server spec's first step, a copy of the workflow for the demo number only,
+is not followed.
+
+**Synchronize's side.** PR #3935 (branch `fm/voice-db-calendar-t1-r2`, the agreed direction: our own schedule is the
+calendar, Google gets an export) serves `POST /api/voice/tools/availability` and `POST /api/voice/tools/book`
+(`src/synchronize/web/voice_api.py` `office_visit_router`, `src/synchronize/office_visits.py`), behind the same
+`X-Dograh-Secret` as the other Dograh routes; its `docs/architecture/voice-office-visit-workflow.md` is the Dograh-side
+spec these templates follow. Each answers `{"status": ..., "starts_at"?, "spoken"?, "alternatives": [{"starts_at", "spoken"}]}`
+with `status` one of `available`, `unavailable`, `options`, `confirmed` and `unknown`; the company and the caller come from
+the run, never the body, and a run that is not a phone call under way on a US line answers `unknown`. A visit is bookable
+Monday to Friday 09:00–17:00 on the company's clock, an hour long, at most two weeks ahead. PR #3926
+(`fm/dograh-status-m3-r2`, the Google Calendar version) has the same routes and parameter names; it differs in that its
+times refuse an offset (`NaiveDatetime`), its answers carry `starts_at` without one, and its spec lacks #3935's two-week
+sentence. The templates follow #3935; a `starts_at` the model copies from a #3935 answer (with an offset) into the booking
+would be refused by #3926 and answered `unknown`.
+
+**The tools.** `tool-check-office-availability-en.json` (placeholder `…0106`) and `tool-book-office-visit-en.json` (`…0107`)
+carry the spec's names, descriptions, parameters, messages ("Let me check." / "One moment.", then "One moment, please."
+after 2.5 s) and timeouts (5000 and 8000 ms, over Synchronize's 4 s and 7 s deadlines) word for word, with the placeholder
+origin and the shared `X-Dograh-Secret` credential reference that go-live wires like the lookup's. Both are on node 1, after
+the End Call tools. The request bodies differ in one deliberate way from the spec:
+
+- `check_office_availability` keeps the spec's shape: no body template, so the body is the model's `starts_at`,
+  `window_start` and `window_end` laid over the presets `workflow_run_id` (`{{initial_context.workflow_run_id}}`) and
+  `language` (`en`). A body template cannot carry these times: it renders an argument the model left out as `""`
+  (`api/utils/template_renderer.py` `_render_string`), which Synchronize refuses as a time, so every window question would
+  answer `unknown`. What this leaves open: at 1.51 the model's arguments override the presets (`custom_tool.py`
+  `execute_http_tool`, `resolved_arguments`), so a caller who steered the model into sending a `workflow_run_id` would get
+  another run's free times, and only of a phone call under way on a US line. It reads only; it books nothing. Closing it
+  needs Synchronize to read `""` as no time (then this tool takes a body template too).
+- `book_office_visit`, which writes, sends a body template: `{"workflow_run_id": "{{initial_context.workflow_run_id}}",
+  "language": "en", "starts_at": "{{starts_at}}", "customer_name": "{{customer_name}}"}` with the run-id preset as the
+  fail-closed guard, the lookup's rule (Caller memory, above). Synchronize reads the same four keys; a name the model leaves
+  out arrives as `""`, which it reads as none. So no booking lands on another call's run.
+
+Go-live refuses any other shape (`golive.py` `http_body_contract`: a body template must hold the run id from the run's
+context, the language and each parameter as its own placeholder; only the availability route may send the model's arguments,
+with exactly those two presets and no parameter of their names).
+
+**Prompt wiring.** Reception step 2's visit sentence says that for a visit at the office the two tools decide, as their
+descriptions say, and that any other visit is the owner's to confirm; the tool line says the phone system speaks each tool's
+waiting line. The Persona's role line adds what an office-visit tool returns, `What you never do` gets a third exception
+(what the two tools answered may be told to a caller who wants to come in, and booked only after `book_office_visit`
+answered confirmed), and a `# Now` section gives Dograh's own clock, `{{current_time_America/Los_Angeles}}` and
+`{{current_weekday_America/Los_Angeles}}` (`api/utils/template_renderer.py`), which the tools' times are worked out from.
+The Pacific zone is the shared workflow's, not the company's: Synchronize reads a time with no offset on the company's own
+clock, so only a caller's "tomorrow" said near midnight Pacific in another zone can land a day off; a company-local "now"
+from pre-call would close that. Call QA's `PROMISED_UNCONFIRMED` lets a booked visit pass only after a `[tool_call]` line
+for `book_office_visit`, and offered or open times only after one for `check_office_availability`.
+
+**Recent jobs.** Synchronize PR #3932 (`fm/voice-caller-history-w2-r2`, on #3926) adds `recent_jobs` to a known caller's
+pre-call context (`src/synchronize/voice_caller.py`): up to three of their newest jobs, one line each with name, status,
+finish day, last visit and next visit (with the schedule row's title). The Persona's `# Caller` lists it under the name,
+with the fallback `none`, as data, and carries #3932's rule: recent jobs only for a caller who confirmed the name on the
+caller record; ask once whether the matter is about a matching job, in plain words; never mention work not listed or read
+the list out; never an amount, an address or another person's name. Go-live pins no list of context variables; the
+contract test pins the variables each template reads, now with `recent_jobs` and the two clock variables.
+
+**Values for Synchronize.** Node 1's extraction adds `requested_visit` exactly as the spec defines it (the day and time
+the caller asked for, office or site, in their words); `customer_email` stays as it was (read back, written as an address).
+The six outcomes are unchanged: #3935 adds no code, and its `voice_events` marks a booked visit in the call's event body
+(`office_visit_booked`, `office_visit_not_on_google`) instead.
+
+**Text chat cannot book.** A text-chat run is not a phone call, so both routes answer it `unknown`, as the lookup answers
+`{"known": false}`: the evals (below) show that path and grade every session on what the tools answered, and the booking
+itself needs a real call to the English line after go-live.
+
 ## Model, speech recognition and call limit (English)
 
 `consultation-en-settings.json` carries them; go-live applies them (Live wiring, below).
@@ -377,11 +451,17 @@ Stable node IDs/types preserve renamed nodes, custom nodes, edges, positions and
 merge the same way; a template that adds, removes or re-targets an edge is refused before any write.
 
 Every tool the new ref's template names by placeholder (the caller-work tool, `tool-lookup-caller-work-{lang}.json`, and on English the three End Call tools,
-`tool-end-call-*-en.json`, refused if one asks for a reason or speaks more than one message) is found by its unique name among the organization's non-archived tools: absent → created,
+`tool-end-call-*-en.json`, refused if one asks for a reason or speaks more than one message, and the two office-visit tools,
+`tool-check-office-availability-en.json` and `tool-book-office-visit-en.json`) is found by its unique name among the organization's non-archived tools: absent → created,
 equal → untouched, different description/icon/definition → updated in place (name and category never change) with a mode like the fields': `wiring` when only the URL or
 credential differs, `template-replaced` when the live tool equals the old ref's tool, and `REPLACES-CUSTOM` otherwise (edited in Dograh → Tools, or an old ref without the
-tool), which needs `--accept-merged tool.<name>`. The caller-work tool's URL is the runtime origin + `/api/voice/tools/caller-work` and its credential is the named
-`--credential-name` credential; an End Call tool is written as its template has it. A duplicate name, or a tool of that name that is not an active tool of the template's category, aborts before any write.
+tool), which needs `--accept-merged tool.<name>`. Each HTTP tool's URL is the runtime origin + its route (`/api/voice/tools/caller-work`,
+`/api/voice/tools/availability`, `/api/voice/tools/book`) and its credential is the named
+`--credential-name` credential; an End Call tool is written as its template has it.
+Before anything is read from Dograh, plan and apply post once, with no secret, to each HTTP tool's route on the runtime origin (a
+served route refuses that request, 401 or 503, and runs nothing) and refuse, naming the route, when it answers 404: until
+Synchronize PR #3935 (or #3926) is deployed, the English plan stops at `/api/voice/tools/availability`, so the office-visit tools
+cannot be wired to a route that does not exist and no call that asks for a visit can fail on one. A duplicate name, or a tool of that name that is not an active tool of the template's category, aborts before any write.
 A tool whose icon is `synchronize-test-copy` (`TEST_COPY_ICON`) is a copy `scenarios_caller.py` made for an eval run (the failing lookup): it has the line tool's own
 name, because that name is the function the model calls, and it is otherwise the planned tool exactly, so without the mark go-live would call it unchanged, attach
 it, and lose it when the eval archives it. Go-live refuses it before any write
@@ -414,7 +494,8 @@ Avoid concurrent editor changes during apply/rollback; the pre-write comparison 
 but the API has no conditional PUT to close the final read/write race.
 
 Both plan and apply flush a timestamped `0600` format-version-3 backup containing the definition, settings, template variables, version number, published definition ID
-and each tool that run manages as it was (or `null` when it did not exist): the caller-work tool.
+and each tool that run manages as it was (or `null` when it did not exist): the caller-work tool and, on English, the End Call
+and office-visit tools.
 The version/ID and path are printed; apply explicitly prints **`ROLLBACK FILE: <path>`**. Keep that file for recovery.
 Backups never contain the supplied secrets; workflow data containing either is refused. QA/provider secrets remain masked by Dograh's API.
 Plan has no remote writes. Each changed template field prints
@@ -473,9 +554,17 @@ maps Dograh's missing-run 404 to `None`; the completion route returns **200 `{}`
 It then posts `{"workflow_run_id": 2147483647}` to `/api/voice/tools/caller-work`, a JSON integer as the tool's body template sends it, and expects 200
 `{"known": false}` (an unknown run) and 401/403 with the wrong secret. Synchronize answers a body it refuses with the same 200 `{"known": false}`
 (`src/synchronize/web/voice_api.py`, `caller_work`), so this proves the route and its secret, not that the integer id is accepted: test call 2 proves that.
-Successful probe output is six status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
-call-ended correct secret `200`, call-ended wrong secret `401`/`403`, caller-work correct secret `200`, caller-work wrong secret `401`/`403`. A 404, 422 or 5xx at any route fails,
-so a runtime without the caller-work route stops the go-live before anything is wired.
+On English (a workflow whose committed template has the office-visit tools) it then posts, last, to
+`/api/voice/tools/availability` `{"workflow_run_id": "2147483647", "language": "en"}` (the run id as text, as the tool's presets
+render it) and to `/api/voice/tools/book` `{"workflow_run_id": 2147483647, "language": "en", "starts_at": "2099-01-05T10:00:00",
+"customer_name": ""}` (as its body template sends it, with a weekday morning far past the two-week horizon), each expecting 200
+`{"status": "unknown", "alternatives": []}` (no call under way has that id, so nothing is booked) and 401/403 with the wrong secret.
+Successful probe output is status-only lines in order: pre-call correct secret `200`, pre-call wrong secret `401`/`403`,
+call-ended correct secret `200`, call-ended wrong secret `401`/`403`, caller-work correct secret `200`, caller-work wrong secret `401`/`403`
+(six lines on Korean), then on English availability and book, `200` and `401`/`403` each (ten lines). A 404, 422 or 5xx at any route fails,
+so a runtime without the caller-work route stops the go-live before anything is wired; an office-visit route answering 404 prints
+its `404` and stops with `tools/availability answers 404: the runtime does not serve the office-visit routes yet (Synchronize PR #3935,
+or #3926, is not deployed)`, after the routes already live printed theirs.
 An older runtime that silently drops digit-text ids also answers 200 `{}`, so this probe cannot tell the two receivers apart: only the test call proves that completions are processed.
 The runtime's completion lookup reads Dograh; it does not create a run. The deployed runtime's behavior and absence of that synthetic ID cannot be established offline.
 The test call must still verify business context, a saved call and authenticated completion separately.
@@ -492,12 +581,18 @@ tool create/update/unchanged/ambiguous/inactive, tool restore on rollback, forma
 replaced, set, custom needs acceptance, a re-run writes nothing, a null override; connections refused when missing, duplicate, foreign or archived; Dograh's
 model check refusing; a stale connection refused; Korean untouched), the English End Call tools (contract, created with the lookup, an edited one needing
 acceptance, an updated tool outranking a created one in the recovery), edge merges and conflicts,
-placeholder refusal and the caller-work probe;
+placeholder refusal and the caller-work probe; the office-visit tools (the spec's parameters and messages, the availability
+presets, the booking's body template, each refusal of `http_body_contract`, node 1's wiring, `requested_visit`, the recent-jobs
+rule and the six outcomes kept), plan and apply refused before any Dograh request while either office-visit route (or the
+caller-work route) answers 404, both tools created and wired once both are served, and the office-visit probe (bodies, the
+unknown-run answer, wrong-secret refusal, a 404 named, none on Korean);
 the pre-call URL with each line's language (wired, set back when missing, probed, in both templates), an eval run's marked copy refused, and a backup of
 another workflow refused on rollback. It also runs Dograh 1.51's own `execute_http_tool` (`custom_tool.py` and `template_renderer.py` from this
 checkout, checked against the tag's blob ids, with only the network, database and logging stubbed) on both committed lookup tools: a run id or
 `initial_context` the model supplies never reaches the request, a run context without its id sends nothing, and the pre-A1 preset-only shape does send the
-model's id. The contract test also checks that the tool's use sentence and the Persona name the same confirmed caller, and that the QA prompt uses only
+model's id; on the office-visit tools, the booking sends the run's own id and only its four keys (an empty name when none is given, nothing
+without a run id), and the availability check sends the model's times over its presets, leaving out a time not given, and, as the
+spec's shape leaves open, a run id the model sends. The English Persona's `# Now` and `# Caller` lines are rendered by 1.51's renderer. The contract test also checks that the tool's use sentence and the Persona name the same confirmed caller, and that the QA prompt uses only
 placeholders Dograh's per-node QA fills (`previous_conversation_summary`, `metrics`). When `pydantic` is importable it also validates the committed tool and settings files against this checkout's
 Dograh schemas (`api/schemas/tool.py`, `api/schemas/workflow_configurations.py`, identical to the `dograh-v1.51.0` tag).
 No live reachability, deployed image/API equivalence, runtime redeployment, call audio or authenticated real completion is established offline.
@@ -528,7 +623,7 @@ The deployment chooses the English or Korean workflow, and the caller-driven lan
 
 ## Pre-call proof (separate authorized step; not run here)
 
-`scenarios_precall.py` is the committed fixture/adapter for the still-live name, disclosure, callback-preference and completion behavior. Its matrix covers named, absent, empty and hostile names with an ordinary message and a callback-tomorrow request in both languages. Offline commands:
+`scenarios_precall.py` is the committed fixture/adapter for the still-live name, disclosure, callback-preference and completion behavior. Its matrix covers named, absent, empty and hostile names with an ordinary message and a callback-tomorrow request in both languages, and on English a known caller whose context carries `caller_name` and `recent_jobs` as Synchronize PR #3932 sends them; both probes answer with another name, so no recent job may be mentioned. Offline commands:
 
 ```bash
 python3 synchronize/workflows/scenarios_precall.py manifest
@@ -542,7 +637,7 @@ For any later authorized model proof, use isolated test workflows and explicit `
 
 ## Evals: caller memory, lookup, outcomes and behaviours (owner-run; not run here)
 
-`scenarios_caller.py` runs 29 Korean and 47 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
+`scenarios_caller.py` runs 29 Korean and 51 English cases through the text-chat API, five times each by default (`--repeats`; the earlier two could not
 tell a rare failure from luck). Caller memory and the lookup: a known caller greeted by name; a known caller who gives no detail (after
 confirming, the agent asks its one open question and calls no lookup); a known caller asking when the next visit is (the lookup runs once,
 after the confirmation); the same question from an unknown caller (no lookup: no record name to confirm); the lookup failing (a copy of the
@@ -615,11 +710,13 @@ call back), the lookup calls and results and the after-call
 `follow_up`, in a deterministic shuffle with planted canaries (a price stated at the close, a record invented after a failed lookup, 반말 or curt speech, a price
 worked out from the pricing line, on English a connection offered to a caller who asked for the owner, an urgent matter neither marked urgent for the owner nor asked for a callback number,
 a new project with no address, work or timing asked, a caller pressed for an email after declining one, a recording objection answered with "the recording is off" and more questions, a Spanish caller answered in English,
-and a Spanish hello before an English matter ended in Spanish, and clean calls: a failed lookup handled, a caller who declines the
+and a Spanish hello before an English matter ended in Spanish, an office visit booked after an `unknown` check, a recent job raised before
+the name was confirmed, and clean calls: a failed lookup handled, a caller who declines the
 record's name after the agent asked once whether they are that person, and on English an urgent matter flagged for the owner without a connection, a Spanish caller whose call
 `end_call_spanish` ended at once, which a judge must not read as `WRONG_LANGUAGE`, a recording objection `end_call_recording_declined` ended at once,
-and a visit's email read back with only a name spelled out and the one corrected letter spelled again;
-six Korean, seventeen English), and no case name or criterion; `judge-key.json` maps items back and
+and a visit's email read back with only a name spelled out and the one corrected letter spelled again, an office visit told open and
+booked after the tools answered so, and a recent job raised once after the confirmation;
+six Korean, twenty-one English), and no case name or criterion; `judge-key.json` maps items back and
 must not reach a judge. Canaries go through the same rendering as the real sessions, with Dograh's result shape and the tool's spoken start
 message, so no line format marks them. The judges run in an empty directory (runbook step 6), as the 10-31 judges did, because the fork
 holds every case and canary word for word.
@@ -629,9 +726,37 @@ case's gate flags, not necessarily the same one (one defect often fits two flags
 it needs two counted judges to decide. Flags that gate no case are counted per judge in `judged.json`. The 10-31 harness compared two versions pairwise; this one has a single version, so each transcript
 gets flags instead of a winner.
 
-A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it: the visit case measures that the
+Office visits and recent jobs (English; Office visits and recent jobs, above): the owner's two stories. `office_visit_available` (Sarah, a new
+caller: "I'm thinking about replacing my roof. Could I come by your office next week?", her name, "Monday at 10 AM.", an email and its read-back)
+and `office_visit_slot_taken` (the same caller asks for Monday at 7 in the morning, before the office's bookable hours, so on a real line
+Synchronize answers `unavailable` with the nearest open times whatever the calendar holds, and she takes the earliest) need the office-visit
+routes and their live tools: a run without them (golive has not created them, or the tool's own URL answers 404 to a request with no
+secret) skips both, prints why and lists them under `skipped` in `report.json`, and builds its test workflows without the two tools.
+`returning_caller_site_visit` (Michael, whose pre-call context carries `recent_jobs` with a shingle repair: "Hi, my roof is leaking again.
+Could someone come next week?", confirms the name, says yes to the job and asks for Monday, a small drip that can wait, an email) and
+`known_caller_no_record_site_visit` (a known caller with no jobs, the same request) run either way. Their objective checks are graded on
+what the tools answered in that session, so a text chat (every office answer `unknown`) and a real call are held to the same rule: for an
+office visit `check_office_availability` runs, the first exact time it is sent is Monday at the hour the caller named (a window is fine only
+after a check answered `unknown`), `book_office_visit` runs only for a time a check returned (its `starts_at` or an alternative, compared to
+the minute), and neither tool is called again after it answered `unknown` or failed; for a visit to the caller neither tool runs; on all
+four a reply says booked, confirmed, all set or scheduled only when a booking answered `confirmed`, and then one does (`BOOKED`); Michael's
+recent job is named in a reply after the confirmation line (`recent_job_raised`). Each checks `booking_request`, not urgent, and its email.
+`report.json` counts, per office case, the sequence of answers each session got (`office_answers`), so the path a run took is plain.
+Michael's opening line is the owner's and names a leak, which the urgent rule counts as urgent (and then asks no email); his next line
+says it is a small drip that can wait, and the gates are the email, the record flags and the promise flag, so a run shows how the
+two rules meet before the prompt wording changes. For the judges an English item shows `CALLER RECORD RECENT JOBS` when the
+record has some, and each office-visit tool's call and result as `[OFFICE TIME CHECK RAN, ARGUMENTS: …]` / `[OFFICE TIME CHECK
+RESULT: …]` and `[OFFICE VISIT BOOKING RAN …]` / `[… RESULT …]`; English has its own wordings of `PROMISE` (relaying what those results
+answered, and a visit booked after a confirmed booking result, is not the flag), `RECORD_UNCONFIRMED` and `RECORD_INVENTED` (the record's
+recent jobs count as record), a rubric clause on both, and four more canaries: a visit told open and booked after the tools answered so
+(clean), one booked after an `unknown` check (`PROMISE`), a recent job raised to a caller who did not confirm the name
+(`RECORD_UNCONFIRMED`) and one raised once after the confirmation, with the site visit taken as a request (clean): twenty-one English
+canaries.
+
+A text-chat run is not an inbound call, so Synchronize's caller-work route answers `{"known": false}` to it, and both office-visit routes
+`unknown`: the visit case measures that the
 tool is called once and that the agent hands over ("cannot check now, the person in charge will call back") without promising; relaying real
-records is checked on the second test call of the runbook. Text chat also does not recover tool calls the model wrote as text
+records, and booking an office visit, are checked on test calls of the runbook. Text chat also does not recover tool calls the model wrote as text
 (`../UPGRADE-1.51.md`). The commands (after golive `--apply`, with the two connection values exported) are in the runbook, step 6:
 
 ```bash
