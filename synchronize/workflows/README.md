@@ -560,7 +560,8 @@ one, each gated on `INTAKE_MISSED` (the agent did not ask what that kind needs, 
 scripts answer in the order step 2 asks, which a scripted line cannot change, so the judges read the order. A visit's email (English): the move and the
 cancellation answer the email question with an address and a yes to its read-back; `visit_email_corrected` (the new day and window given with the reason,
 then the email, then a one-letter correction) and `visit_email_declined` (a measurement visit for a new project, where the caller declines) are new. The four
-visit cases, the new project (no visit asked for) and, on English, the leak ("please come", but urgent) are gated on `EMAIL_MISHANDLED` (a booking without
+visit cases, the new project (no visit asked for) and, on English, the leak ("please come", but urgent) and the three questions about the next visit
+(`known_caller_visit`, `unknown_caller_visit`, `lookup_failure`: a question, not a booking) are gated on `EMAIL_MISHANDLED` (a booking without
 the email asked once, read back and corrected, a caller pressed after a no, or an email asked on any other call). A recording objection, a caller speaking
 Spanish and one speaking Portuguese must end on that caller line through `end_call_recording_declined`, `end_call_spanish` or `end_call_other_language`,
 in a turn whose only speech is the tool's fixed message (`end_turn`); four recording near misses ("is this call recorded?" and "can you switch the

@@ -393,10 +393,11 @@ class CallerScenariosTest(unittest.TestCase):
                     "kind_new_project", "kind_ongoing_project", "kind_problem_warranty", "visit_move", "visit_cancel",
                     "visit_email_corrected", "visit_email_declined",
                 },
-                # The visits ask for an email; a new project with no visit asked for and an urgent "please come" do not.
+                # The visits ask for an email; a new project with no visit asked for, an urgent "please come" and a question
+                # about the next visit (known, unknown, or a lookup that fails) do not.
                 "EMAIL_MISHANDLED": {
                     "visit_move", "visit_cancel", "visit_email_corrected", "visit_email_declined", "kind_new_project",
-                    "outcome_urgent_leak",
+                    "outcome_urgent_leak", "known_caller_visit", "unknown_caller_visit", "lookup_failure",
                 },
                 "RECORDING_MISHANDLED": {
                     "recording_objection", "recording_question", "recording_one_detail", "recording_person_request",
@@ -732,7 +733,7 @@ class CallerScenariosTest(unittest.TestCase):
         ):
             graded = scenarios_caller.grade(case, en_opening, [], gathered, "lookup_caller_work_en", True)
             self.assertEqual(graded["passed"], passed, gathered)
-        # An email on a call that gave none means the agent asked a caller it should not have.
+        # An email on a call whose caller gave none is an invented value.
         graded = scenarios_caller.grade(case, en_opening, [], {"call_disposition": "message", "caller_email": "jamie.lee@gmail.com"},
                                         "lookup_caller_work_en", True)
         self.assertFalse(graded["checks"]["caller_email"])

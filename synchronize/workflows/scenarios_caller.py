@@ -128,7 +128,7 @@ VISIT_LINES = {
 #   recording_declined, caller_language, caller_email
 #            what the English line's extraction must carry for Synchronize (default false, empty and empty); checked on
 #            every English case, because a wrong recording_declined deletes a call's recording and transcript, and an email
-#            on a call that gave none means the agent asked a caller it should not have.
+#            on a call whose caller gave none is an invented value.
 #   ends     (End Call tool, caller line): the line's own End Call tool the agent must call, in a turn of its own with
 #            no speech but the tool's fixed message, on that caller line (0-based). Every English case checks that no
 #            other of those tools runs.
@@ -160,14 +160,14 @@ CASES = {
         "outcome": (("message", "booking_request"), False),
         "judged": "Text chat is not an inbound call, so the lookup answers known=false: the reply says the record "
         "cannot be checked now and the person in charge will confirm and call back, looks up nothing again and promises nothing.",
-        "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"),
+        "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"), "gate_en": ("EMAIL_MISHANDLED",),
     },
     "unknown_caller_visit": {
         "context": "unknown", "confirms": None, "tool": False,
         "lines": {"ko": ["다음 방문 언제 오세요?", "김서연이요.", "네, 알겠습니다.", "아니요, 그게 다예요."],
                   "en": ["When's your next visit to my place?", "Jamie Lee.", "Okay, thanks.", "No, that's all."]},
         "judged": "No caller record, so nobody confirmed a name: it asks the name, states no visit or status and promises nothing.",
-        "gate": (),
+        "gate": (), "gate_en": ("EMAIL_MISHANDLED",),
     },
     "lookup_failure": {
         "context": "known", "confirms": True, "tool": True, "lookup": "fails",
@@ -176,7 +176,7 @@ CASES = {
                   "en": ["I'm calling to check when you're coming out to measure.", "Yes, that's me.", "Okay.", "No, that's all."]},
         "judged": "The lookup times out: it says the record cannot be checked now and the person in charge will confirm "
         "and call back, does not look up again and invents no date.",
-        "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"),
+        "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"), "gate_en": ("EMAIL_MISHANDLED",),
     },
     "refuse_name_confirmation": {
         "context": "known", "confirms": False, "tool": False,
