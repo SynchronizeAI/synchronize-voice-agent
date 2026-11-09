@@ -248,8 +248,8 @@ All of it is general rules in the lines the model already reads, not one sentenc
   the caller asks for comes first and replaces the other questions of the kind, except the ones its own line names.
 - **Visits.** A visit at the office is booked in the call, only when the availability tool says the time is open (Office visits and recent
   jobs, below). A site visit (someone comes out) is a request: the day and time wanted, and for a new project the service address (read back
-  once); then "I'll request Monday with our office manager. You'll get a confirmation email once the visit is approved.", never booked or
-  confirmed. Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why;
+  once); then, in one sentence, "I'll request Monday with our office manager, and you'll get a confirmation email once the visit is
+  approved.", never booked or confirmed. Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why;
   the owner confirms either (the approval card after the call is Synchronize's). All are `booking_request`, and `follow_up` carries the window.
 - **An email for a visit's confirmation.** When the caller wants to book, move or cancel a visit, urgent or not (urgency adds to a visit
   request and replaces nothing), the agent asks once for the best email to send the confirmation to, reads it back (Speech, below) and takes a
@@ -360,8 +360,8 @@ the time; then the check; when it answers a time open, the name if missing, aske
 the booking once the caller has taken a time (the one they asked for, or one the check offered); "Your consultation is booked
 for …"; then one email question with its read-back. When the check answers `unknown`, the agent says it cannot confirm right
 now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day and
-time, a new project's address, then "I'll request Monday with our office manager. You'll get a confirmation email once the visit
-is approved." with the email question, never booked or confirmed. A returning caller is asked whether they are the record's
+time, a new project's address, then "I'll request Monday with our office manager, and you'll get a confirmation email once the
+visit is approved." with the email question, never booked or confirmed. A returning caller is asked whether they are the record's
 name; right after the yes, and only when `recent_jobs` lists matching work, "Are you calling about the shingles we repaired last
 time?", once, with no amount, address or other person's name. Expected transcripts:
 

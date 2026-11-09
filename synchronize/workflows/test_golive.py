@@ -2153,8 +2153,10 @@ class GoLiveTests(unittest.TestCase):
                  "say that it is booked", "step 3")
         self.assertEqual([office.index(step) for step in order], sorted(office.index(step) for step in order))
         self.assertIn("Ask nothing about the address or the work before the time is settled.", office)
-        self.assertIn("I'll request Monday with our office manager. You'll get a confirmation email once the visit is approved.",
+        # One sentence, so the site visit's turn with its email question stays within two sentences (QA LONG_TURN).
+        self.assertIn("I'll request Monday with our office manager, and you'll get a confirmation email once the visit is approved.",
                       start["prompt"])
+        self.assertNotIn("office manager. You'll get", start["prompt"])
         self.assertIn("A site visit is only a request: never say it is booked or confirmed.", start["prompt"])
         self.assertIn("ask for their email only after the booking answered", check["tool"]["description"])
         self.assertIn("confirmed: say the visit is booked for that time, then ask once for the best email", book["tool"]["description"])
