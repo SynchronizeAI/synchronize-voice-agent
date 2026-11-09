@@ -538,9 +538,10 @@ class CallerScenariosTest(unittest.TestCase):
                     ))
             if lang == "en":
                 for case in marked:
-                    # The answer sits between the detail question and the recap's "anything to add".
+                    # The answer sits between the detail question and the recap's "anything to add"; a caller who asked
+                    # for someone to come then answers the visit's email question (an address and its read-back, or a no).
                     self.assertEqual(cases[case]["lines"].index("This number is fine."), 3, case)
-                    self.assertEqual(len(cases[case]["lines"]), 5, case)
+                    self.assertEqual(len(cases[case]["lines"]), {"outcome_urgent_leak": 7, "outcome_urgent_gas": 6}.get(case, 5), case)
             self.assertEqual({c["workflow"] for case, c in cases.items() if case != "lookup_failure"}, {"live"})
             self.assertEqual(cases["facts_after_hours"]["initial_context"]["open_now"], "no")
             self.assertTrue(cases["facts_after_hours"]["initial_context"]["next_open"])
