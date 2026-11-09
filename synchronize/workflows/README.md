@@ -236,7 +236,7 @@ All of it is general rules in the lines the model already reads, not one sentenc
 
 - **The first reply answers the request.** Reception step 1 answers what the caller asked for in a few words and asks the one question that
   moves it forward: a known caller is asked whether they are the record's name; a caller who wants to come to the office is asked the day and
-  time, a week alone ("next week") not being one (the name comes after the check); a caller who wants a visit and has said neither that they will come in nor that someone should come (asking for someone to come says it) is asked whether they would like to come in or
+  time, a week alone ("next week") not being one (the name comes after the check); a caller who wants a visit without saying where is asked whether they would like to come in or
   have someone come out; anyone else is asked their name. The agent does not introduce itself again or repeat the disclosure (the greeting did),
   unless the caller asks whether it is a person or an AI, or asks about the recording (it is on and cannot be switched off). This replaces the old "answer, ask the name, ask nothing about the matter yet" gate,
   which a real call showed as form-filling ("Can I book an appointment with the owner?" answered with "I am the AI assistant here. May I have
