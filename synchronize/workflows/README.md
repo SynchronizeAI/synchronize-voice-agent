@@ -100,7 +100,8 @@ runs 1.51's own `execute_http_tool` offline on both committed tools to show it, 
 to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom Header credential and times out after 5000 ms. The answer holds only
 `known`, `name` and `upcoming_visits`: up to five distinct days of the caller's next visits, earliest first, each `{"date": "YYYY-MM-DD", "spoken": ...}`
 with `spoken` already in the company language's spoken form (`11월 10일 월요일`, `Monday, November 10`) in the workspace time zone, so the model
-neither reads digits nor works out a weekday. No count or due date of internal Tasks (A2): they are the staff's work, not the customer's
+never works out a weekday. The English form still carries the day of the month as digits; the English Persona's speech rule says it as words
+("November tenth"), as it does a day or time an office-visit tool gives. No count or due date of internal Tasks (A2): they are the staff's work, not the customer's
 appointments, and a receptionist tells a caller only their own next visits (Jobber's AI receptionist gives the next appointment, ServiceTitan's
 voice agent confirms existing appointments). No task text, project or site names, estimates or amounts either (amendment A1 §2). The tool
 description says exactly that, that the lookup is for a caller who confirmed the name on the caller record and asks when their next visit is,
@@ -135,8 +136,9 @@ The settings carry six outcomes, each with a classifier description in the workf
 (visit, measurement or appointment, including one needed for a quote), `message` (anything else the owner must check or return: the status of existing work,
 a complaint, a partner's or supplier's message, a call-back request), `done` (nothing left for the owner), `spam` (sales, ads, robocalls) and `wrong_number`.
 Urgency is not an outcome but its own flag: every conversation node (Korean 1, 2 and 3; English 1) extracts `urgent`, a boolean whose prompt is
-`누수·가스·안전처럼 바로 사람이 봐야 하는 일이면 true, 아니면 false.` / "true if a person needs to look at it right away, such as a leak, gas or a safety problem;
-otherwise false.", so an urgent quote stays a quote (amendment A1 §3). Synchronize shows the code as the call's label, a separate 긴급 badge when `urgent`
+`누수·가스·안전처럼 바로 사람이 봐야 하는 일이면 true, 아니면 false.` / "true if a person needs to look at it right away, judged by what is happening now
+rather than by a word such as leak: water coming in or flooding now, gas, a safety problem, or one of the business's urgent examples; otherwise false.",
+so an urgent quote stays a quote (amendment A1 §3). Synchronize shows the code as the call's label, a separate 긴급 badge when `urgent`
 is true, and needs no follow-up for `done`, `spam` and `wrong_number`; every other code and every unclassified call needs one.
 `scenarios_caller.py` measures these through the text-chat API (Evals, below).
 
@@ -164,7 +166,8 @@ per-failure sentences. None is measured yet: the runbook's step 6 measures them 
   callback time when a person was asked for and no time was given. A request for a person that comes only as the answer to that question gets
   the callback-time question before the close (Korean `Detail` and its `done` edge, English step 3).
 - **Another callback number.** When the caller gives a number other than the one they are calling from, the agent reads it back once in short
-  groups of digits and asks whether it is right (under `잘 안 들릴 때` / `Unclear audio`, next to "take numbers as heard"). Vapi advises against
+  groups of digits (English: groups of three, three and four digits, each digit as a word; a number the caller corrects is read back whole once
+  more) and asks whether it is right (under `잘 안 들릴 때` / `Unclear audio`, next to "take numbers as heard"). Vapi advises against
   read-backs in intake calls, so this is limited to the one number the owner will dial. The rule is also where the call moves on, because the
   most natural moment for the number is the answer to the last question: Korean `Detail` reads it back before the close and its `done` edge
   fires only after the caller answered the read-back (the Closing node does not inherit the global rules and, as a Dograh 1.51 end node,
@@ -215,10 +218,12 @@ matters, below) so the `urgent` flag counts them too. Korean gets business facts
 There is no live transfer. The AI answers only after the owner's own phone has rung out, so connecting a caller back to the owner would loop or land in
 voicemail: an urgent call is flagged, not connected.
 
-The English `When to hand off` rule takes an urgent matter first. Urgent means a person needs to look at it right away, such as a leak, gas or flooding,
-or one of the business's own `{{urgent_examples}}` (data, inside the boundary). Whether or not the caller asked for a person, the agent takes the details as
-usual, gets the name, what happened and a number to call back, says it has marked the matter urgent for the owner, who will call them back, and promises no
-time; the call is never connected to anyone. Step 3 of Reception asks once for a number to call back when the matter is urgent and the caller gave none
+The English `When to hand off` rule takes an urgent matter first. Urgent means a person needs to look at it right away, judged by what is happening now and
+not by a word such as "leak": water coming in or flooding now, gas, or a safety problem; the business's own `{{urgent_examples}}` (data, inside the boundary)
+come first, and a problem the caller is content to have seen on a later day is not urgent unless one of those fits. Whether or not the caller asked for a
+person, the agent takes the details as usual, gets the name, what happened and a number to call back, says it has marked the matter urgent for the owner,
+who will call them back, and promises no time; the call is never connected to anyone. Urgency only adds (owner decision 2026-11-09, standard check
+CONV-5): a visit the caller asks for is still requested or booked, with its email, so a leak marked urgent still reaches the approval card. Step 3 of Reception asks once for a number to call back when the matter is urgent and the caller gave none
 ("this number" is an answer). The English QA prompt counts an offer to connect, transfer or put the caller through to anyone as `PROMISED_UNCONFIRMED`; the tag
 holds no exemption for it. The `urgent` extraction variable, whose prompt carries the business's examples, is what Synchronize shows as the call's 긴급 badge. A caller
 who asks for the owner or a person gets "no one can take the call right now" and a callback time; a caller who is only very upset gets the same, and that the
@@ -229,18 +234,30 @@ urgent matter, to that rule, and ask for a callback time when a caller asked for
 
 All of it is general rules in the lines the model already reads, not one sentence per case; the six outcomes stay as they are.
 
-- **Kinds of call.** After the name, Reception step 2 asks what the owner needs for the kind of call, judged from what the caller said, one
+- **The first reply answers the request.** Reception step 1 answers what the caller asked for in a few words and asks the one question that
+  moves it forward: a known caller is asked whether they are the record's name; a caller who wants to come to the office is asked the day and
+  time (the name comes once a time is found); a caller who wants a visit without saying where is asked whether they would like to come in or
+  have someone come out; anyone else is asked their name. The agent does not introduce itself again or repeat the disclosure (the greeting did),
+  unless the caller asks whether it is a person or an AI. This replaces the old "answer, ask the name, ask nothing about the matter yet" gate,
+  which a real call showed as form-filling ("Can I book an appointment with the owner?" answered with "I am the AI assistant here. May I have
+  your name, please?"). A request to book time with the owner is a visit, not a request to speak to someone.
+- **Kinds of call.** Then Reception step 2 asks what the owner needs for the kind of call, judged from what the caller said, one
   question per turn and only what they have not said: a new project, the service address (read back once), the work and when; a project under
   way or a change to one, which project or address and what changed; a problem with finished work or a warranty matter, what is wrong and since
-  when. Any other call keeps the one question that builds on what the caller said (or the callback time when a person was asked for).
-- **Visits.** Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why.
-  The owner confirms either; the agent never confirms, books or moves a time (the approval card after the call is Synchronize's). Both are
-  `booking_request`, and `follow_up` carries the window.
-- **An email for a visit's confirmation.** When the caller wants to book, move or cancel a visit and the matter is not urgent, Reception
-  step 3 asks once, before the recap, for the best email to send the confirmation to, reads it back (Speech, below) and takes a correction; a
-  caller who would rather not give one, or has none, is not asked again. No other call is asked for an email, an urgent one included (the
-  owner calls back), so the question costs a turn only on a booking. The recap reads out no email, as it reads out no phone number. The
-  extraction writes the address the caller confirmed as `customer_email` (Values for Synchronize, below).
+  when. Any other call keeps the one question that builds on what the caller said (or the callback time when a person was asked for). A visit
+  the caller asks for comes first and replaces the other questions of the kind, except the ones its own line names.
+- **Visits.** A visit at the office is booked in the call, only when the availability tool says the time is open (Office visits and recent
+  jobs, below). A site visit (someone comes out) is a request: the day and time wanted, and for a new project the service address (read back
+  once); then "I'll request Monday with our office manager. You'll get a confirmation email once the visit is approved.", never booked or
+  confirmed. Moving a visit takes the day and time window wanted instead; cancelling first offers once to find another time, then asks why;
+  the owner confirms either (the approval card after the call is Synchronize's). All are `booking_request`, and `follow_up` carries the window.
+- **An email for a visit's confirmation.** When the caller wants to book, move or cancel a visit, urgent or not (urgency adds to a visit
+  request and replaces nothing), the agent asks once for the best email to send the confirmation to, reads it back (Speech, below) and takes a
+  correction; a caller who would rather not give one, or has none, is not asked again. For an office visit it comes after the agent said the
+  visit is booked (or that the office will confirm it), for a site visit in the turn that says the request goes to the office manager, otherwise
+  in Reception step 3 before the recap, after an urgent matter's callback number. No other call is asked for an email, so the question costs a
+  turn only on a visit. The recap reads out no email, as it reads out no phone number. The extraction writes the address the caller confirmed as
+  `customer_email` (Values for Synchronize, below).
 - **Recording and language end the call at once.** Each has its own End Call tool (Dograh's End Call type, like `end_call_wrong_number`: one
   fixed start message, no reason parameter, since a reason would replace the call's outcome), which go-live creates from
   `tool-end-call-*-en.json` (Live wiring). The agent calls it in a turn with no speech of its own, so the caller never waits for another turn or
@@ -266,8 +283,12 @@ All of it is general rules in the lines the model already reads, not one sentenc
   call the model reads a Spanish caller's words as English recognition heard them, and the Spanish message is spoken by the line's own voice:
   **the Spanish path needs one real Spanish call to verify** (runbook step 8, call 4); text chat cannot show either.
 - **AI.** Whenever the caller asks whether it is a real person or a robot, the agent says plainly that it is an AI assistant and carries on.
-- **Speech.** Numbers, times, prices and addresses are said as words; the name is read back once by using it in the next question; a new
-  project's address and another callback number are each read back once in a turn of their own that asks whether it is right; the recap keeps
+- **Speech.** One short sentence per turn, or two when a step has the agent answer and then ask, with at most one question. Numbers, times,
+  dates, prices and addresses are said as words ("Monday, November tenth", "four one eight Oak Street"), also in a business fact told as written
+  and a day or time a lookup or an office-visit tool gives, and abbreviations and symbols in full ("Avenue", "percent"); the name is read back
+  once by using it in the next question; a new project's address and another callback number (three, three and four digits, each as a word;
+  a corrected number read back whole once more) are each read back once in a turn of their own that asks whether it is right; the
+  read-backs and the recap are the only exceptions to "do not repeat the caller"; the recap keeps
   a requested day, time or window and reads out no phone number or email; an email address is read back once in a turn of its own, with "at"
   and "dot" said as words and only a part that could be misheard (such as a name) spelled out letter by letter; nothing else is spelled, and
   only a part the caller corrected is spelled again, once. "I'm sorry" only when declining, deferring to the owner or asking again. The greeting cannot be interrupted
@@ -290,8 +311,8 @@ All of it is general rules in the lines the model already reads, not one sentenc
 The owner's two demo stories (2026-11-09): a new caller who wants to come to the office is told only a time the office's
 free times allow and is booked only when the booking answered confirmed; a returning caller is asked, after confirming the
 record's name, whether the matter is about the job the business did last time, and a visit to their place is a request the
-office approves later (Synchronize's approval card), confirmed to them by email. This section is the wiring (phase A); the
-prompt wording of both stories is a later change. One English workflow serves every US number, applied by `golive.py`
+office approves later (Synchronize's approval card), confirmed to them by email. Phase A wired the tools; the v1 wording
+(Prompt wording, below) plays both stories in the owner's order. One English workflow serves every US number, applied by `golive.py`
 to workflow 3 (owner decision 2026-11-09): the server spec's first step, a copy of the workflow for the demo number only,
 is not followed.
 
@@ -310,7 +331,9 @@ would be refused by #3926 and answered `unknown`.
 
 **The tools.** `tool-check-office-availability-en.json` (placeholder `…0106`) and `tool-book-office-visit-en.json` (`…0107`)
 carry the spec's names, descriptions, parameters, messages ("Let me check." / "One moment.", then "One moment, please."
-after 2.5 s) and timeouts (5000 and 8000 ms, over Synchronize's 4 s and 7 s deadlines) word for word, with the placeholder
+after 2.5 s) and timeouts (5000 and 8000 ms, over Synchronize's 4 s and 7 s deadlines) word for word, except one sentence of
+each description that put the email before the booking (v1: `available` asks the name if missing, books, and asks the email
+only after the booking answered; `confirmed` says booked, then asks the email once), with the placeholder
 origin and the shared `X-Dograh-Secret` credential reference that go-live wires like the lookup's. Both are on node 1, after
 the End Call tools. The request bodies differ in one deliberate way from the spec:
 
@@ -331,8 +354,50 @@ Go-live refuses any other shape (`golive.py` `http_body_contract`: a body templa
 context, the language and each parameter as its own placeholder; only the availability route may send the model's arguments,
 with exactly those two presets and no parameter of their names).
 
-**Prompt wiring.** Reception step 2's visit sentence says that for a visit at the office the two tools decide, as their
-descriptions say, and that any other visit is the owner's to confirm; the tool line says the phone system speaks each tool's
+**Prompt wording (v1, 2026-11-09).** The order is the standard check's CONV-2. An office visit: the first reply answers the
+request and asks the day and time ("Of course! What day and time works best for you?"), with no address or job question before
+the time; then the check; when it answers a time open, the name if missing, asked once ("What name should I put it under?");
+the booking once the caller has taken a time (the one they asked for, or one the check offered); "Your consultation is booked
+for …"; then one email question with its read-back. When the check answers `unknown`, the agent says it cannot confirm right
+now and the office will confirm, takes the time as a request, and goes on to the name and the email. A site visit: the day and
+time, a new project's address, then "I'll request Monday with our office manager. You'll get a confirmation email once the visit
+is approved." with the email question, never booked or confirmed. A returning caller is asked whether they are the record's
+name; right after the yes, and only when `recent_jobs` lists matching work, "Are you calling about the shingles we repaired last
+time?", once, with no amount, address or other person's name. Expected transcripts:
+
+```
+Sarah (new caller; the check answers available, the booking confirmed)
+  CALLER  I'm thinking about replacing my roof. Could I come by your office next week?
+  AGENT   Of course! What day and time works best for you?
+  CALLER  Monday at 10 AM.
+          [check_office_availability starts_at=Monday 10:00] PHONE: Let me check.
+  AGENT   Monday, November sixteenth at ten in the morning is available. What name should I put it under?
+  CALLER  Sarah Miller.
+          [book_office_visit] PHONE: One moment.
+  AGENT   Your consultation is booked for Monday, November sixteenth at ten in the morning, Sarah. What's the best email to send the confirmation to?
+  CALLER  It's sarah dot miller at gmail dot com.
+  AGENT   That's s, a, r, a, h dot m, i, l, l, e, r at gmail dot com. Is that right?
+  CALLER  Yes, that's right.
+  AGENT   I'll let the owner know you're coming in Monday at ten about a new roof. Is there anything to add?
+  CALLER  No, that's all.          [end_call]
+
+Michael (caller_name Michael Brown; recent_jobs lists the shingle repair)
+  CALLER  Hi, my roof is leaking again. Could someone come next week?
+  AGENT   I can help with that. Am I speaking with Michael Brown?
+  CALLER  Yes, that's me.
+  AGENT   Michael, are you calling about the shingles we repaired last time?
+  CALLER  Yes. Could someone come Monday?
+  AGENT   I'll request Monday with our office manager, and you'll get a confirmation email once the visit is approved. What's the best email to send it to?
+  CALLER  It's michael dot brown at gmail dot com.
+  AGENT   That's m, i, c, h, a, e, l dot b, r, o, w, n at gmail dot com. Is that right?
+  CALLER  Yes, that's right.
+  AGENT   I'll pass on that the roof is leaking again where we fixed the shingles, and that you'd like someone Monday. Is there anything to add?
+  CALLER  No, that's all.          [end_call]
+```
+
+A slot that is taken gets the nearest times the check gave, and the caller's pick is booked. If Michael said water is coming
+in now, the agent would also say it marked the matter urgent for the owner and ask once for a number to call back, and still
+take the Monday request and the email (Urgent matters, above). The tool line says the phone system speaks each tool's
 waiting line. The Persona's role line adds what an office-visit tool returns, `What you never do` gets a third exception
 (what the two tools answered may be told to a caller who wants to come in, and booked only after `book_office_visit`
 answered confirmed), and a `# Now` section gives Dograh's own clock, `{{current_time_America/Los_Angeles}}` and
@@ -727,24 +792,28 @@ it needs two counted judges to decide. Flags that gate no case are counted per j
 gets flags instead of a winner.
 
 Office visits and recent jobs (English; Office visits and recent jobs, above): the owner's two stories. `office_visit_available` (Sarah, a new
-caller: "I'm thinking about replacing my roof. Could I come by your office next week?", her name, "Monday at 10 AM.", an email and its read-back)
+caller: "I'm thinking about replacing my roof. Could I come by your office next week?", "Monday at 10 AM.", her name, an email and its read-back)
 and `office_visit_slot_taken` (the same caller asks for Monday at 7 in the morning, before the office's bookable hours, so on a real line
 Synchronize answers `unavailable` with the nearest open times whatever the calendar holds, and she takes the earliest) need the office-visit
 routes and their live tools: a run without them (golive has not created them, or the tool's own URL answers 404 to a request with no
 secret) skips both, prints why and lists them under `skipped` in `report.json`, and builds its test workflows without the two tools.
 `returning_caller_site_visit` (Michael, whose pre-call context carries `recent_jobs` with a shingle repair: "Hi, my roof is leaking again.
-Could someone come next week?", confirms the name, says yes to the job and asks for Monday, a small drip that can wait, an email) and
+Could someone come next week?", confirms the name, says yes to the job and asks for Monday, an email) and
 `known_caller_no_record_site_visit` (a known caller with no jobs, the same request) run either way. Their objective checks are graded on
 what the tools answered in that session, so a text chat (every office answer `unknown`) and a real call are held to the same rule: for an
 office visit `check_office_availability` runs, the first exact time it is sent is Monday at the hour the caller named (a window is fine only
 after a check answered `unknown`), `book_office_visit` runs only for a time a check returned (its `starts_at` or an alternative, compared to
 the minute), and neither tool is called again after it answered `unknown` or failed; for a visit to the caller neither tool runs; on all
 four a reply says booked, confirmed, all set or scheduled only when a booking answered `confirmed`, and then one does (`BOOKED`); Michael's
-recent job is named in a reply after the confirmation line (`recent_job_raised`). Each checks `booking_request`, not urgent, and its email.
+recent job is named in a reply after the confirmation line (`recent_job_raised`). Each checks `booking_request` and its email, and all but
+Michael's not urgent.
 `report.json` counts, per office case, the sequence of answers each session got (`office_answers`), so the path a run took is plain.
-Michael's opening line is the owner's and names a leak, which the urgent rule counts as urgent (and then asks no email); his next line
-says it is a small drip that can wait, and the gates are the email, the record flags and the promise flag, so a run shows how the
-two rules meet before the prompt wording changes. For the judges an English item shows `CALLER RECORD RECENT JOBS` when the
+Since v1 the scripts follow the owner's order: Sarah gives the day and time on her second line and her name on the third (after the
+check), then the email; Michael's lines are the owner's own ("Yes. Could someone come Monday?", with no "it can wait"), and his case does
+not check `urgent` (whether a roof "leaking again" is urgent is the situation's call; urgency only adds), while the request, the email,
+the record flags and the promise flag gate it. The known caller with no jobs still says the drip can wait, so it checks `urgent` false: a
+leak judged by the situation, not the word. The two urgent outcome cases ask for a visit ("please come", "please send someone"), so on
+English they are asked for an email too (the leak caller gives one, the gas caller declines) and gate `EMAIL_MISHANDLED`. For the judges an English item shows `CALLER RECORD RECENT JOBS` when the
 record has some, and each office-visit tool's call and result as `[OFFICE TIME CHECK RAN, ARGUMENTS: …]` / `[OFFICE TIME CHECK
 RESULT: …]` and `[OFFICE VISIT BOOKING RAN …]` / `[… RESULT …]`; English has its own wordings of `PROMISE` (relaying what those results
 answered, and a visit booked after a confirmed booking result, is not the flag), `RECORD_UNCONFIRMED` and `RECORD_INVENTED` (the record's
