@@ -506,7 +506,7 @@ No live reachability, deployed image/API equivalence, runtime redeployment, call
 
 `business_name` stays in the static greeting and Persona, with `our office` / `저희 회사` fallbacks. The value is data, never instructions, and the backend collapses whitespace, applies the length cap and omits an empty name. Dograh's renderer does not trim tenant values, so that normalization remains the backend contract.
 
-The English (US) greeting also names the owner, who can't get to the phone, with `owner_name` and the fallback `The team`, so a company with no saved name still hears a whole
+The English (US) greeting also names the owner, who can't get to the phone, with `owner_name` and the fallback `The team`, so a caller to a company with no saved name still hears a whole
 sentence; it keeps the AI disclosure and the recording notice, promises no callback and does not guess the owner's gender. The English Persona lists the
 name under `# Owner` (fallback `not set`) as data, like the business name: the agent may use it in place of "the owner" when it says who will get the
 message or call back, says "the owner" when none is set, and gives no other name for who will call back. Synchronize sends `owner_name` only for a
