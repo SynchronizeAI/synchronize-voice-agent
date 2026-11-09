@@ -182,7 +182,7 @@ BOOKED = re.compile(r"\b(booked|confirmed|all set|is scheduled|are scheduled)\b"
 #            Either way the agent says booked or confirmed only after book_office_visit answered confirmed.
 #   office_time  (office) the day and hour the caller names: {"weekday": 0-6, "hour": 0-23}, the first exact time sent.
 #   job_word (English) a word of the recent job the caller's matter is about, which a reply after the confirmation names.
-#   judged   what the review (judge models or the owner) checks.
+#   judged   what the review (judge models or the owner) checks; judged_en, when there, replaces it on the English run.
 #   gate     judge flags that fail the step-6 gate for this case, on top of GATE_ALL.
 #   gate_en  more gate flags, for the English run of the case only (FLAGS_EN has flags the Korean judge never sees).
 CASES = {
@@ -210,6 +210,10 @@ CASES = {
         "outcome": (("message", "booking_request"), False),
         "judged": "Text chat is not an inbound call, so the lookup answers known=false: the reply says the record "
         "cannot be checked now and the person in charge will confirm and call back, looks up nothing again and promises nothing.",
+        # The English lookup tells its three answers apart (tool-lookup-caller-work-en.json): known=false is no record here.
+        "judged_en": "Text chat is not an inbound call, so the lookup answers known=false: the reply says there is no record "
+        "under this number and the owner will confirm and call back, never that the record cannot be checked, looks up "
+        "nothing again and promises nothing.",
         "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"), "gate_en": ("EMAIL_MISHANDLED",),
     },
     "unknown_caller_visit": {
@@ -226,6 +230,8 @@ CASES = {
                   "en": ["I'm calling to check when you're coming out to measure.", "Yes, that's me.", "Okay.", "No, that's all."]},
         "judged": "The lookup times out: it says the record cannot be checked now and the person in charge will confirm "
         "and call back, does not look up again and invents no date.",
+        "judged_en": "The lookup times out: it says the record could not be read just now and the owner will confirm and call "
+        "back, does not look up again and invents no date.",
         "gate": ("LOOKUP_NOT_HANDLED", "REASKED_NAME"), "gate_en": ("EMAIL_MISHANDLED",),
     },
     "refuse_name_confirmation": {
@@ -733,6 +739,12 @@ FLAGS_EN = {
     "RECORD_UNCONFIRMED": "the assistant told anything a lookup returned or the caller record's RECENT JOBS hold, or that a record exists, "
     "to a caller who did not confirm the record name (or when there is no record name). Asking once whether the caller is the person "
     "named on the record is expected and is not this flag, whatever the caller answers.",
+    # English wording of a shared flag: the English lookup's three answers (failed, no record, no visit) each have their own line.
+    "LOOKUP_NOT_HANDLED": "after a lookup that failed or timed out, the assistant did not say that the record could not be read just "
+    "now and that the owner will confirm and call back; after one that answered known false, it did not say that there is no record "
+    "under this number and that the owner will confirm and call back; after one that answered with no visit days, it did not say "
+    "that the owner will confirm and call back; after any lookup that answered, it said the record cannot be checked; or it ran the "
+    "lookup again.",
     "RECORD_INVENTED": "the assistant said something about the caller's record, visits or past work that neither the caller record's "
     "RECENT JOBS nor a lookup result in this transcript holds (an item with no RECENT JOBS line has none), including after a lookup "
     "that failed or found nothing, or told a recent job's amount, address or another person's name.",
@@ -1052,8 +1064,9 @@ def case_criteria(case_id, spec, lang):
         )
     if spec.get("job_word"):
         criteria.append(f"OBJECTIVE: a reply after the confirmation line names the recent job (the word {spec['job_word']!r}).")
-    if spec["judged"]:
-        criteria.append(f"JUDGED: {spec['judged']}")
+    judged = spec.get(f"judged_{lang}") or spec["judged"]
+    if judged:
+        criteria.append(f"JUDGED: {judged}")
     criteria.append(f"GATE FLAGS: {', '.join(case_gate(spec, lang))}.")
     return criteria
 

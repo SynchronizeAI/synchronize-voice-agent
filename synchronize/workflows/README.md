@@ -99,7 +99,7 @@ model can set (`api/utils/template_renderer.py:192-196`), and the empty preset r
 runs 1.51's own `execute_http_tool` offline on both committed tools to show it, and go-live refuses a tool template without that body template. The tool posts
 to Synchronize's `/api/voice/tools/caller-work` with the same `X-Dograh-Secret` Custom Header credential and times out after 5000 ms. The answer holds only
 `known`, `name` and `upcoming_visits`: up to five distinct days of the caller's next visits, earliest first, each `{"date": "YYYY-MM-DD", "spoken": ...}`
-with `spoken` already in the company language's spoken form (`11월 10일 월요일`, `Monday, November 10`) in the workspace time zone, so the model
+with `spoken` already in the company language's spoken form (`11월 10일 월요일`, `Monday, November 16`) in the workspace time zone, so the model
 never works out a weekday. The English form still carries the day of the month as digits; the English Persona's speech rule says it as words
 ("November tenth"), as it does a day or time an office-visit tool gives. No count or due date of internal Tasks (A2): they are the staff's work, not the customer's
 appointments, and a receptionist tells a caller only their own next visits (Jobber's AI receptionist gives the next appointment, ServiceTitan's
